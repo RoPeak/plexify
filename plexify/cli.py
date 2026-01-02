@@ -32,6 +32,8 @@ from .util import (
     MovePlan,
     build_cache_key,
     iter_video_files,
+    json_dump,
+    json_load,
     make_search_query,
     movie_cache_key,
     normalize_title_for_similarity,
@@ -252,6 +254,37 @@ def _strip_outer_quotes(value: str) -> str:
     if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {'"', "'"}:
         return stripped[1:-1]
     return stripped
+
+
+def _wizard_prefs_path() -> Path:
+    return Path.home() / ".plexify" / "wizard.json"
+
+
+def _load_wizard_prefs() -> dict[str, dict[str, str]]:
+    path = _wizard_prefs_path()
+    data = json_load(path)
+    if not isinstance(data, dict):
+        return {}
+    cleaned: dict[str, dict[str, str]] = {}
+    for key, value in data.items():
+        if not isinstance(value, dict):
+            continue
+        cleaned[key] = {str(k): str(v) for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
+    return cleaned
+
+
+def _save_wizard_prefs(media_key: str, source: Path, library: Path) -> None:
+    prefs = _load_wizard_prefs()
+    prefs[media_key] = {"source": str(source), "library": str(library)}
+    json_dump(_wizard_prefs_path(), prefs)
+
+
+def _wizard_defaults(media_key: str) -> tuple[Path | None, Path | None]:
+    prefs = _load_wizard_prefs()
+    section = prefs.get(media_key, {})
+    source = Path(section["source"]) if "source" in section else None
+    library = Path(section["library"]) if "library" in section else None
+    return source, library
 
 
 _path_prompt_tip_shown = False
@@ -2618,17 +2651,40 @@ def music(
     verbose_plan: bool = typer.Option(False, "--verbose-plan", help="Print per-track plan output", is_flag=True),
 ) -> None:
     if source is None:
-        source_default = Path.cwd()
+        source_default, library_default = _wizard_defaults("music")
         while True:
-            source_text = _prompt_path("Source folder", str(source_default), directories_only=True)
+            source_text = _prompt_path(
+                "Source folder",
+                str(source_default) if source_default is not None else None,
+                directories_only=True,
+            )
+            while not source_text.strip():
+                console.print("Please enter a folder path.")
+                source_text = _prompt_path(
+                    "Source folder",
+                    str(source_default) if source_default is not None else None,
+                    directories_only=True,
+                )
             source = Path(source_text)
             if source.exists() and source.is_dir():
                 break
             console.print("That path does not exist or is not a folder. Please try again.")
     if library is None:
-        library_default = source.parent / "Library"
+        if source is not None and "library_default" not in locals():
+            _source_default, library_default = _wizard_defaults("music")
         while True:
-            library_text = _prompt_path("Library folder", str(library_default), directories_only=True)
+            library_text = _prompt_path(
+                "Library folder",
+                str(library_default) if library_default is not None else None,
+                directories_only=True,
+            )
+            while not library_text.strip():
+                console.print("Please enter a folder path.")
+                library_text = _prompt_path(
+                    "Library folder",
+                    str(library_default) if library_default is not None else None,
+                    directories_only=True,
+                )
             library = Path(library_text)
             if library.exists() and library.is_file():
                 console.print("That path is a file. Please choose a folder path.")
@@ -2659,6 +2715,7 @@ def music(
     except PathOverlapError as exc:
         _print_overlap_error(exc)
         raise typer.Exit(code=2)
+    _save_wizard_prefs("music", source, library)
 
     if not apply:
         console.print("DRY-RUN: no files will be moved/copied.")
@@ -2934,18 +2991,51 @@ def _prompt_non_overlapping_paths(
     *,
     label_source: str,
     label_library: str,
-    source_default: Path,
-    library_default: Path,
+    source_default: Path | None,
+    library_default: Path | None,
 ) -> tuple[Path, Path]:
-    source_text = _prompt_path(f"{label_source} folder", str(source_default), directories_only=True)
+    source_text = _prompt_path(
+        f"{label_source} folder",
+        str(source_default) if source_default is not None else None,
+        directories_only=True,
+    )
+    while not source_text.strip():
+        console.print("Please enter a folder path.")
+        source_text = _prompt_path(
+            f"{label_source} folder",
+            str(source_default) if source_default is not None else None,
+            directories_only=True,
+        )
     source = Path(source_text)
     while not source.exists() or not source.is_dir():
         console.print("That path does not exist or is not a folder. Please try again.")
-        source_text = _prompt_path(f"{label_source} folder", str(source_default), directories_only=True)
+        source_text = _prompt_path(
+            f"{label_source} folder",
+            str(source_default) if source_default is not None else None,
+            directories_only=True,
+        )
+        while not source_text.strip():
+            console.print("Please enter a folder path.")
+            source_text = _prompt_path(
+                f"{label_source} folder",
+                str(source_default) if source_default is not None else None,
+                directories_only=True,
+            )
         source = Path(source_text)
 
     while True:
-        library_text = _prompt_path(f"{label_library} folder", str(library_default), directories_only=True)
+        library_text = _prompt_path(
+            f"{label_library} folder",
+            str(library_default) if library_default is not None else None,
+            directories_only=True,
+        )
+        while not library_text.strip():
+            console.print("Please enter a folder path.")
+            library_text = _prompt_path(
+                f"{label_library} folder",
+                str(library_default) if library_default is not None else None,
+                directories_only=True,
+            )
         library = Path(library_text)
         if library.exists() and library.is_file():
             console.print("That path is a file. Please choose a folder path.")
@@ -2964,11 +3054,33 @@ def _prompt_non_overlapping_paths(
             console.print(f"Suggested {label_library}: {suggestion}")
             library_default = suggestion
         if _confirm(f"Edit {label_source.lower()} instead? [y/N]", False, None, show_default=False):
-            source_text = _prompt_path(f"{label_source} folder", str(source_default), directories_only=True)
+            source_text = _prompt_path(
+                f"{label_source} folder",
+                str(source_default) if source_default is not None else None,
+                directories_only=True,
+            )
+            while not source_text.strip():
+                console.print("Please enter a folder path.")
+                source_text = _prompt_path(
+                    f"{label_source} folder",
+                    str(source_default) if source_default is not None else None,
+                    directories_only=True,
+                )
             source = Path(source_text)
             while not source.exists() or not source.is_dir():
                 console.print("That path does not exist or is not a folder. Please try again.")
-                source_text = _prompt_path(f"{label_source} folder", str(source_default), directories_only=True)
+                source_text = _prompt_path(
+                    f"{label_source} folder",
+                    str(source_default) if source_default is not None else None,
+                    directories_only=True,
+                )
+                while not source_text.strip():
+                    console.print("Please enter a folder path.")
+                    source_text = _prompt_path(
+                        f"{label_source} folder",
+                        str(source_default) if source_default is not None else None,
+                        directories_only=True,
+                    )
                 source = Path(source_text)
 
 
@@ -2978,14 +3090,14 @@ def _wizard_video() -> None:
     if COMPLETION_ENABLED:
         console.print("Tip: run python -m plexify.cli --install-completion to enable shell autocompletion.")
 
-    incoming_default = Path.cwd()
-    library_default = incoming_default.parent / "Library"
+    incoming_default, library_default = _wizard_defaults("video")
     incoming, library = _prompt_non_overlapping_paths(
         label_source="Incoming",
         label_library="Library",
         source_default=incoming_default,
         library_default=library_default,
     )
+    _save_wizard_prefs("video", incoming, library)
 
     audio_exts = {ext.strip().lstrip(".") for ext in DEFAULT_MUSIC_EXTENSIONS.split(",") if ext.strip()}
     video_exts = {ext.strip().lstrip(".") for ext in DEFAULT_EXTENSIONS_LIST}
@@ -3100,14 +3212,18 @@ def _wizard_music(source_override: Path | None = None, library_override: Path | 
     if COMPLETION_ENABLED:
         console.print("Tip: run python -m plexify.cli --install-completion to enable shell autocompletion.")
 
-    source_default = source_override or Path.cwd()
-    library_default = library_override or source_default.parent / "Library"
+    if source_override or library_override:
+        source_default = source_override
+        library_default = library_override
+    else:
+        source_default, library_default = _wizard_defaults("music")
     source, library = _prompt_non_overlapping_paths(
         label_source="Source",
         label_library="Library",
         source_default=source_default,
         library_default=library_default,
     )
+    _save_wizard_prefs("music", source, library)
 
     audio_exts = {ext.strip().lstrip(".") for ext in DEFAULT_MUSIC_EXTENSIONS.split(",") if ext.strip()}
     video_exts = {ext.strip().lstrip(".") for ext in DEFAULT_EXTENSIONS_LIST}

@@ -25,6 +25,7 @@ from .planner import plan_movie, plan_tv_show
 from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_overlapping
 from .report import write_report
 from .sources import musicbrainz, tvmaze, wikidata
+from .tv_episode_cache import EpisodeCache
 from .undo import undo_report
 from .ui import format_path, rich_escape
 from .util import (
@@ -565,7 +566,8 @@ def _print_candidates(
             season = item.season if item.season is not None else "-"
             episode = item.episode if item.episode is not None else "-"
             row.append(f"{season}/{episode}")
-            row.append(rich_escape(item.episode_title) if item.episode_title else "-")
+            episode_title = cand.metadata.get("episode_title") or item.episode_title
+            row.append(rich_escape(episode_title) if episode_title else "-")
         if media_type == "movie" and show_people:
             enrichment = cand.enrichment or {}
             row.append(_format_value(enrichment.get("director")))
@@ -752,6 +754,7 @@ def _maybe_fetch_episode_title(
     item: InferredItem,
     candidate: Candidate,
     session: requests.Session,
+    episode_cache: EpisodeCache,
     *,
     bump_confidence: bool,
 ) -> None:
@@ -764,7 +767,7 @@ def _maybe_fetch_episode_title(
     show_id = candidate.metadata.get("id")
     if not show_id:
         return
-    episodes = tvmaze.fetch_episodes(int(show_id), session=session)
+    episodes = episode_cache.get_episodes(int(show_id), session=session)
     episode_title = None
     for ep in episodes:
         if ep.season == item.season and ep.number == item.episode:
@@ -779,11 +782,12 @@ def _resolve_episode_from_title(
     item: InferredItem,
     show_id: int | None,
     session: requests.Session,
+    episode_cache: EpisodeCache,
     progress: Progress | None,
 ) -> tuple[int, int, str | None] | None:
     if not item.episode_title or show_id is None:
         return None
-    episodes = tvmaze.fetch_episodes(int(show_id), session=session)
+    episodes = episode_cache.get_episodes(int(show_id), session=session)
     if not episodes:
         return None
     scored: list[tuple[float, tvmaze.TVMazeEpisode]] = []
@@ -1016,13 +1020,7 @@ def _cache_entry_compatible(inferred_year: int | None, cached_year: int | None) 
 def _reusable_movie_cache_safe(item: InferredItem) -> bool:
     if item.year is not None:
         return True
-    title_norm = normalize_title_for_similarity(item.title)
-    stem_norm = normalize_title_for_similarity(item.path.stem)
-    if not title_norm or not stem_norm:
-        return False
-    title_tokens = set(title_norm.split())
-    stem_tokens = set(stem_norm.split())
-    return stem_tokens.issubset(title_tokens)
+    return False
 
 
 def _auto_acceptable(
@@ -1493,6 +1491,7 @@ def _plan_items(
     planned: dict[str, int] = {}
     collisions = 0
     history: list[HistoryEntry] = []
+    episode_cache = EpisodeCache()
 
     with Progress(
         TextColumn("{task.completed}/{task.total} - {task.description}"),
@@ -1540,6 +1539,7 @@ def _plan_items(
                     min_confidence=min_confidence,
                     session_tv=session_tv,
                     session_wd=session_wd,
+                    episode_cache=episode_cache,
                     progress=progress,
                     show_cache=show_cache,
                     stats=stats,
@@ -1674,6 +1674,7 @@ def _process_item(
     min_confidence: float,
     session_tv: requests.Session,
     session_wd: requests.Session,
+    episode_cache: EpisodeCache,
     progress: Progress | None,
     show_cache: bool,
     stats: PlanStats | None = None,
@@ -1822,7 +1823,7 @@ def _process_item(
                 if empty_choice == "b":
                     raise BackRequested
                 continue
-            _maybe_fetch_episode_title(item, candidates[0], session_tv, bump_confidence=True)
+            _maybe_fetch_episode_title(item, candidates[0], session_tv, episode_cache, bump_confidence=True)
             if auto_accept and _auto_acceptable(
                 candidates,
                 min_confidence,
@@ -1832,10 +1833,9 @@ def _process_item(
             ):
                 year_text = str(candidates[0].year) if candidates[0].year else "Unknown"
                 _safe_print(f"Auto-selected: {candidates[0].title} ({year_text}) [{candidates[0].confidence:.2f}]", progress)
-                if not interactive:
-                    selected = candidates[0]
-                    outcome = "auto"
-                    break
+                selected = candidates[0]
+                outcome = "auto"
+                break
             if not interactive:
                 _record_stat(stats, "skipped")
                 return None, False
@@ -1965,14 +1965,14 @@ def _process_item(
             outcome = "confirmed"
         _record_stat(stats, outcome)
         _print_choice(selected, progress)
-        _maybe_fetch_episode_title(item, selected, session_tv, bump_confidence=False)
+        _maybe_fetch_episode_title(item, selected, session_tv, episode_cache, bump_confidence=False)
         metadata = selected.metadata
         confirmed_by_user = outcome in {"confirmed", "manual"}
         season = metadata.get("season") or item.season
         episode = metadata.get("episode") or item.episode
         episode_title = metadata.get("episode_title") or item.episode_title
         if interactive and (season is None or episode is None) and item.episode_title:
-            resolved = _resolve_episode_from_title(item, metadata.get("id"), session_tv, progress)
+            resolved = _resolve_episode_from_title(item, metadata.get("id"), session_tv, episode_cache, progress)
             if resolved:
                 season, episode, resolved_title = resolved
                 episode_title = resolved_title or episode_title
@@ -2236,10 +2236,9 @@ def _process_item(
         ):
             year_text = str(candidates[0].year) if candidates[0].year else "Unknown"
             _safe_print(f"Auto-selected: {candidates[0].title} ({year_text}) [{candidates[0].confidence:.2f}]", progress)
-            if not interactive:
-                selected = candidates[0]
-                outcome = "auto"
-                break
+            selected = candidates[0]
+            outcome = "auto"
+            break
         if not interactive:
             _record_stat(stats, "skipped")
             return None, False

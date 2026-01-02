@@ -70,6 +70,18 @@ def test_music_command_rejects_overlap(tmp_path: Path) -> None:
     assert "same folder" in result.output.lower()
 
 
+def test_organise_command_rejects_overlap(tmp_path: Path) -> None:
+    runner = CliRunner()
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    result = runner.invoke(
+        cli.app,
+        ["organise", "--incoming", str(incoming), "--library", str(incoming), "--mode", "dry-run"],
+    )
+    assert result.exit_code == 2
+    assert "same folder" in result.output.lower() or "inside" in result.output.lower()
+
+
 def test_prompt_path_fallback_message(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "_path_prompt_fallback_tip_shown", False)
     monkeypatch.setattr(cli, "_path_prompt_tip_shown", False)

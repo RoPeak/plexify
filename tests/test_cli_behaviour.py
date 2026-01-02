@@ -6,6 +6,7 @@ import requests
 
 from plexify import cli
 from plexify.cache import Cache
+from plexify.tv_episode_cache import EpisodeCache
 from plexify.util import movie_cache_key
 from plexify.infer import InferredItem
 from plexify.sources import tvmaze
@@ -240,6 +241,7 @@ def test_tv_episode_fetch_called_once_for_selected_candidate(monkeypatch, tmp_pa
         min_confidence=0.55,
         session_tv=requests.Session(),
         session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
         progress=None,
         show_cache=False,
         incoming_root=incoming,
@@ -302,3 +304,81 @@ def test_reusable_movie_cache_ignored_when_stem_has_extra_tokens(monkeypatch, tm
         cache_key="movie|path|twilight-2-new-moon|unknown",
     )
     assert page.cache_hit is False
+
+
+def test_reusable_movie_cache_disabled_without_year(monkeypatch, tmp_path: Path) -> None:
+    def _fake_search(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(cli.wikidata, "search", _fake_search)
+
+    cache = Cache(tmp_path / "cache.json")
+    cache.set_movie(
+        movie_cache_key("Twilight", None),
+        {"qid": "Q1", "title": "Twilight", "year": 2008, "confirmed_by_user": True, "manual": False},
+    )
+    item = InferredItem(
+        path=tmp_path / "Twilight.mkv",
+        media_type="movie",
+        title="Twilight",
+        year=None,
+        episode_title=None,
+    )
+    page = cli._movie_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        cache_key="movie|path|twilight|unknown",
+    )
+    assert page.cache_hit is False
+
+
+def test_auto_accept_skips_prompt_in_interactive(monkeypatch, tmp_path: Path) -> None:
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Movie",
+            year=2001,
+            source="Wikidata",
+            confidence=1.0,
+            metadata={"qid": "Q1", "title": "Movie", "year": 2001},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    def _fail_prompt(*_args, **_kwargs):
+        raise AssertionError("Prompt should not be called for auto-accept.")
+
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli.Prompt, "ask", _fail_prompt)
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Movie.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="movie", title="Movie", year=2001, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None

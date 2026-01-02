@@ -219,9 +219,10 @@ def infer_item(path: Path) -> InferredItem:
     if path.stem.isdigit() and 1 <= len(path.stem) <= 3 and _parent_has_multiple_videos(path):
         media_type = "tv"
         episode = int(path.stem)
-        season = season or 1
+        season = season or _extract_season_from_parts(path) or 1
         explicit_episode = True
-        title_override, year_override = _clean_parent_show_name(path.parent.name)
+        show_folder = _parent_show_name(path) or path.parent.name
+        title_override, year_override = _clean_parent_show_name(show_folder)
         if title_override:
             has_tv_context = True
 

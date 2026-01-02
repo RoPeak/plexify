@@ -646,11 +646,13 @@ def _tv_candidates(
             year_text = f" ({year})" if year else ""
             _safe_print("Cache hit.", progress)
             if cached_key == reusable_show_key:
+                _safe_print("Cache type: REUSABLE", progress)
                 _safe_print(
                     f"Using cached show match: {name}{year_text} [TVMaze]. Using inferred S/E for this file.",
                     progress,
                 )
             else:
+                _safe_print("Cache type: FILE-SPECIFIC", progress)
                 _safe_print(
                     f"Using cached match for: {rich_escape(item.path.name)} -> {rich_escape(name)}{year_text} [TVMaze]",
                     progress,
@@ -805,7 +807,14 @@ def _movie_candidates(
 ) -> CandidatePage:
     path_key = cache_key or item.title
     reusable_key = movie_cache_key(item.title, item.year)
-    cached = cache.get_movie(reusable_key) or cache.get_movie(path_key)
+    cached = None
+    cached_key = None
+    if _reusable_movie_cache_safe(item):
+        cached = cache.get_movie(reusable_key)
+        cached_key = reusable_key if cached else None
+    if cached is None:
+        cached = cache.get_movie(path_key)
+        cached_key = path_key if cached else None
     results: list[Candidate] = []
     elapsed = 0.0
     fetch_time = 0.0
@@ -821,6 +830,10 @@ def _movie_candidates(
             year = cached.get("year")
             year_text = f" ({year})" if year else ""
             _safe_print("Cache hit.", progress)
+            if cached_key == reusable_key:
+                _safe_print("Cache type: REUSABLE", progress)
+            else:
+                _safe_print("Cache type: FILE-SPECIFIC", progress)
             _safe_print(
                 f"Using cached match for: {rich_escape(item.path.name)} -> {rich_escape(title)}{year_text} [Wikidata]",
                 progress,
@@ -967,6 +980,18 @@ def _cache_entry_compatible(inferred_year: int | None, cached_year: int | None) 
     return _year_distance(inferred_year, cached_year) <= 2
 
 
+def _reusable_movie_cache_safe(item: InferredItem) -> bool:
+    if item.year is not None:
+        return True
+    title_norm = normalize_title_for_similarity(item.title)
+    stem_norm = normalize_title_for_similarity(item.path.stem)
+    if not title_norm or not stem_norm:
+        return False
+    title_tokens = set(title_norm.split())
+    stem_tokens = set(stem_norm.split())
+    return stem_tokens.issubset(title_tokens)
+
+
 def _auto_acceptable(
     candidates: list[Candidate],
     min_confidence: float,
@@ -1012,10 +1037,19 @@ def _resolve_destination(
     return destination, changed
 
 
-def _file_panel(index: int, total: int, item: InferredItem) -> Panel:
+def _file_panel(index: int, total: int, item: InferredItem, incoming_root: Path | None) -> Panel:
     title_line = f"File {index}/{total} - {item.media_type.upper()} - {rich_escape(item.path.name)}"
     year_text = str(item.year) if item.year else "Unknown"
-    lines = [f"Detected: Title={rich_escape(item.title)}, Year={year_text}"]
+    rel_path = item.path
+    if incoming_root is not None:
+        try:
+            rel_path = item.path.relative_to(incoming_root)
+        except ValueError:
+            rel_path = item.path
+    lines = [
+        f"Path: {format_path(rel_path)}",
+        f"Detected: Title={rich_escape(item.title)}, Year={year_text}",
+    ]
     if item.media_type == "tv":
         season = item.season if item.season is not None else "-"
         episode = item.episode if item.episode is not None else "-"
@@ -1258,9 +1292,8 @@ def _print_music_album_summary(
 
 
 def _print_plan(plan: MovePlan, progress: Progress | None = None) -> None:
-    _safe_print("PLAN", progress)
-    _safe_print(f"FROM: {format_path(plan.source)}", progress)
-    _safe_print(f"TO:   {format_path(plan.destination)}", progress)
+    lines = [f"FROM: {format_path(plan.source)}", f"TO:   {format_path(plan.destination)}"]
+    _safe_print(Panel("\n".join(lines), title="Plan", style="cyan", expand=False), progress)
 
 
 def _print_choice(selected: Candidate, progress: Progress | None = None) -> None:
@@ -1428,7 +1461,10 @@ def _plan_items(
     collisions = 0
     history: list[HistoryEntry] = []
 
-    with Progress(TextColumn("{task.completed}/{task.total} - {task.description}")) as progress:
+    with Progress(
+        TextColumn("{task.completed}/{task.total} - {task.description}"),
+        disable=not sys.stdout.isatty(),
+    ) as progress:
         task = progress.add_task("Planning files...", total=len(files))
         session_tv = tvmaze.create_session()
         session_wd = wikidata.create_session()
@@ -1436,15 +1472,15 @@ def _plan_items(
         index = 0
         while index < len(files):
             path = files[index]
-            progress.update(task, description=f"Planning: {rich_escape(path.name)}")
-            progress.advance(task, 1)
+            progress.update(task, completed=min(index + 1, total), description=f"Planning: {rich_escape(path.name)}")
             try:
                 item = infer_item(path)
                 if media_type_filter and item.media_type != media_type_filter:
                     index += 1
                     continue
                 _safe_print("", progress)
-                _safe_print(_file_panel(index + 1, total, item), progress)
+                _console_for(progress).rule()
+                _safe_print(_file_panel(index + 1, total, item, incoming), progress)
                 cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
                 cache_snapshots: list[CacheSnapshot] = []
                 if item.media_type == "tv":
@@ -1536,6 +1572,12 @@ def _plan_items(
                 stats.elapsed = entry.stats_snapshot.elapsed
                 del errors[entry.errors_len:]
                 index = entry.index
+                back_path = files[index]
+                progress.update(
+                    task,
+                    completed=min(index + 1, total),
+                    description=f"Planning: {rich_escape(back_path.name)}",
+                )
                 _safe_print("Rewound to previous file.", progress)
             except Exception as exc:  # noqa: BLE001
                 stats.errors += 1
@@ -2351,7 +2393,7 @@ def _process_item(
             "source": selected.source,
         }
     cache.set_movie(cache_key, entry)
-    if reusable_movie_key:
+    if reusable_movie_key and _reusable_movie_cache_safe(item):
         cache.set_movie(reusable_movie_key, entry)
     cache.save()
 

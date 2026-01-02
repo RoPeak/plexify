@@ -69,6 +69,27 @@ def test_infer_numbered_episode_folder(tmp_path: Path) -> None:
     assert item.episode == 1
 
 
+def test_infer_numbered_episode_in_season_folder(tmp_path: Path) -> None:
+    season_dir = tmp_path / "Show" / "Season 2"
+    season_dir.mkdir(parents=True)
+    first = season_dir / "1.mkv"
+    second = season_dir / "2.mkv"
+    first.write_text("one", encoding="utf-8")
+    second.write_text("two", encoding="utf-8")
+
+    item = infer_item(first)
+    assert item.media_type == "tv"
+    assert item.title == "Show"
+    assert item.season == 2
+    assert item.episode == 1
+
+    item = infer_item(second)
+    assert item.media_type == "tv"
+    assert item.title == "Show"
+    assert item.season == 2
+    assert item.episode == 2
+
+
 def test_infer_tv_parent_name_fallback(tmp_path: Path) -> None:
     folder = tmp_path / "Some Show"
     folder.mkdir(parents=True)

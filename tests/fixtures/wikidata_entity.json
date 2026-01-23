@@ -1,0 +1,17 @@
+{
+  "entities": {
+    "Q8337": {
+      "labels": {
+        "en": {"value": "The Matrix"}
+      },
+      "claims": {
+        "P31": [
+          {"mainsnak": {"datavalue": {"value": {"id": "Q11424"}}}}
+        ],
+        "P577": [
+          {"mainsnak": {"datavalue": {"value": {"time": "+1999-03-31T00:00:00Z"}}}}
+        ]
+      }
+    }
+  }
+}

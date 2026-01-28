@@ -1,97 +1,61 @@
 # Plexify
 
-Plexify is an interactive CLI that reorganises and renames movie + TV files into Plex-compatible structure with human confirmation at each step.
+Plexify is a small CLI that organises movie and TV files into a Plex-friendly
+folder structure. It performs a dry run by default and asks for confirmation
+when metadata is uncertain.
 
-Features:
+## Features
 
-- Safe by default (dry-run)
-- Apply mode with move/copy
-- Undo support (best-effort)
-- Metadata from free, no-key sources (TVMaze, Wikidata)
-- Interactive confirmation with candidate lists
+- Dry-run by default
+- Move or copy on apply
+- TVMaze and Wikidata lookups (no API keys)
+- Undo from the last report
+- Interactive selection with candidate lists
 
-## Install
+## Requirements
+
+- Python 3.10+
+- Windows tested; macOS/Linux should work with the same commands
+
+## Installation
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-macOS/Linux:
+## Usage
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+Help:
+
+```powershell
+python -m plexify.cli --help
+python -m plexify.cli organise --help
 ```
 
-## Quickstart
+Dry run:
 
-Dry run (default):
-
-```bash
-python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" \
-  --extensions ".mkv,.mp4,.avi,.m4v,.mov,.ts"
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --mode dry-run
 ```
 
-Print the planned destination tree:
+Apply with copy:
 
-```bash
-python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --print-tree
-```
-
-Run without prompts (uses cache or high-confidence matches only):
-
-```bash
-python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --no-interactive --yes
-```
-
-Apply (move by default):
-
-```bash
-python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --mode apply
-```
-
-Copy instead of move:
-
-```bash
+```powershell
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --mode apply --copy
 ```
 
-Undo the last run:
+Set a Wikimedia user agent (recommended):
 
-```bash
-python -m plexify.cli undo --report "D:\Media\.plexify\reports\2026-01-21_11-45-33.json"
+```powershell
+$env:PLEXIFY_USER_AGENT="plexify/0.1 (contact: you@example.com)"
 ```
 
-## How it works
+## Safety
 
-- Scans incoming folders for video files
-- Infers movie vs TV episode
-- Searches TVMaze (TV) or Wikidata (movies)
-- Prompts for confirmation
-- Builds Plex-compatible destinations
+Run in dry-run mode first. If you need to apply changes, copy before moving.
 
-Plex layout:
+## Notes
 
-```
-<LIBRARY>/Movies/<Movie Title> (<Year>)/<Movie Title> (<Year>).ext
-<LIBRARY>/TV Shows/<Show Name> (<Year>)/Season <NN>/<Show Name> (<Year>) - sNNeMM - <Episode Title>.ext
-```
-
-## Troubleshooting
-
-- If metadata is ambiguous, use `m` (manual) or `s` (new search) during prompts.
-- If a year is missing for a movie, you will be prompted to enter it or accept "Unknown Year".
-- Use `--no-interactive` for batch runs (still requires confidence or cache).
-
-## Recommended structure
-
-You can keep an `_Incoming` folder inside your library root:
-
-```
-<LIBRARY>/_Incoming
-```
-
-This is optional; any incoming folder works.
+Click is pinned to 8.1.7 for Typer compatibility.

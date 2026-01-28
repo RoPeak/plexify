@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -7,6 +8,16 @@ from typing import Any
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+
+def _user_agent() -> str:
+    # Wikimedia APIs strongly prefer an informative UA; you can override via env var
+    # E.g. `set PLEXIFY_USER_AGENT="plexify/0.1 (contact: your@email)"`
+    return (
+        os.getenv("PLEXIFY_USER_AGENT")
+        or os.getenv("WIKIMEDIA_USER_AGENT")
+        or "plexify/0.1 (set PLEXIFY_USER_AGENT to include contact info)"
+    )
 
 
 @dataclass(frozen=True)
@@ -26,6 +37,15 @@ class WikidataFilm:
 
 def _session() -> requests.Session:
     session = requests.Session()
+    ua = _user_agent()
+    session.headers.update(
+        {
+            "User-Agent": ua,
+            # Some Wikimedia services accept/expect Api-User-Agent too
+            "Api-User-Agent": ua,
+            "Accept": "application/json",
+        }
+    )
     retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
     session.mount("https://", HTTPAdapter(max_retries=retries))
     return session
@@ -100,7 +120,7 @@ def search(query: str, session: requests.Session | None = None) -> list[Wikidata
             "limit": 10,
             "type": "item",
         },
-        timeout=10,
+        timeout=(5, 20),
     )
     resp.raise_for_status()
     _rate_limit()
@@ -109,7 +129,7 @@ def search(query: str, session: requests.Session | None = None) -> list[Wikidata
 
 def fetch_entity(qid: str, session: requests.Session | None = None) -> WikidataFilm:
     session = session or _session()
-    resp = session.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json", timeout=10)
+    resp = session.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json", timeout=(5, 20))
     resp.raise_for_status()
     _rate_limit()
     return parse_entity(qid, resp.json())

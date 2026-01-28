@@ -1,8 +1,7 @@
-from __future__ import annotations
-
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
 import typer
@@ -35,6 +34,30 @@ class Candidate:
     metadata: dict[str, Any]
 
 
+def _pause_progress(progress: Progress | None) -> bool:
+    if progress is not None and getattr(progress, "live", None):
+        progress.stop()
+        return True
+    return False
+
+
+def _resume_progress(progress: Progress | None, was_running: bool) -> None:
+    if progress is not None and was_running:
+        progress.start()
+
+
+def _prompt_text(prompt: str, default: str, progress: Progress | None) -> str:
+    was_running = _pause_progress(progress)
+    try:
+        return Prompt.ask(prompt, default=default)
+    finally:
+        _resume_progress(progress, was_running)
+
+
+def _prompt_choice(prompt: str, default: str, progress: Progress | None) -> str:
+    return _prompt_text(prompt, default, progress).strip().lower()
+
+
 def _confidence_score(title_guess: str, title_actual: str, year_guess: int | None, year_actual: int | None) -> float:
     base = fuzz.WRatio(title_guess, title_actual) / 100.0
     if year_guess and year_actual and year_guess == year_actual:
@@ -55,33 +78,27 @@ def _print_candidates(candidates: list[Candidate]) -> None:
     console.print(table)
 
 
-def _select_candidate(candidates: list[Candidate]) -> Candidate | None | str:
+def _select_candidate(candidates: list[Candidate], progress: Progress | None) -> Candidate | None | str:
     if not candidates:
         return None
-    current = 0
-    rejections = 0
     while True:
         _print_candidates(candidates)
-        choice = console.input("Select [Enter=1, number, n, s, m, q]: ").strip().lower()
-        if choice == "":
-            return candidates[current]
+        choice = _prompt_choice(
+            "Select: [Enter]=1, [1-9]=choose, s=search, m=manual, k=skip, q=quit >",
+            "1",
+            progress,
+        )
+        if choice == "1":
+            return candidates[0]
         if choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(candidates):
                 return candidates[idx]
             console.print("Invalid selection.")
             continue
-        if choice == "n":
-            current = (current + 1) % len(candidates)
-            rejections += 1
-        elif choice in {"s", "m", "q"}:
+        if choice in {"s", "m", "k", "q"}:
             return choice
-        else:
-            console.print("Invalid choice.")
-        if rejections >= 5:
-            fallback = console.input("Couldn't confirm confidently. Choose: s (new search), m (manual), q (skip): ").strip().lower()
-            if fallback in {"s", "m", "q"}:
-                return fallback
+        console.print("Invalid choice.")
 
 
 def _tv_candidates(item: InferredItem, session: requests.Session, cache: Cache) -> list[Candidate]:
@@ -99,8 +116,13 @@ def _tv_candidates(item: InferredItem, session: requests.Session, cache: Cache) 
 
 def _tv_candidate_from_show(item: InferredItem, show: tvmaze.TVMazeShow, session: requests.Session) -> Candidate:
     year = None
-    if show.premiered:
-        year = int(show.premiered.split("-")[0])
+    premiered = show.premiered
+    if isinstance(premiered, int):
+        year = premiered
+    elif isinstance(premiered, str):
+        match = re.match(r"(\d{4})", premiered)
+        if match:
+            year = int(match.group(1))
     confidence = _confidence_score(item.title, show.name, None, None)
     metadata: dict[str, Any] = {"id": show.id, "name": show.name, "year": year}
 
@@ -139,12 +161,12 @@ def _movie_candidate_from_film(item: InferredItem, film: wikidata.WikidataFilm) 
     return Candidate(title=film.title, year=film.year, source="Wikidata", confidence=confidence, metadata=metadata)
 
 
-def _prompt_manual_tv(item: InferredItem) -> Candidate:
-    show_name = Prompt.ask("Show name", default=item.title)
-    year_text = Prompt.ask("Show year", default=str(item.year) if item.year else "")
-    season_text = Prompt.ask("Season", default=str(item.season) if item.season else "1")
-    episode_text = Prompt.ask("Episode", default=str(item.episode) if item.episode else "1")
-    episode_title = Prompt.ask("Episode title", default="")
+def _prompt_manual_tv(item: InferredItem, progress: Progress | None) -> Candidate:
+    show_name = _prompt_text("Show name", item.title, progress)
+    year_text = _prompt_text("Show year", str(item.year) if item.year else "", progress)
+    season_text = _prompt_text("Season", str(item.season) if item.season else "1", progress)
+    episode_text = _prompt_text("Episode", str(item.episode) if item.episode else "1", progress)
+    episode_title = _prompt_text("Episode title", "", progress)
     year = int(year_text) if year_text else None
     season = int(season_text)
     episode = int(episode_text)
@@ -160,9 +182,9 @@ def _prompt_manual_tv(item: InferredItem) -> Candidate:
     return Candidate(title=show_name, year=year, source="Manual", confidence=1.0, metadata=metadata)
 
 
-def _prompt_manual_movie(item: InferredItem) -> Candidate:
-    title = Prompt.ask("Movie title", default=item.title)
-    year_text = Prompt.ask("Movie year", default=str(item.year) if item.year else "")
+def _prompt_manual_movie(item: InferredItem, progress: Progress | None) -> Candidate:
+    title = _prompt_text("Movie title", item.title, progress)
+    year_text = _prompt_text("Movie year", str(item.year) if item.year else "", progress)
     year = int(year_text) if year_text else None
     metadata = {"qid": None, "title": title, "year": year, "manual": True}
     return Candidate(title=title, year=year, source="Manual", confidence=1.0, metadata=metadata)
@@ -172,6 +194,30 @@ def _print_plan(plan: MovePlan) -> None:
     console.print("PLAN")
     console.print(f"FROM: {plan.source}")
     console.print(f"TO:   {plan.destination}")
+
+
+def _print_choice(selected: Candidate) -> None:
+    year_text = str(selected.year) if selected.year else "Unknown"
+    console.print(f"Chosen: {selected.title} ({year_text}) from {selected.source}")
+
+
+def _fetch_with_retry(
+    label: str,
+    fetch_fn: Callable[[], Any],
+    interactive: bool,
+    progress: Progress | None,
+) -> Any:
+    while True:
+        try:
+            return fetch_fn()
+        except requests.RequestException as exc:
+            console.print(f"{label} request failed: {exc.__class__.__name__}")
+            if not interactive:
+                raise
+            retry = _prompt_choice("Retry? (y/n)", "y", progress)
+            if retry in {"y", "yes"}:
+                continue
+            return None
 
 
 def _build_tree(paths: list[Path]) -> Tree:
@@ -202,53 +248,115 @@ def _process_item(
     min_confidence: float,
     session_tv: requests.Session,
     session_wd: requests.Session,
+    progress: Progress | None,
 ) -> MovePlan | None:
     console.print(f"Detected: {item.media_type.upper()} | Title guess: {item.title}")
     if item.media_type == "tv":
         console.print(f"Season/Episode guess: {item.season}/{item.episode}")
     if item.media_type == "tv":
-        candidates = _tv_candidates(item, session_tv, cache)
+        candidates = _fetch_with_retry(
+            "TVMaze",
+            lambda: _tv_candidates(item, session_tv, cache),
+            interactive,
+            progress,
+        )
+        if candidates is None:
+            return None
         selected = None
         while True:
             if not candidates:
+                if interactive:
+                    console.print(f"No candidates found for {item.title}.")
+                    empty_choice = _prompt_choice("Choose: s (new search), m (manual), k (skip), q (quit): ", "k", progress)
+                    if empty_choice == "s":
+                        query = _prompt_text("Search query", item.title, progress)
+                        item = InferredItem(
+                            path=item.path,
+                            media_type=item.media_type,
+                            title=query,
+                            year=item.year,
+                            season=item.season,
+                            episode=item.episode,
+                        )
+                        candidates = _fetch_with_retry(
+                            "TVMaze",
+                            lambda: _tv_candidates(item, session_tv, cache),
+                            interactive,
+                            progress,
+                        )
+                        if candidates is None:
+                            return None
+                        continue
+                    if empty_choice == "m":
+                        selected = _prompt_manual_tv(item, progress)
+                        break
+                    if empty_choice == "k":
+                        return None
+                    if empty_choice == "q":
+                        raise typer.Exit(code=0)
+                    console.print("Invalid choice.")
+                    continue
                 selected = None
                 break
             if candidates[0].confidence < min_confidence and interactive:
                 console.print("Top confidence below minimum threshold.")
-                low_choice = console.input("Choose: s (new search), m (manual), q (skip), Enter (review list): ").strip().lower()
-                if low_choice in {"s", "m", "q"}:
+                low_choice = _prompt_choice(
+                    "Choose: s (new search), m (manual), k (skip), q (quit), Enter (review list): ",
+                    "",
+                    progress,
+                )
+                if low_choice in {"s", "m", "k", "q"}:
                     if low_choice == "s":
-                        query = Prompt.ask("Search query", default=item.title)
+                        query = _prompt_text("Search query", item.title, progress)
                         item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year, season=item.season, episode=item.episode)
-                        candidates = _tv_candidates(item, session_tv, cache)
+                        candidates = _fetch_with_retry(
+                            "TVMaze",
+                            lambda: _tv_candidates(item, session_tv, cache),
+                            interactive,
+                            progress,
+                        )
+                        if candidates is None:
+                            return None
                         continue
                     if low_choice == "m":
-                        selected = _prompt_manual_tv(item)
+                        selected = _prompt_manual_tv(item, progress)
                         break
-                    if low_choice == "q":
+                    if low_choice == "k":
                         return None
-            if yes and candidates[0].confidence >= 0.90:
+                    if low_choice == "q":
+                        raise typer.Exit(code=0)
+            if yes and candidates[0].confidence >= min_confidence:
                 selected = candidates[0]
                 break
             if not interactive:
                 selected = None
                 break
-            choice = _select_candidate(candidates)
+            choice = _select_candidate(candidates, progress)
             if isinstance(choice, Candidate):
                 selected = choice
                 break
             if choice == "s":
-                query = Prompt.ask("Search query", default=item.title)
+                query = _prompt_text("Search query", item.title, progress)
                 item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year, season=item.season, episode=item.episode)
-                candidates = _tv_candidates(item, session_tv, cache)
+                candidates = _fetch_with_retry(
+                    "TVMaze",
+                    lambda: _tv_candidates(item, session_tv, cache),
+                    interactive,
+                    progress,
+                )
+                if candidates is None:
+                    return None
                 continue
             if choice == "m":
-                selected = _prompt_manual_tv(item)
+                selected = _prompt_manual_tv(item, progress)
                 break
-            if choice == "q":
+            if choice == "k":
                 return None
+            if choice == "q":
+                raise typer.Exit(code=0)
         if not selected:
             return None
+        _print_choice(selected)
         metadata = selected.metadata
         if selected.metadata.get("manual"):
             cache.set_show(item.title, {"id": None, "name": metadata["name"], "premiered": None, "manual": True})
@@ -261,8 +369,8 @@ def _process_item(
         if season is None or episode is None:
             if not interactive:
                 return None
-            season = int(Prompt.ask("Season", default=str(item.season or 1)))
-            episode = int(Prompt.ask("Episode", default=str(item.episode or 1)))
+            season = int(_prompt_text("Season", str(item.season or 1), progress))
+            episode = int(_prompt_text("Episode", str(item.episode or 1), progress))
         destination = plan_tv_show(
             library,
             metadata.get("name") or selected.title,
@@ -288,48 +396,102 @@ def _process_item(
         _print_plan(plan)
         return plan
 
-    candidates = _movie_candidates(item, session_wd, cache)
+    candidates = _fetch_with_retry(
+        "Wikidata",
+        lambda: _movie_candidates(item, session_wd, cache),
+        interactive,
+        progress,
+    )
+    if candidates is None:
+        return None
     selected = None
     while True:
         if not candidates:
+            if interactive:
+                console.print(f"No candidates found for {item.title}.")
+                empty_choice = _prompt_choice("Choose: s (new search), m (manual), k (skip), q (quit): ", "k", progress)
+                if empty_choice == "s":
+                    query = _prompt_text("Search query", item.title, progress)
+                    item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
+                    candidates = _fetch_with_retry(
+                        "Wikidata",
+                        lambda: _movie_candidates(item, session_wd, cache),
+                        interactive,
+                        progress,
+                    )
+                    if candidates is None:
+                        return None
+                    continue
+                if empty_choice == "m":
+                    selected = _prompt_manual_movie(item, progress)
+                    break
+                if empty_choice == "k":
+                    return None
+                if empty_choice == "q":
+                    raise typer.Exit(code=0)
+                console.print("Invalid choice.")
+                continue
             selected = None
             break
         if candidates[0].confidence < min_confidence and interactive:
             console.print("Top confidence below minimum threshold.")
-            low_choice = console.input("Choose: s (new search), m (manual), q (skip), Enter (review list): ").strip().lower()
-            if low_choice in {"s", "m", "q"}:
+            low_choice = _prompt_choice(
+                "Choose: s (new search), m (manual), k (skip), q (quit), Enter (review list): ",
+                "",
+                progress,
+            )
+            if low_choice in {"s", "m", "k", "q"}:
                 if low_choice == "s":
-                    query = Prompt.ask("Search query", default=item.title)
+                    query = _prompt_text("Search query", item.title, progress)
                     item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
-                    candidates = _movie_candidates(item, session_wd, cache)
+                    candidates = _fetch_with_retry(
+                        "Wikidata",
+                        lambda: _movie_candidates(item, session_wd, cache),
+                        interactive,
+                        progress,
+                    )
+                    if candidates is None:
+                        return None
                     continue
                 if low_choice == "m":
-                    selected = _prompt_manual_movie(item)
+                    selected = _prompt_manual_movie(item, progress)
                     break
-                if low_choice == "q":
+                if low_choice == "k":
                     return None
-        if yes and candidates[0].confidence >= 0.90:
+                if low_choice == "q":
+                    raise typer.Exit(code=0)
+        if yes and candidates[0].confidence >= min_confidence:
             selected = candidates[0]
             break
         if not interactive:
             selected = None
             break
-        choice = _select_candidate(candidates)
+        choice = _select_candidate(candidates, progress)
         if isinstance(choice, Candidate):
             selected = choice
             break
         if choice == "s":
-            query = Prompt.ask("Search query", default=item.title)
+            query = _prompt_text("Search query", item.title, progress)
             item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
-            candidates = _movie_candidates(item, session_wd, cache)
+            candidates = _fetch_with_retry(
+                "Wikidata",
+                lambda: _movie_candidates(item, session_wd, cache),
+                interactive,
+                progress,
+            )
+            if candidates is None:
+                return None
             continue
         if choice == "m":
-            selected = _prompt_manual_movie(item)
+            selected = _prompt_manual_movie(item, progress)
             break
-        if choice == "q":
+        if choice == "k":
             return None
+        if choice == "q":
+            raise typer.Exit(code=0)
     if not selected:
         return None
+    _print_choice(selected)
     metadata = selected.metadata
     if metadata.get("manual"):
         cache.set_movie(item.title, {"qid": None, "title": metadata["title"], "year": metadata.get("year"), "manual": True})
@@ -339,7 +501,7 @@ def _process_item(
 
     year = metadata.get("year") or selected.year
     if year is None and interactive:
-        year_text = Prompt.ask("Movie year (blank for Unknown Year)", default="")
+        year_text = _prompt_text("Movie year (blank for Unknown Year)", "", progress)
         year = int(year_text) if year_text else None
     destination = plan_movie(library, metadata.get("title") or selected.title, year, item.path.suffix)
     plan = MovePlan(
@@ -358,19 +520,29 @@ def organise(
     incoming: Path = typer.Option(..., exists=True, file_okay=False, dir_okay=True, help="Folder to scan"),
     library: Path = typer.Option(..., file_okay=False, dir_okay=True, help="Library root"),
     mode: str = typer.Option("dry-run", help="dry-run or apply"),
-    move: bool = typer.Option(True, "--move/--copy", help="Move (default) or copy in apply mode"),
+    move: bool = typer.Option(False, "--move", help="Move files (default behavior)", is_flag=True),
+    copy: bool = typer.Option(False, "--copy", help="Copy instead of move", is_flag=True),
     extensions: str = typer.Option(".mkv,.mp4,.avi,.m4v,.mov,.ts", help="Comma-separated extensions"),
     min_confidence: float = typer.Option(0.55, help="Minimum confidence for auto acceptance"),
     cache: Path = typer.Option(None, help="Cache path"),
     report: Path = typer.Option(None, help="Report path"),
-    yes: bool = typer.Option(False, help="Auto-accept top result when confidence >= 0.90"),
+    yes: bool = typer.Option(False, "--yes", help="Auto-accept top result when confidence >= 0.90", is_flag=True),
     limit: int = typer.Option(None, help="Limit number of files"),
-    print_tree: bool = typer.Option(False, help="Print planned destination tree"),
-    interactive: bool = typer.Option(True, "--interactive/--no-interactive", help="Interactive mode"),
+    print_tree: bool = typer.Option(False, "--print-tree", help="Print planned destination tree", is_flag=True),
+    interactive: bool = typer.Option(False, "--interactive", help="Force interactive mode", is_flag=True),
+    no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive prompts", is_flag=True),
 ) -> None:
+    if move and copy:
+        console.print("Choose only one of --move or --copy.")
+        raise typer.Exit(code=2)
+    if interactive and no_interactive:
+        console.print("Choose only one of --interactive or --no-interactive.")
+        raise typer.Exit(code=2)
     if mode not in {"dry-run", "apply"}:
         console.print("Invalid mode. Use dry-run or apply.")
         raise typer.Exit(code=2)
+
+    interactive_mode = True if interactive else not no_interactive
 
     cache_path = cache or library / ".plexify" / "cache.json"
     report_path = report or library / ".plexify" / "reports" / f"{now_timestamp()}.json"
@@ -388,7 +560,11 @@ def organise(
         task = progress.add_task("Scanning files...", total=len(files))
         session_tv = tvmaze.create_session()
         session_wd = wikidata.create_session()
-        for path in files:
+        total = len(files)
+        for index, path in enumerate(files, start=1):
+            was_running = _pause_progress(progress)
+            console.print(f"File {index}/{total}: {path}")
+            _resume_progress(progress, was_running)
             progress.advance(task)
             try:
                 item = infer_item(path)
@@ -397,12 +573,13 @@ def organise(
                     library=library,
                     cache=cache_store,
                     mode=mode,
-                    copy_mode=not move,
-                    interactive=interactive,
+                    copy_mode=copy,
+                    interactive=interactive_mode,
                     yes=yes,
                     min_confidence=min_confidence,
                     session_tv=session_tv,
                     session_wd=session_wd,
+                    progress=progress,
                 )
                 if plan:
                     plans.append(plan)
@@ -414,9 +591,9 @@ def organise(
         console.print(tree)
 
     apply_mode = mode == "apply"
-    result: ExecutionResult = execute_plans(plans, apply=apply_mode, copy_mode=not move)
+    result: ExecutionResult = execute_plans(plans, apply=apply_mode, copy_mode=copy)
 
-    write_report(report_path, result.moved if apply_mode else plans, mode, not move)
+    write_report(report_path, result.moved if apply_mode else plans, mode, copy)
     if result.errors or errors:
         console.print("Errors:")
         for error in result.errors + errors:

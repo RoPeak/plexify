@@ -39,13 +39,13 @@ def _extract_season_from_parts(path: Path) -> Optional[int]:
     return None
 
 
-def _extract_episode_from_name(name: str) -> Optional[int]:
+def _extract_episode_from_name(name: str) -> tuple[Optional[int], bool]:
     match = EPISODE_RE.search(name)
     if match:
-        return int(match.group(1))
+        return int(match.group(1)), True
     if name.isdigit():
-        return int(name)
-    return None
+        return int(name), False
+    return None, False
 
 
 def _extract_year(name: str) -> Optional[int]:
@@ -55,30 +55,46 @@ def _extract_year(name: str) -> Optional[int]:
     return None
 
 
+def _has_tv_context(path: Path) -> bool:
+    if SXXEYY_RE.search(path.stem):
+        return True
+    if any(SEASON_RE.search(parent.name) for parent in path.parents):
+        return True
+    return False
+
+
 def infer_item(path: Path) -> InferredItem:
     guess = guessit(path.name)
     media_type = "movie"
     season = None
     episode = None
+    explicit_episode = False
+    has_tv_context = _has_tv_context(path)
 
     sxxeyy = SXXEYY_RE.search(path.stem)
     if sxxeyy:
         season = int(sxxeyy.group(1))
         episode = int(sxxeyy.group(2))
+        explicit_episode = True
         media_type = "tv"
 
     season = season or _extract_season_from_parts(path)
     if season is not None:
         media_type = "tv"
 
-    episode = episode or _extract_episode_from_name(path.stem)
-    if episode is not None:
+    episode_from_name, explicit_from_name = _extract_episode_from_name(path.stem)
+    explicit_episode = explicit_episode or explicit_from_name
+    episode = episode or episode_from_name
+    if episode is not None and (has_tv_context or season is not None or explicit_episode):
         media_type = "tv"
 
     if guess.get("type") == "episode":
-        media_type = "tv"
-        season = season or guess.get("season")
-        episode = episode or guess.get("episode")
+        guessed_season = guess.get("season")
+        guessed_episode = guess.get("episode")
+        if has_tv_context or season is not None or guessed_season is not None or explicit_episode:
+            media_type = "tv"
+            season = season or guessed_season
+            episode = episode or guessed_episode
 
     title = guess.get("title") or path.stem
     if media_type == "tv":

@@ -71,7 +71,7 @@ def parse_episode_results(payload: list[dict[str, Any]]) -> list[TVMazeEpisode]:
 
 def search_shows(query: str, session: requests.Session | None = None) -> list[TVMazeShow]:
     session = session or _session()
-    resp = session.get("https://api.tvmaze.com/search/shows", params={"q": query}, timeout=10)
+    resp = session.get("https://api.tvmaze.com/search/shows", params={"q": query}, timeout=(5, 20))
     resp.raise_for_status()
     _rate_limit()
     return parse_show_results(resp.json())
@@ -79,7 +79,7 @@ def search_shows(query: str, session: requests.Session | None = None) -> list[TV
 
 def fetch_episodes(show_id: int, session: requests.Session | None = None) -> list[TVMazeEpisode]:
     session = session or _session()
-    resp = session.get(f"https://api.tvmaze.com/shows/{show_id}/episodes", timeout=10)
+    resp = session.get(f"https://api.tvmaze.com/shows/{show_id}/episodes", timeout=(5, 20))
     resp.raise_for_status()
     _rate_limit()
     return parse_episode_results(resp.json())

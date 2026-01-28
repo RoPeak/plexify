@@ -32,6 +32,19 @@ Help:
 ```powershell
 python -m plexify.cli --help
 python -m plexify.cli organise --help
+python -m plexify.cli wizard --help
+```
+
+Wizard (guided setup):
+
+```powershell
+python -m plexify.cli wizard
+```
+
+Default behaviour (no arguments):
+
+```powershell
+python -m plexify.cli
 ```
 
 Dry run:

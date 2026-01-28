@@ -14,3 +14,9 @@ def test_organise_help():
     runner = CliRunner()
     result = runner.invoke(app, ["organise", "--help"])
     assert result.exit_code == 0
+
+
+def test_wizard_help():
+    runner = CliRunner()
+    result = runner.invoke(app, ["wizard", "--help"])
+    assert result.exit_code == 0

@@ -1,4 +1,6 @@
+import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -23,6 +25,8 @@ from .util import ExecutionResult, MovePlan, iter_video_files, now_timestamp, un
 
 app = typer.Typer(add_completion=False)
 console = Console()
+DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
+DEFAULT_MIN_CONFIDENCE = 0.55
 
 
 @dataclass
@@ -46,16 +50,22 @@ def _resume_progress(progress: Progress | None, was_running: bool) -> None:
         progress.start()
 
 
-def _prompt_text(prompt: str, default: str, progress: Progress | None) -> str:
+def _prompt_text(prompt: str, default: str, progress: Progress | None, show_default: bool = True) -> str:
     was_running = _pause_progress(progress)
     try:
-        return Prompt.ask(prompt, default=default)
+        return Prompt.ask(prompt, default=default, show_default=show_default)
     finally:
         _resume_progress(progress, was_running)
 
 
-def _prompt_choice(prompt: str, default: str, progress: Progress | None) -> str:
-    return _prompt_text(prompt, default, progress).strip().lower()
+def _prompt_choice(prompt: str, default: str, progress: Progress | None, show_default: bool = True) -> str:
+    return _prompt_text(prompt, default, progress, show_default=show_default).strip().lower()
+
+
+def _confirm(prompt: str, default: bool, progress: Progress | None, show_default: bool = True) -> bool:
+    default_text = "y" if default else "n"
+    choice = _prompt_choice(prompt, default_text, progress, show_default=show_default)
+    return choice in {"y", "yes"}
 
 
 def _confidence_score(title_guess: str, title_actual: str, year_guess: int | None, year_actual: int | None) -> float:
@@ -235,6 +245,94 @@ def _build_tree(paths: list[Path]) -> Tree:
                 current_children[part] = child
             current = child
     return tree
+
+
+def _plan_items(
+    incoming: Path,
+    library: Path,
+    mode: str,
+    copy_mode: bool,
+    interactive: bool,
+    yes: bool,
+    min_confidence: float,
+    extensions: str,
+    cache_path: Path,
+    limit: int | None,
+) -> tuple[list[MovePlan], list[str]]:
+    cache_store = Cache(cache_path)
+    exts = [ext.strip() for ext in extensions.split(",") if ext.strip()]
+    files = iter_video_files(incoming, exts)
+    if limit:
+        files = files[:limit]
+
+    plans: list[MovePlan] = []
+    errors: list[str] = []
+
+    with Progress(SpinnerColumn(), TextColumn("{task.description}")) as progress:
+        task = progress.add_task("Scanning files...", total=len(files))
+        session_tv = tvmaze.create_session()
+        session_wd = wikidata.create_session()
+        total = len(files)
+        for index, path in enumerate(files, start=1):
+            was_running = _pause_progress(progress)
+            console.print(f"File {index}/{total}: {path}")
+            _resume_progress(progress, was_running)
+            progress.advance(task)
+            try:
+                item = infer_item(path)
+                plan = _process_item(
+                    item=item,
+                    library=library,
+                    cache=cache_store,
+                    mode=mode,
+                    copy_mode=copy_mode,
+                    interactive=interactive,
+                    yes=yes,
+                    min_confidence=min_confidence,
+                    session_tv=session_tv,
+                    session_wd=session_wd,
+                    progress=progress,
+                )
+                if plan:
+                    plans.append(plan)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{path}: {exc}")
+
+    return plans, errors
+
+
+def _build_command(
+    incoming: Path,
+    library: Path,
+    mode: str,
+    copy_mode: bool,
+    extensions: str,
+    min_confidence: float,
+    limit: int | None,
+    interactive: bool,
+    print_tree: bool,
+) -> str:
+    parts = [
+        "python -m plexify.cli organise",
+        f'--incoming "{incoming}"',
+        f'--library "{library}"',
+        f"--mode {mode}",
+    ]
+    if mode == "apply":
+        parts.append("--copy" if copy_mode else "--move")
+    if print_tree:
+        parts.append("--print-tree")
+    if extensions != DEFAULT_EXTENSIONS:
+        parts.append(f'--extensions "{extensions}"')
+    if min_confidence != DEFAULT_MIN_CONFIDENCE:
+        parts.append(f"--min-confidence {min_confidence}")
+    if limit is not None:
+        parts.append(f"--limit {limit}")
+    if interactive:
+        parts.append("--interactive")
+    else:
+        parts.append("--no-interactive")
+    return " ".join(parts)
 
 
 def _process_item(
@@ -522,8 +620,8 @@ def organise(
     mode: str = typer.Option("dry-run", help="dry-run or apply"),
     move: bool = typer.Option(False, "--move", help="Move files (default behavior)", is_flag=True),
     copy: bool = typer.Option(False, "--copy", help="Copy instead of move", is_flag=True),
-    extensions: str = typer.Option(".mkv,.mp4,.avi,.m4v,.mov,.ts", help="Comma-separated extensions"),
-    min_confidence: float = typer.Option(0.55, help="Minimum confidence for auto acceptance"),
+    extensions: str = typer.Option(DEFAULT_EXTENSIONS, help="Comma-separated extensions"),
+    min_confidence: float = typer.Option(DEFAULT_MIN_CONFIDENCE, help="Minimum confidence for auto acceptance"),
     cache: Path = typer.Option(None, help="Cache path"),
     report: Path = typer.Option(None, help="Report path"),
     yes: bool = typer.Option(False, "--yes", help="Auto-accept top result when confidence >= 0.90", is_flag=True),
@@ -546,45 +644,19 @@ def organise(
 
     cache_path = cache or library / ".plexify" / "cache.json"
     report_path = report or library / ".plexify" / "reports" / f"{now_timestamp()}.json"
-    cache_store = Cache(cache_path)
 
-    exts = [ext.strip() for ext in extensions.split(",") if ext.strip()]
-    files = iter_video_files(incoming, exts)
-    if limit:
-        files = files[:limit]
-
-    plans: list[MovePlan] = []
-    errors: list[str] = []
-
-    with Progress(SpinnerColumn(), TextColumn("{task.description}")) as progress:
-        task = progress.add_task("Scanning files...", total=len(files))
-        session_tv = tvmaze.create_session()
-        session_wd = wikidata.create_session()
-        total = len(files)
-        for index, path in enumerate(files, start=1):
-            was_running = _pause_progress(progress)
-            console.print(f"File {index}/{total}: {path}")
-            _resume_progress(progress, was_running)
-            progress.advance(task)
-            try:
-                item = infer_item(path)
-                plan = _process_item(
-                    item=item,
-                    library=library,
-                    cache=cache_store,
-                    mode=mode,
-                    copy_mode=copy,
-                    interactive=interactive_mode,
-                    yes=yes,
-                    min_confidence=min_confidence,
-                    session_tv=session_tv,
-                    session_wd=session_wd,
-                    progress=progress,
-                )
-                if plan:
-                    plans.append(plan)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{path}: {exc}")
+    plans, errors = _plan_items(
+        incoming=incoming,
+        library=library,
+        mode=mode,
+        copy_mode=copy,
+        interactive=interactive_mode,
+        yes=yes,
+        min_confidence=min_confidence,
+        extensions=extensions,
+        cache_path=cache_path,
+        limit=limit,
+    )
 
     if print_tree and plans:
         tree = _build_tree([plan.destination for plan in plans])
@@ -630,5 +702,196 @@ def undo(report: Path = typer.Option(None, help="Report path"), library: Path = 
     raise typer.Exit(code=0)
 
 
+@app.command()
+def wizard() -> None:
+    console.print("Plexify wizard")
+    console.print("This will help you organise video files into a Plex-friendly folder layout.")
+    console.print("Nothing will be changed until you choose to apply the plan.")
+
+    user_agent_missing = not os.getenv("PLEXIFY_USER_AGENT")
+    if user_agent_missing:
+        console.print("Note: Wikidata requests may be blocked without an informative User-Agent.")
+        console.print("Set PLEXIFY_USER_AGENT to something like: plexify/0.1 (contact: you@example.com)")
+        if not _confirm("Continue without setting it? [y/N]: ", False, None, show_default=False):
+            raise typer.Exit(code=0)
+
+    console.print("Where are the files you want to organise?")
+    incoming_default = Path.cwd()
+    while True:
+        incoming_text = _prompt_text("Incoming folder", str(incoming_default), None)
+        incoming = Path(incoming_text)
+        if incoming.exists() and incoming.is_dir():
+            break
+        console.print("That path does not exist or is not a folder. Please try again.")
+
+    exts = [ext.strip() for ext in DEFAULT_EXTENSIONS.split(",") if ext.strip()]
+    found_files = iter_video_files(incoming, exts)
+    console.print(f"Found {len(found_files)} video file(s) to review.")
+
+    console.print("Where should the organised library be created?")
+    library_default = incoming.parent / "Library"
+    while True:
+        library_text = _prompt_text("Library folder", str(library_default), None)
+        library = Path(library_text)
+        if library.exists() and library.is_file():
+            console.print("That path does not exist or is not a folder. Please try again.")
+            continue
+        if not library.exists():
+            if _confirm("That folder does not exist. Create it? [Y/n]: ", True, None, show_default=False):
+                library.mkdir(parents=True, exist_ok=True)
+                break
+            continue
+        if any(library.iterdir()):
+            console.print("Warning: this folder is not empty.")
+            if not _confirm("Continue and place organised files here? [y/N]: ", False, None, show_default=False):
+                continue
+        break
+
+    while True:
+        incoming_resolved = incoming.resolve()
+        library_resolved = library.resolve()
+        if incoming_resolved == library_resolved:
+            console.print("Incoming and library folders must be different.")
+            library_text = _prompt_text("Library folder", str(library_default), None)
+            library = Path(library_text)
+            continue
+        overlap = library_resolved.is_relative_to(incoming_resolved) or incoming_resolved.is_relative_to(library_resolved)
+        if overlap:
+            console.print("Warning: your incoming and library folders overlap.")
+            console.print("This can cause Plexify to scan its own output on later runs.")
+            console.print("Recommended: use separate folders (for example, C:\\Video\\Incoming and C:\\Video\\Library).")
+            phrase = _prompt_text("To continue anyway, type: I UNDERSTAND\n> ", "", None, show_default=False)
+            if phrase != "I UNDERSTAND":
+                raise typer.Exit(code=0)
+        break
+
+    console.print("Next: choose how Plexify should behave.")
+    use_defaults = _confirm("Use default settings? [Y/n]: ", True, None, show_default=False)
+
+    extensions = DEFAULT_EXTENSIONS
+    min_confidence = DEFAULT_MIN_CONFIDENCE
+    limit: int | None = None
+    interactive = True
+    print_tree = True
+
+    if not use_defaults:
+        console.print("File extensions to include (comma-separated).")
+        extensions = _prompt_text("Extensions", DEFAULT_EXTENSIONS, None)
+        console.print("Minimum confidence for auto-accept when using --yes.")
+        while True:
+            min_text = _prompt_text("Minimum confidence", str(DEFAULT_MIN_CONFIDENCE), None)
+            try:
+                min_confidence = float(min_text)
+            except ValueError:
+                console.print("Enter a number between 0 and 1.")
+                continue
+            if 0 <= min_confidence <= 1:
+                break
+            console.print("Enter a number between 0 and 1.")
+        console.print("Optional: limit how many files are processed in this run.")
+        while True:
+            limit_text = _prompt_text("Limit", "none", None).strip().lower()
+            if limit_text in {"none", ""}:
+                limit = None
+                break
+            try:
+                limit_value = int(limit_text)
+            except ValueError:
+                console.print("Enter a positive integer or leave blank.")
+                continue
+            if limit_value > 0:
+                limit = limit_value
+                break
+            console.print("Enter a positive integer or leave blank.")
+        console.print("Interactive mode lets you confirm matches and enter manual titles when needed.")
+        interactive = _confirm("Interactive mode? [Y/n]: ", True, None, show_default=False)
+
+    console.print("Plexify will now build a plan (dry run).")
+    console.print("You will be asked to confirm matches when needed.")
+    console.print("No files will be moved or copied during the dry run.")
+
+    cache_path = library / ".plexify" / "cache.json"
+    report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
+    plans, errors = _plan_items(
+        incoming=incoming,
+        library=library,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=interactive,
+        yes=False,
+        min_confidence=min_confidence,
+        extensions=extensions,
+        cache_path=cache_path,
+        limit=limit,
+    )
+    result = execute_plans(plans, apply=False, copy_mode=True)
+    write_report(report_path, plans, "dry-run", True)
+
+    console.print("Plan complete.")
+    console.print(f"Planned items: {len(plans)}")
+    console.print(f"Skipped: {len(result.skipped)}")
+    console.print(f"Errors: {len(result.errors) + len(errors)}")
+    if print_tree and plans:
+        tree = _build_tree([plan.destination for plan in plans])
+        console.print(tree)
+
+    if not _confirm("Apply this plan now? [y/N]: ", False, None, show_default=False):
+        console.print("No changes were made.")
+        console.print("Next time, you can run:")
+        console.print(
+            _build_command(
+                incoming,
+                library,
+                "dry-run",
+                True,
+                extensions,
+                min_confidence,
+                limit,
+                interactive,
+                print_tree,
+            )
+        )
+        if user_agent_missing:
+            console.print("Reminder: set PLEXIFY_USER_AGENT to include contact information.")
+        raise typer.Exit(code=0)
+
+    console.print("How should files be applied?")
+    console.print("  1) Copy files (recommended)")
+    console.print("  2) Move files")
+    apply_choice = _prompt_choice("Choose [1]: ", "1", None, show_default=False)
+    apply_copy = True
+    if apply_choice == "2":
+        console.print("Warning: move will remove the original files from the incoming folder.")
+        phrase = _prompt_text("To proceed, type: MOVE MY FILES\n> ", "", None, show_default=False)
+        if phrase != "MOVE MY FILES":
+            console.print("Cancelled. No changes were made.")
+            raise typer.Exit(code=0)
+        apply_copy = False
+
+    apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
+    apply_result = execute_plans(plans, apply=True, copy_mode=apply_copy)
+    write_report(apply_report_path, apply_result.moved, "apply", apply_copy)
+
+    console.print("Next time, you can run:")
+    console.print(
+        _build_command(
+            incoming,
+            library,
+            "apply",
+            apply_copy,
+            extensions,
+            min_confidence,
+            limit,
+            interactive,
+            print_tree,
+        )
+    )
+    if user_agent_missing:
+        console.print("Reminder: set PLEXIFY_USER_AGENT to include contact information.")
+
+
 if __name__ == "__main__":
-    app()
+    if len(sys.argv) == 1:
+        wizard()
+    else:
+        app()

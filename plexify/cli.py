@@ -104,6 +104,7 @@ def _maybe_enrich_candidates(
 ) -> None:
     if not interactive or not candidates:
         return
+    timeout = (2, 5)
     updated = False
     for cand in candidates[:5]:
         if cand.enrichment is not None:
@@ -118,7 +119,7 @@ def _maybe_enrich_candidates(
             if cached is not None:
                 cand.enrichment = cached
                 continue
-            details = wikidata.fetch_enrichment(str(qid), session=session_wd)
+            details = wikidata.fetch_enrichment(str(qid), session=session_wd, timeout=timeout)
             if details:
                 cache.set_enrichment(cache_key, details)
                 cand.enrichment = details
@@ -135,7 +136,7 @@ def _maybe_enrich_candidates(
             if cached is not None:
                 cand.enrichment = cached
                 continue
-            details = tvmaze.fetch_show_details(int(show_id), session=session_tv)
+            details = tvmaze.fetch_show_details(int(show_id), session=session_tv, timeout=timeout)
             if details:
                 enrichment = {"network": details.network, "creator": details.creator, "cast": details.cast}
                 cache.set_enrichment(cache_key, enrichment)
@@ -226,20 +227,20 @@ def _tv_candidates(
             year_text = f" ({year})" if year else ""
             console.print(f"Using cached match for: {item.path.name} -> {name}{year_text} [TVMaze]")
         show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
-        results.append(_tv_candidate_from_show(item, show, session))
+        results.append(_tv_candidate_from_show(item, show))
         return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False)
 
     if raw_results is None:
         raw_results = tvmaze.search_shows(item.title, session=session)
     page = raw_results[offset : offset + limit]
     for show in page:
-        results.append(_tv_candidate_from_show(item, show, session))
+        results.append(_tv_candidate_from_show(item, show))
     next_offset = offset + limit
     has_more = next_offset < len(raw_results)
     return CandidatePage(candidates=results, raw_results=raw_results, next_offset=next_offset, has_more=has_more)
 
 
-def _tv_candidate_from_show(item: InferredItem, show: tvmaze.TVMazeShow, session: requests.Session) -> Candidate:
+def _tv_candidate_from_show(item: InferredItem, show: tvmaze.TVMazeShow) -> Candidate:
     year = None
     premiered = show.premiered
     if isinstance(premiered, int):
@@ -251,17 +252,34 @@ def _tv_candidate_from_show(item: InferredItem, show: tvmaze.TVMazeShow, session
     confidence = _confidence_score(item.title, show.name, None, None)
     metadata: dict[str, Any] = {"id": show.id, "name": show.name, "year": year}
 
-    episode_title = None
-    if item.season is not None and item.episode is not None:
-        episodes = tvmaze.fetch_episodes(show.id, session=session)
-        for ep in episodes:
-            if ep.season == item.season and ep.number == item.episode:
-                episode_title = ep.name
-                break
-        if episode_title:
-            confidence = min(1.0, confidence + 0.1)
-        metadata["episode_title"] = episode_title
     return Candidate(title=show.name, year=year, source="TVMaze", confidence=confidence, metadata=metadata)
+
+
+def _maybe_fetch_episode_title(
+    item: InferredItem,
+    candidate: Candidate,
+    session: requests.Session,
+    *,
+    bump_confidence: bool,
+) -> None:
+    if item.season is None or item.episode is None:
+        return
+    if candidate.metadata.get("manual"):
+        return
+    if "episode_title" in candidate.metadata:
+        return
+    show_id = candidate.metadata.get("id")
+    if not show_id:
+        return
+    episodes = tvmaze.fetch_episodes(int(show_id), session=session)
+    episode_title = None
+    for ep in episodes:
+        if ep.season == item.season and ep.number == item.episode:
+            episode_title = ep.name
+            break
+    candidate.metadata["episode_title"] = episode_title
+    if episode_title and bump_confidence:
+        candidate.confidence = min(1.0, candidate.confidence + 0.1)
 
 
 def _movie_candidates(
@@ -429,8 +447,8 @@ def _plan_items(
     plans: list[MovePlan] = []
     errors: list[str] = []
 
-    with Progress(TextColumn("{task.description}")) as progress:
-        task = progress.add_task("Scanning files...", total=len(files))
+    with Progress(TextColumn("{task.completed}/{task.total} - {task.description}")) as progress:
+        task = progress.add_task("Planning files...", total=len(files))
         session_tv = tvmaze.create_session()
         session_wd = wikidata.create_session()
         total = len(files)
@@ -438,7 +456,8 @@ def _plan_items(
             was_running = _pause_progress(progress)
             console.print(f"File {index}/{total}: {path}")
             _resume_progress(progress, was_running)
-            progress.advance(task)
+            progress.update(task, description=f"Planning: {path.name}")
+            progress.advance(task, 1)
             try:
                 item = infer_item(path)
                 plan = _process_item(
@@ -571,6 +590,7 @@ def _process_item(
                     continue
                 selected = None
                 break
+            _maybe_fetch_episode_title(item, candidates[0], session_tv, bump_confidence=True)
             if candidates[0].confidence < min_confidence and interactive:
                 console.print("Top confidence below minimum threshold.")
                 low_choice = _prompt_choice(
@@ -660,6 +680,7 @@ def _process_item(
         if not selected:
             return None
         _print_choice(selected)
+        _maybe_fetch_episode_title(item, selected, session_tv, bump_confidence=False)
         metadata = selected.metadata
         if selected.metadata.get("manual"):
             cache.set_show(item.title, {"id": None, "name": metadata["name"], "premiered": None, "manual": True})
@@ -885,6 +906,17 @@ def organise(
         raise typer.Exit(code=2)
     if mode not in {"dry-run", "apply"}:
         console.print("Invalid mode. Use dry-run or apply.")
+        raise typer.Exit(code=2)
+
+    incoming_resolved = incoming.resolve()
+    library_resolved = library.resolve()
+    overlap = (
+        incoming_resolved == library_resolved
+        or incoming_resolved.is_relative_to(library_resolved)
+        or library_resolved.is_relative_to(incoming_resolved)
+    )
+    if overlap:
+        console.print("Incoming and library folders must not overlap. Use separate folders.")
         raise typer.Exit(code=2)
 
     interactive_mode = True if interactive else not no_interactive

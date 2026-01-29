@@ -169,12 +169,16 @@ def fetch_episodes(show_id: int, session: requests.Session | None = None) -> lis
     return parse_episode_results(resp.json())
 
 
-def fetch_show_details(show_id: int, session: requests.Session | None = None) -> TVMazeShowDetails | None:
+def fetch_show_details(
+    show_id: int,
+    session: requests.Session | None = None,
+    timeout: tuple[int, int] = (5, 15),
+) -> TVMazeShowDetails | None:
     if not _available:
         return None
     session = session or _session()
     try:
-        resp = session.get(f"https://api.tvmaze.com/shows/{show_id}", params={"embed": "cast"}, timeout=(5, 15))
+        resp = session.get(f"https://api.tvmaze.com/shows/{show_id}", params={"embed": "cast"}, timeout=timeout)
         if resp.status_code in {403, 429}:
             _set_unavailable("TVMaze lookups are unavailable (HTTP 403/429).")
             return None
@@ -189,7 +193,7 @@ def fetch_show_details(show_id: int, session: requests.Session | None = None) ->
     creator = None
     if not network:
         try:
-            crew_resp = session.get(f"https://api.tvmaze.com/shows/{show_id}/crew", timeout=(5, 15))
+            crew_resp = session.get(f"https://api.tvmaze.com/shows/{show_id}/crew", timeout=timeout)
             if crew_resp.status_code in {403, 429}:
                 _set_unavailable("TVMaze lookups are unavailable (HTTP 403/429).")
                 return None

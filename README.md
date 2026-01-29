@@ -11,6 +11,8 @@ is uncertain.
 
 ## Installation
 
+From the repository root:
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -51,5 +53,5 @@ Warning: move will remove files from the incoming folder. Use copy first.
 - Wikidata blocked or 403: set `PLEXIFY_USER_AGENT` to include contact details.
 - Offline/proxy networks: lookups may fail; confirm your proxy settings or run
   with cached results.
-- Incoming and library overlap: use separate folders to avoid re-scanning output.
+- Incoming and library overlap: Plexify exits with code 2; use separate folders to avoid re-scanning output.
 - Reports are stored in `.plexify/reports` under the library folder.

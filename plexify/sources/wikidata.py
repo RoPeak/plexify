@@ -225,12 +225,16 @@ def _extract_director_from_description(description: str | None) -> str | None:
     return match.group(1).strip()
 
 
-def fetch_enrichment(qid: str, session: requests.Session | None = None) -> dict[str, Any] | None:
+def fetch_enrichment(
+    qid: str,
+    session: requests.Session | None = None,
+    timeout: tuple[int, int] = (5, 15),
+) -> dict[str, Any] | None:
     if not _available:
         return None
     session = session or _session()
     try:
-        resp = session.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json", timeout=(5, 15))
+        resp = session.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json", timeout=timeout)
         if resp.status_code in {403, 429}:
             _set_unavailable("Wikidata lookups are unavailable (HTTP 403/429).")
             return None

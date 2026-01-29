@@ -152,12 +152,16 @@ def search_shows(query: str, session: requests.Session | None = None) -> list[TV
     return parse_show_results(resp.json())
 
 
-def fetch_episodes(show_id: int, session: requests.Session | None = None) -> list[TVMazeEpisode]:
+def fetch_episodes(
+    show_id: int,
+    session: requests.Session | None = None,
+    timeout: tuple[int, int] = (5, 15),
+) -> list[TVMazeEpisode]:
     if not _available:
         return []
     session = session or _session()
     try:
-        resp = session.get(f"https://api.tvmaze.com/shows/{show_id}/episodes", timeout=(5, 15))
+        resp = session.get(f"https://api.tvmaze.com/shows/{show_id}/episodes", timeout=timeout)
         if resp.status_code in {403, 429}:
             _set_unavailable("TVMaze lookups are unavailable (HTTP 403/429).")
             return []

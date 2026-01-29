@@ -28,8 +28,8 @@ def _disable_network(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureReq
     if request.node.get_closest_marker("network"):
         return
 
-    def _blocked(*_args, **_kwargs):
-        raise AssertionError("Network disabled in tests")
+    def _blocked(_self, method: str, url: str, *_args, **_kwargs):
+        raise AssertionError(f"Network calls are forbidden in tests: {method} {url}")
 
     monkeypatch.setattr(requests.sessions.Session, "request", _blocked)
 

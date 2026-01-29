@@ -9,7 +9,7 @@ import requests
 import typer
 from rapidfuzz import fuzz
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.prompt import Prompt
 from rich.table import Table
 from rich.tree import Tree
@@ -247,6 +247,26 @@ def _build_tree(paths: list[Path]) -> Tree:
     return tree
 
 
+def _apply_with_progress(plans: list[MovePlan], copy_mode: bool) -> ExecutionResult:
+    if not plans:
+        return execute_plans(plans, apply=True, copy_mode=copy_mode)
+    action = "Copying" if copy_mode else "Moving"
+    with Progress(
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total} - {task.description}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task = progress.add_task("Preparing...", total=len(plans))
+
+        def _on_progress(completed: int, total: int, plan: MovePlan) -> None:
+            description = f"{action}: {plan.source.name}"
+            progress.update(task, description=description)
+            progress.advance(task, 1)
+
+        return execute_plans(plans, apply=True, copy_mode=copy_mode, on_progress=_on_progress)
+
+
 def _plan_items(
     incoming: Path,
     library: Path,
@@ -268,7 +288,7 @@ def _plan_items(
     plans: list[MovePlan] = []
     errors: list[str] = []
 
-    with Progress(SpinnerColumn(), TextColumn("{task.description}")) as progress:
+    with Progress(TextColumn("{task.description}")) as progress:
         task = progress.add_task("Scanning files...", total=len(files))
         session_tv = tvmaze.create_session()
         session_wd = wikidata.create_session()
@@ -663,7 +683,10 @@ def organise(
         console.print(tree)
 
     apply_mode = mode == "apply"
-    result: ExecutionResult = execute_plans(plans, apply=apply_mode, copy_mode=copy)
+    if apply_mode and plans:
+        result = _apply_with_progress(plans, copy_mode=copy)
+    else:
+        result = execute_plans(plans, apply=apply_mode, copy_mode=copy)
 
     write_report(report_path, result.moved if apply_mode else plans, mode, copy)
     if result.errors or errors:
@@ -869,7 +892,7 @@ def wizard() -> None:
         apply_copy = False
 
     apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
-    apply_result = execute_plans(plans, apply=True, copy_mode=apply_copy)
+    apply_result = _apply_with_progress(plans, copy_mode=apply_copy)
     write_report(apply_report_path, apply_result.moved, "apply", apply_copy)
 
     console.print("Next time, you can run:")

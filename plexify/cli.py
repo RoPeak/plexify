@@ -111,10 +111,15 @@ def _select_candidate(candidates: list[Candidate], progress: Progress | None) ->
         console.print("Invalid choice.")
 
 
-def _tv_candidates(item: InferredItem, session: requests.Session, cache: Cache) -> list[Candidate]:
+def _tv_candidates(item: InferredItem, session: requests.Session, cache: Cache, show_cache: bool) -> list[Candidate]:
     cached = cache.get_show(item.title)
     results: list[Candidate] = []
     if cached and not cached.get("manual"):
+        if show_cache:
+            name = cached.get("name") or item.title
+            year = cached.get("premiered")
+            year_text = f" ({year})" if year else ""
+            console.print(f"Using cached match for: {item.path.name} -> {name}{year_text} [TVMaze]")
         show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
         results.append(_tv_candidate_from_show(item, show, session))
         return results
@@ -149,10 +154,15 @@ def _tv_candidate_from_show(item: InferredItem, show: tvmaze.TVMazeShow, session
     return Candidate(title=show.name, year=year, source="TVMaze", confidence=confidence, metadata=metadata)
 
 
-def _movie_candidates(item: InferredItem, session: requests.Session, cache: Cache) -> list[Candidate]:
+def _movie_candidates(item: InferredItem, session: requests.Session, cache: Cache, show_cache: bool) -> list[Candidate]:
     cached = cache.get_movie(item.title)
     results: list[Candidate] = []
     if cached and not cached.get("manual"):
+        if show_cache:
+            title = cached.get("title") or item.title
+            year = cached.get("year")
+            year_text = f" ({year})" if year else ""
+            console.print(f"Using cached match for: {item.path.name} -> {title}{year_text} [Wikidata]")
         film = wikidata.WikidataFilm(qid=cached["qid"], title=cached["title"], year=cached.get("year"), is_film=True)
         results.append(_movie_candidate_from_film(item, film))
         return results
@@ -278,6 +288,7 @@ def _plan_items(
     extensions: str,
     cache_path: Path,
     limit: int | None,
+    show_cache: bool,
 ) -> tuple[list[MovePlan], list[str]]:
     cache_store = Cache(cache_path)
     exts = [ext.strip() for ext in extensions.split(",") if ext.strip()]
@@ -312,6 +323,7 @@ def _plan_items(
                     session_tv=session_tv,
                     session_wd=session_wd,
                     progress=progress,
+                    show_cache=show_cache,
                 )
                 if plan:
                     plans.append(plan)
@@ -367,6 +379,7 @@ def _process_item(
     session_tv: requests.Session,
     session_wd: requests.Session,
     progress: Progress | None,
+    show_cache: bool,
 ) -> MovePlan | None:
     console.print(f"Detected: {item.media_type.upper()} | Title guess: {item.title}")
     if item.media_type == "tv":
@@ -374,7 +387,7 @@ def _process_item(
     if item.media_type == "tv":
         candidates = _fetch_with_retry(
             "TVMaze",
-            lambda: _tv_candidates(item, session_tv, cache),
+            lambda: _tv_candidates(item, session_tv, cache, show_cache),
             interactive,
             progress,
         )
@@ -398,7 +411,7 @@ def _process_item(
                         )
                         candidates = _fetch_with_retry(
                             "TVMaze",
-                            lambda: _tv_candidates(item, session_tv, cache),
+                            lambda: _tv_candidates(item, session_tv, cache, show_cache),
                             interactive,
                             progress,
                         )
@@ -429,7 +442,7 @@ def _process_item(
                         item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year, season=item.season, episode=item.episode)
                         candidates = _fetch_with_retry(
                             "TVMaze",
-                            lambda: _tv_candidates(item, session_tv, cache),
+                            lambda: _tv_candidates(item, session_tv, cache, show_cache),
                             interactive,
                             progress,
                         )
@@ -458,7 +471,7 @@ def _process_item(
                 item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year, season=item.season, episode=item.episode)
                 candidates = _fetch_with_retry(
                     "TVMaze",
-                    lambda: _tv_candidates(item, session_tv, cache),
+                    lambda: _tv_candidates(item, session_tv, cache, show_cache),
                     interactive,
                     progress,
                 )
@@ -516,7 +529,7 @@ def _process_item(
 
     candidates = _fetch_with_retry(
         "Wikidata",
-        lambda: _movie_candidates(item, session_wd, cache),
+        lambda: _movie_candidates(item, session_wd, cache, show_cache),
         interactive,
         progress,
     )
@@ -533,7 +546,7 @@ def _process_item(
                     item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
                     candidates = _fetch_with_retry(
                         "Wikidata",
-                        lambda: _movie_candidates(item, session_wd, cache),
+                        lambda: _movie_candidates(item, session_wd, cache, show_cache),
                         interactive,
                         progress,
                     )
@@ -564,7 +577,7 @@ def _process_item(
                     item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
                     candidates = _fetch_with_retry(
                         "Wikidata",
-                        lambda: _movie_candidates(item, session_wd, cache),
+                        lambda: _movie_candidates(item, session_wd, cache, show_cache),
                         interactive,
                         progress,
                     )
@@ -593,7 +606,7 @@ def _process_item(
             item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
             candidates = _fetch_with_retry(
                 "Wikidata",
-                lambda: _movie_candidates(item, session_wd, cache),
+                lambda: _movie_candidates(item, session_wd, cache, show_cache),
                 interactive,
                 progress,
             )
@@ -676,6 +689,7 @@ def organise(
         extensions=extensions,
         cache_path=cache_path,
         limit=limit,
+        show_cache=interactive_mode or print_tree,
     )
 
     if print_tree and plans:
@@ -851,6 +865,7 @@ def wizard() -> None:
         extensions=extensions,
         cache_path=cache_path,
         limit=limit,
+        show_cache=interactive or print_tree,
     )
     result = execute_plans(plans, apply=False, copy_mode=True)
     write_report(report_path, plans, "dry-run", True)

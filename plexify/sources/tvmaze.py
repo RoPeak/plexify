@@ -47,6 +47,13 @@ class TVMazeEpisode:
     name: str
 
 
+@dataclass(frozen=True)
+class TVMazeShowDetails:
+    network: str | None
+    creator: str | None
+    cast: list[str]
+
+
 def _session() -> requests.Session:
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
@@ -93,6 +100,41 @@ def parse_episode_results(payload: list[dict[str, Any]]) -> list[TVMazeEpisode]:
     return results
 
 
+def _extract_network_name(show: dict[str, Any]) -> str | None:
+    network = show.get("network") or {}
+    if network:
+        name = network.get("name")
+        if name:
+            return str(name)
+    web_channel = show.get("webChannel") or {}
+    if web_channel:
+        name = web_channel.get("name")
+        if name:
+            return str(name)
+    return None
+
+
+def _parse_cast(payload: dict[str, Any]) -> list[str]:
+    cast_entries = payload.get("_embedded", {}).get("cast") or []
+    cast: list[str] = []
+    for entry in cast_entries:
+        person = entry.get("person") or {}
+        name = person.get("name")
+        if name:
+            cast.append(str(name))
+    return cast
+
+
+def _parse_creator(payload: list[dict[str, Any]]) -> str | None:
+    for entry in payload:
+        if entry.get("type") == "Creator":
+            person = entry.get("person") or {}
+            name = person.get("name")
+            if name:
+                return str(name)
+    return None
+
+
 def search_shows(query: str, session: requests.Session | None = None) -> list[TVMazeShow]:
     if not _available:
         return []
@@ -125,3 +167,36 @@ def fetch_episodes(show_id: int, session: requests.Session | None = None) -> lis
         return []
     _rate_limit()
     return parse_episode_results(resp.json())
+
+
+def fetch_show_details(show_id: int, session: requests.Session | None = None) -> TVMazeShowDetails | None:
+    if not _available:
+        return None
+    session = session or _session()
+    try:
+        resp = session.get(f"https://api.tvmaze.com/shows/{show_id}", params={"embed": "cast"}, timeout=(5, 15))
+        if resp.status_code in {403, 429}:
+            _set_unavailable("TVMaze lookups are unavailable (HTTP 403/429).")
+            return None
+        resp.raise_for_status()
+    except requests.RequestException:
+        _set_unavailable("TVMaze lookups are unavailable (network error).")
+        return None
+    _rate_limit()
+    payload = resp.json()
+    network = _extract_network_name(payload)
+    cast = _parse_cast(payload)
+    creator = None
+    if not network:
+        try:
+            crew_resp = session.get(f"https://api.tvmaze.com/shows/{show_id}/crew", timeout=(5, 15))
+            if crew_resp.status_code in {403, 429}:
+                _set_unavailable("TVMaze lookups are unavailable (HTTP 403/429).")
+                return None
+            crew_resp.raise_for_status()
+        except requests.RequestException:
+            _set_unavailable("TVMaze lookups are unavailable (network error).")
+            return None
+        _rate_limit()
+        creator = _parse_creator(crew_resp.json())
+    return TVMazeShowDetails(network=network, creator=creator, cast=cast)

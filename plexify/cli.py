@@ -36,6 +36,15 @@ class Candidate:
     source: str
     confidence: float
     metadata: dict[str, Any]
+    enrichment: dict[str, Any] | None = None
+
+
+@dataclass
+class CandidatePage:
+    candidates: list[Candidate]
+    raw_results: list[Any] | None
+    next_offset: int
+    has_more: bool
 
 
 def _pause_progress(progress: Progress | None) -> bool:
@@ -75,29 +84,111 @@ def _confidence_score(title_guess: str, title_actual: str, year_guess: int | Non
     return max(0.0, min(1.0, base))
 
 
-def _print_candidates(candidates: list[Candidate]) -> None:
+def _format_value(value: str | None) -> str:
+    return value if value else "—"
+
+
+def _format_names(names: list[str] | None, limit: int = 3) -> str:
+    if not names:
+        return "—"
+    return ", ".join(names[:limit])
+
+
+def _maybe_enrich_candidates(
+    media_type: str,
+    candidates: list[Candidate],
+    session_tv: requests.Session,
+    session_wd: requests.Session,
+    cache: Cache,
+    interactive: bool,
+) -> None:
+    if not interactive or not candidates:
+        return
+    updated = False
+    for cand in candidates[:5]:
+        if cand.enrichment is not None:
+            continue
+        if media_type == "movie" and cand.source == "Wikidata":
+            qid = cand.metadata.get("qid")
+            if not qid:
+                cand.enrichment = {}
+                continue
+            cache_key = f"wikidata:{qid}"
+            cached = cache.get_enrichment(cache_key)
+            if cached is not None:
+                cand.enrichment = cached
+                continue
+            details = wikidata.fetch_enrichment(str(qid), session=session_wd)
+            if details:
+                cache.set_enrichment(cache_key, details)
+                cand.enrichment = details
+                updated = True
+            else:
+                cand.enrichment = {}
+        if media_type == "tv" and cand.source == "TVMaze":
+            show_id = cand.metadata.get("id")
+            if not show_id:
+                cand.enrichment = {}
+                continue
+            cache_key = f"tvmaze:{show_id}"
+            cached = cache.get_enrichment(cache_key)
+            if cached is not None:
+                cand.enrichment = cached
+                continue
+            details = tvmaze.fetch_show_details(int(show_id), session=session_tv)
+            if details:
+                enrichment = {"network": details.network, "creator": details.creator, "cast": details.cast}
+                cache.set_enrichment(cache_key, enrichment)
+                cand.enrichment = enrichment
+                updated = True
+            else:
+                cand.enrichment = {}
+    if updated:
+        cache.save()
+
+
+def _print_candidates(media_type: str, candidates: list[Candidate]) -> None:
     table = Table(title="Candidates")
     table.add_column("#")
     table.add_column("Title")
     table.add_column("Year")
+    if media_type == "movie":
+        table.add_column("Director")
+        table.add_column("Cast")
+    elif media_type == "tv":
+        table.add_column("Network/Creator")
+        table.add_column("Cast")
     table.add_column("Source")
     table.add_column("Confidence")
     for idx, cand in enumerate(candidates, start=1):
         year_text = str(cand.year) if cand.year else "Unknown"
-        table.add_row(str(idx), cand.title, year_text, cand.source, f"{cand.confidence:.2f}")
+        enrichment = cand.enrichment or {}
+        row = [str(idx), cand.title, year_text]
+        if media_type == "movie":
+            row.append(_format_value(enrichment.get("director")))
+            row.append(_format_names(enrichment.get("cast")))
+        elif media_type == "tv":
+            network = enrichment.get("network") or enrichment.get("creator")
+            row.append(_format_value(network))
+            row.append(_format_names(enrichment.get("cast")))
+        row.extend([cand.source, f"{cand.confidence:.2f}"])
+        table.add_row(*row)
     console.print(table)
 
 
-def _select_candidate(candidates: list[Candidate], progress: Progress | None) -> Candidate | None | str:
+def _select_candidate(
+    media_type: str,
+    candidates: list[Candidate],
+    progress: Progress | None,
+    has_more: bool,
+) -> Candidate | None | str:
     if not candidates:
         return None
+    instruction = "Press Enter to accept #1, type 1-5 to choose, 's' to search, 'n' for more, 'k' to skip, 'q' to quit."
     while True:
-        _print_candidates(candidates)
-        choice = _prompt_choice(
-            "Select: [Enter]=1, [1-9]=choose, s=search, m=manual, k=skip, q=quit >",
-            "1",
-            progress,
-        )
+        _print_candidates(media_type, candidates)
+        console.print(instruction)
+        choice = _prompt_choice("Select >", "1", progress, show_default=False)
         if choice == "1":
             return candidates[0]
         if choice.isdigit():
@@ -106,12 +197,26 @@ def _select_candidate(candidates: list[Candidate], progress: Progress | None) ->
                 return candidates[idx]
             console.print("Invalid selection.")
             continue
+        if choice == "n":
+            if not has_more:
+                console.print("No more candidates.")
+                continue
+            return "n"
         if choice in {"s", "m", "k", "q"}:
             return choice
         console.print("Invalid choice.")
 
 
-def _tv_candidates(item: InferredItem, session: requests.Session, cache: Cache, show_cache: bool) -> list[Candidate]:
+def _tv_candidates(
+    item: InferredItem,
+    session: requests.Session,
+    cache: Cache,
+    show_cache: bool,
+    *,
+    offset: int = 0,
+    raw_results: list[tvmaze.TVMazeShow] | None = None,
+    limit: int = 5,
+) -> CandidatePage:
     cached = cache.get_show(item.title)
     results: list[Candidate] = []
     if cached and not cached.get("manual"):
@@ -122,11 +227,16 @@ def _tv_candidates(item: InferredItem, session: requests.Session, cache: Cache, 
             console.print(f"Using cached match for: {item.path.name} -> {name}{year_text} [TVMaze]")
         show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
         results.append(_tv_candidate_from_show(item, show, session))
-        return results
+        return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False)
 
-    for show in tvmaze.search_shows(item.title, session=session)[:5]:
+    if raw_results is None:
+        raw_results = tvmaze.search_shows(item.title, session=session)
+    page = raw_results[offset : offset + limit]
+    for show in page:
         results.append(_tv_candidate_from_show(item, show, session))
-    return results
+    next_offset = offset + limit
+    has_more = next_offset < len(raw_results)
+    return CandidatePage(candidates=results, raw_results=raw_results, next_offset=next_offset, has_more=has_more)
 
 
 def _tv_candidate_from_show(item: InferredItem, show: tvmaze.TVMazeShow, session: requests.Session) -> Candidate:
@@ -154,7 +264,16 @@ def _tv_candidate_from_show(item: InferredItem, show: tvmaze.TVMazeShow, session
     return Candidate(title=show.name, year=year, source="TVMaze", confidence=confidence, metadata=metadata)
 
 
-def _movie_candidates(item: InferredItem, session: requests.Session, cache: Cache, show_cache: bool) -> list[Candidate]:
+def _movie_candidates(
+    item: InferredItem,
+    session: requests.Session,
+    cache: Cache,
+    show_cache: bool,
+    *,
+    offset: int = 0,
+    raw_results: list[wikidata.WikidataCandidate] | None = None,
+    limit: int = 5,
+) -> CandidatePage:
     cached = cache.get_movie(item.title)
     results: list[Candidate] = []
     if cached and not cached.get("manual"):
@@ -165,19 +284,30 @@ def _movie_candidates(item: InferredItem, session: requests.Session, cache: Cach
             console.print(f"Using cached match for: {item.path.name} -> {title}{year_text} [Wikidata]")
         film = wikidata.WikidataFilm(qid=cached["qid"], title=cached["title"], year=cached.get("year"), is_film=True)
         results.append(_movie_candidate_from_film(item, film))
-        return results
+        return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False)
 
-    for cand in wikidata.search(item.title, session=session)[:5]:
+    if raw_results is None:
+        raw_results = wikidata.search(item.title, session=session, limit=10)
+    idx = offset
+    while idx < len(raw_results) and len(results) < limit:
+        cand = raw_results[idx]
+        idx += 1
         film = wikidata.fetch_entity(cand.qid, session=session)
         if not film.is_film:
             continue
-        results.append(_movie_candidate_from_film(item, film))
-    return results
+        results.append(_movie_candidate_from_film(item, film, description=cand.description))
+    has_more = idx < len(raw_results)
+    return CandidatePage(candidates=results, raw_results=raw_results, next_offset=idx, has_more=has_more)
 
 
-def _movie_candidate_from_film(item: InferredItem, film: wikidata.WikidataFilm) -> Candidate:
+def _movie_candidate_from_film(
+    item: InferredItem,
+    film: wikidata.WikidataFilm,
+    *,
+    description: str | None = None,
+) -> Candidate:
     confidence = _confidence_score(item.title, film.title, item.year, film.year)
-    metadata = {"qid": film.qid, "title": film.title, "year": film.year}
+    metadata = {"qid": film.qid, "title": film.title, "year": film.year, "description": description}
     return Candidate(title=film.title, year=film.year, source="Wikidata", confidence=confidence, metadata=metadata)
 
 
@@ -385,14 +515,20 @@ def _process_item(
     if item.media_type == "tv":
         console.print(f"Season/Episode guess: {item.season}/{item.episode}")
     if item.media_type == "tv":
-        candidates = _fetch_with_retry(
+        raw_results_tv: list[tvmaze.TVMazeShow] | None = None
+        next_offset = 0
+        page = _fetch_with_retry(
             "TVMaze",
-            lambda: _tv_candidates(item, session_tv, cache, show_cache),
+            lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
             interactive,
             progress,
         )
-        if candidates is None:
+        if page is None:
             return None
+        candidates = page.candidates
+        raw_results_tv = page.raw_results
+        next_offset = page.next_offset
+        has_more = page.has_more
         selected = None
         while True:
             if not candidates:
@@ -409,14 +545,20 @@ def _process_item(
                             season=item.season,
                             episode=item.episode,
                         )
-                        candidates = _fetch_with_retry(
+                        raw_results_tv = None
+                        next_offset = 0
+                        page = _fetch_with_retry(
                             "TVMaze",
-                            lambda: _tv_candidates(item, session_tv, cache, show_cache),
+                            lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
                             interactive,
                             progress,
                         )
-                        if candidates is None:
+                        if page is None:
                             return None
+                        candidates = page.candidates
+                        raw_results_tv = page.raw_results
+                        next_offset = page.next_offset
+                        has_more = page.has_more
                         continue
                     if empty_choice == "m":
                         selected = _prompt_manual_tv(item, progress)
@@ -440,14 +582,20 @@ def _process_item(
                     if low_choice == "s":
                         query = _prompt_text("Search query", item.title, progress)
                         item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year, season=item.season, episode=item.episode)
-                        candidates = _fetch_with_retry(
+                        raw_results_tv = None
+                        next_offset = 0
+                        page = _fetch_with_retry(
                             "TVMaze",
-                            lambda: _tv_candidates(item, session_tv, cache, show_cache),
+                            lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
                             interactive,
                             progress,
                         )
-                        if candidates is None:
+                        if page is None:
                             return None
+                        candidates = page.candidates
+                        raw_results_tv = page.raw_results
+                        next_offset = page.next_offset
+                        has_more = page.has_more
                         continue
                     if low_choice == "m":
                         selected = _prompt_manual_tv(item, progress)
@@ -462,21 +610,45 @@ def _process_item(
             if not interactive:
                 selected = None
                 break
-            choice = _select_candidate(candidates, progress)
+            _maybe_enrich_candidates("tv", candidates, session_tv, session_wd, cache, interactive)
+            choice = _select_candidate("tv", candidates, progress, has_more)
             if isinstance(choice, Candidate):
                 selected = choice
                 break
             if choice == "s":
                 query = _prompt_text("Search query", item.title, progress)
                 item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year, season=item.season, episode=item.episode)
-                candidates = _fetch_with_retry(
+                raw_results_tv = None
+                next_offset = 0
+                page = _fetch_with_retry(
                     "TVMaze",
-                    lambda: _tv_candidates(item, session_tv, cache, show_cache),
+                    lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
                     interactive,
                     progress,
                 )
-                if candidates is None:
+                if page is None:
                     return None
+                candidates = page.candidates
+                raw_results_tv = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
+                continue
+            if choice == "n":
+                if not has_more:
+                    console.print("No more candidates.")
+                    continue
+                page = _fetch_with_retry(
+                    "TVMaze",
+                    lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
+                    interactive,
+                    progress,
+                )
+                if page is None:
+                    return None
+                candidates = page.candidates
+                raw_results_tv = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
                 continue
             if choice == "m":
                 selected = _prompt_manual_tv(item, progress)
@@ -527,14 +699,20 @@ def _process_item(
         _print_plan(plan)
         return plan
 
-    candidates = _fetch_with_retry(
+    raw_results_movie: list[wikidata.WikidataCandidate] | None = None
+    next_offset = 0
+    page = _fetch_with_retry(
         "Wikidata",
-        lambda: _movie_candidates(item, session_wd, cache, show_cache),
+        lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
         interactive,
         progress,
     )
-    if candidates is None:
+    if page is None:
         return None
+    candidates = page.candidates
+    raw_results_movie = page.raw_results
+    next_offset = page.next_offset
+    has_more = page.has_more
     selected = None
     while True:
         if not candidates:
@@ -544,14 +722,20 @@ def _process_item(
                 if empty_choice == "s":
                     query = _prompt_text("Search query", item.title, progress)
                     item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
-                    candidates = _fetch_with_retry(
+                    raw_results_movie = None
+                    next_offset = 0
+                    page = _fetch_with_retry(
                         "Wikidata",
-                        lambda: _movie_candidates(item, session_wd, cache, show_cache),
+                        lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
                         interactive,
                         progress,
                     )
-                    if candidates is None:
+                    if page is None:
                         return None
+                    candidates = page.candidates
+                    raw_results_movie = page.raw_results
+                    next_offset = page.next_offset
+                    has_more = page.has_more
                     continue
                 if empty_choice == "m":
                     selected = _prompt_manual_movie(item, progress)
@@ -575,14 +759,20 @@ def _process_item(
                 if low_choice == "s":
                     query = _prompt_text("Search query", item.title, progress)
                     item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
-                    candidates = _fetch_with_retry(
+                    raw_results_movie = None
+                    next_offset = 0
+                    page = _fetch_with_retry(
                         "Wikidata",
-                        lambda: _movie_candidates(item, session_wd, cache, show_cache),
+                        lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
                         interactive,
                         progress,
                     )
-                    if candidates is None:
+                    if page is None:
                         return None
+                    candidates = page.candidates
+                    raw_results_movie = page.raw_results
+                    next_offset = page.next_offset
+                    has_more = page.has_more
                     continue
                 if low_choice == "m":
                     selected = _prompt_manual_movie(item, progress)
@@ -597,21 +787,45 @@ def _process_item(
         if not interactive:
             selected = None
             break
-        choice = _select_candidate(candidates, progress)
+        _maybe_enrich_candidates("movie", candidates, session_tv, session_wd, cache, interactive)
+        choice = _select_candidate("movie", candidates, progress, has_more)
         if isinstance(choice, Candidate):
             selected = choice
             break
         if choice == "s":
             query = _prompt_text("Search query", item.title, progress)
             item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
-            candidates = _fetch_with_retry(
+            raw_results_movie = None
+            next_offset = 0
+            page = _fetch_with_retry(
                 "Wikidata",
-                lambda: _movie_candidates(item, session_wd, cache, show_cache),
+                lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
                 interactive,
                 progress,
             )
-            if candidates is None:
+            if page is None:
                 return None
+            candidates = page.candidates
+            raw_results_movie = page.raw_results
+            next_offset = page.next_offset
+            has_more = page.has_more
+            continue
+        if choice == "n":
+            if not has_more:
+                console.print("No more candidates.")
+                continue
+            page = _fetch_with_retry(
+                "Wikidata",
+                lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
+                interactive,
+                progress,
+            )
+            if page is None:
+                return None
+            candidates = page.candidates
+            raw_results_movie = page.raw_results
+            next_offset = page.next_offset
+            has_more = page.has_more
             continue
         if choice == "m":
             selected = _prompt_manual_movie(item, progress)

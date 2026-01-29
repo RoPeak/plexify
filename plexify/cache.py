@@ -19,6 +19,7 @@ class Cache:
         self.data = json_load(path)
         self.data.setdefault("shows", {})
         self.data.setdefault("movies", {})
+        self.data.setdefault("enrichment", {})
 
     def get_show(self, key: str) -> dict[str, Any] | None:
         return self.data.get("shows", {}).get(key)
@@ -34,3 +35,9 @@ class Cache:
 
     def save(self) -> None:
         json_dump(self.path, self.data)
+
+    def get_enrichment(self, key: str) -> dict[str, Any] | None:
+        return self.data.get("enrichment", {}).get(key)
+
+    def set_enrichment(self, key: str, value: dict[str, Any]) -> None:
+        self.data.setdefault("enrichment", {})[key] = value

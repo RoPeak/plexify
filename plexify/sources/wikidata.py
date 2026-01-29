@@ -10,6 +10,30 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
+_available = True
+_warned = False
+
+
+def _warn_unavailable(message: str) -> None:
+    global _warned
+    if _warned:
+        return
+    print(message)
+    _warned = True
+
+
+def _set_unavailable(message: str) -> None:
+    global _available
+    if not _available:
+        return
+    _available = False
+    _warn_unavailable(message)
+
+
+def is_available() -> bool:
+    return _available
+
+
 def _user_agent() -> str:
     # Wikimedia APIs strongly prefer an informative UA; you can override via env var
     # E.g. `set PLEXIFY_USER_AGENT="plexify/0.1 (contact: your@email)"`
@@ -109,27 +133,45 @@ def parse_entity(qid: str, payload: dict[str, Any]) -> WikidataFilm:
 
 
 def search(query: str, session: requests.Session | None = None) -> list[WikidataCandidate]:
+    if not _available:
+        return []
     session = session or _session()
-    resp = session.get(
-        "https://www.wikidata.org/w/api.php",
-        params={
-            "action": "wbsearchentities",
-            "search": query,
-            "language": "en",
-            "format": "json",
-            "limit": 10,
-            "type": "item",
-        },
-        timeout=(5, 20),
-    )
-    resp.raise_for_status()
+    try:
+        resp = session.get(
+            "https://www.wikidata.org/w/api.php",
+            params={
+                "action": "wbsearchentities",
+                "search": query,
+                "language": "en",
+                "format": "json",
+                "limit": 10,
+                "type": "item",
+            },
+            timeout=(5, 15),
+        )
+        if resp.status_code in {403, 429}:
+            _set_unavailable("Wikidata lookups are unavailable (HTTP 403/429).")
+            return []
+        resp.raise_for_status()
+    except requests.RequestException:
+        _set_unavailable("Wikidata lookups are unavailable (network error).")
+        return []
     _rate_limit()
     return parse_search_results(resp.json())
 
 
 def fetch_entity(qid: str, session: requests.Session | None = None) -> WikidataFilm:
+    if not _available:
+        return WikidataFilm(qid=qid, title=qid, year=None, is_film=False)
     session = session or _session()
-    resp = session.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json", timeout=(5, 20))
-    resp.raise_for_status()
+    try:
+        resp = session.get(f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json", timeout=(5, 15))
+        if resp.status_code in {403, 429}:
+            _set_unavailable("Wikidata lookups are unavailable (HTTP 403/429).")
+            return WikidataFilm(qid=qid, title=qid, year=None, is_film=False)
+        resp.raise_for_status()
+    except requests.RequestException:
+        _set_unavailable("Wikidata lookups are unavailable (network error).")
+        return WikidataFilm(qid=qid, title=qid, year=None, is_film=False)
     _rate_limit()
     return parse_entity(qid, resp.json())

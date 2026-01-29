@@ -737,6 +737,11 @@ def wizard() -> None:
         console.print("Set PLEXIFY_USER_AGENT to something like: plexify/0.1 (contact: you@example.com)")
         if not _confirm("Continue without setting it? [y/N]: ", False, None, show_default=False):
             raise typer.Exit(code=0)
+    wikidata.search("Test")
+    if not wikidata.is_available():
+        console.print(
+            "Network lookups appear to be unavailable. You can still organise files, but you may need to use manual search more often."
+        )
 
     console.print("Where are the files you want to organise?")
     incoming_default = Path.cwd()

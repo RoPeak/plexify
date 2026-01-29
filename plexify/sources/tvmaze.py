@@ -9,6 +9,30 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
+_available = True
+_warned = False
+
+
+def _warn_unavailable(message: str) -> None:
+    global _warned
+    if _warned:
+        return
+    print(message)
+    _warned = True
+
+
+def _set_unavailable(message: str) -> None:
+    global _available
+    if not _available:
+        return
+    _available = False
+    _warn_unavailable(message)
+
+
+def is_available() -> bool:
+    return _available
+
+
 @dataclass(frozen=True)
 class TVMazeShow:
     id: int
@@ -70,16 +94,34 @@ def parse_episode_results(payload: list[dict[str, Any]]) -> list[TVMazeEpisode]:
 
 
 def search_shows(query: str, session: requests.Session | None = None) -> list[TVMazeShow]:
+    if not _available:
+        return []
     session = session or _session()
-    resp = session.get("https://api.tvmaze.com/search/shows", params={"q": query}, timeout=(5, 20))
-    resp.raise_for_status()
+    try:
+        resp = session.get("https://api.tvmaze.com/search/shows", params={"q": query}, timeout=(5, 15))
+        if resp.status_code in {403, 429}:
+            _set_unavailable("TVMaze lookups are unavailable (HTTP 403/429).")
+            return []
+        resp.raise_for_status()
+    except requests.RequestException:
+        _set_unavailable("TVMaze lookups are unavailable (network error).")
+        return []
     _rate_limit()
     return parse_show_results(resp.json())
 
 
 def fetch_episodes(show_id: int, session: requests.Session | None = None) -> list[TVMazeEpisode]:
+    if not _available:
+        return []
     session = session or _session()
-    resp = session.get(f"https://api.tvmaze.com/shows/{show_id}/episodes", timeout=(5, 20))
-    resp.raise_for_status()
+    try:
+        resp = session.get(f"https://api.tvmaze.com/shows/{show_id}/episodes", timeout=(5, 15))
+        if resp.status_code in {403, 429}:
+            _set_unavailable("TVMaze lookups are unavailable (HTTP 403/429).")
+            return []
+        resp.raise_for_status()
+    except requests.RequestException:
+        _set_unavailable("TVMaze lookups are unavailable (network error).")
+        return []
     _rate_limit()
     return parse_episode_results(resp.json())

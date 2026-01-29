@@ -34,6 +34,7 @@ def test_sources_unavailable_does_not_crash(monkeypatch, tmp_path: Path) -> None
         extensions=cli.DEFAULT_EXTENSIONS,
         cache_path=library / ".plexify" / "cache.json",
         limit=None,
+        show_cache=False,
     )
 
     assert plans == []

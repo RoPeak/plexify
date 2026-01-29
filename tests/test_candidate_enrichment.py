@@ -36,7 +36,7 @@ def test_enrichment_not_called_in_non_interactive(monkeypatch, tmp_path: Path) -
     library.mkdir()
     (incoming / "Movie (2000).mkv").write_text("x", encoding="utf-8")
 
-    plans, errors = cli._plan_items(
+    plans, errors, _stats = cli._plan_items(
         incoming=incoming,
         library=library,
         mode="dry-run",

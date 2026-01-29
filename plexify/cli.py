@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -27,6 +28,8 @@ app = typer.Typer(add_completion=False)
 console = Console()
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
 DEFAULT_MIN_CONFIDENCE = 0.55
+PROMPT_BASE = "Enter=accept #1 | 1-9=choose | s=search | m=manual | k=skip | q=quit"
+NO_MORE_RESULTS_MESSAGE = "No more results. Try 's' to refine or 'm' to enter manually."
 
 
 @dataclass
@@ -45,6 +48,65 @@ class CandidatePage:
     raw_results: list[Any] | None
     next_offset: int
     has_more: bool
+    cache_hit: bool = False
+    search_time: float | None = None
+
+
+@dataclass
+class PlanStats:
+    auto_matched: int = 0
+    user_confirmed: int = 0
+    manual: int = 0
+    skipped: int = 0
+    errors: int = 0
+    elapsed: float = 0.0
+
+
+def _console_for(progress: Progress | None) -> Console:
+    if progress is not None and hasattr(progress, "console"):
+        return progress.console
+    return console
+
+
+def _safe_print(message: str, progress: Progress | None = None) -> None:
+    _console_for(progress).print(message)
+
+
+def _prompt_line(has_more: bool) -> str:
+    if has_more:
+        return f"{PROMPT_BASE} | n=next page"
+    return PROMPT_BASE
+
+
+def _year_hint_from_path(path: Path) -> int | None:
+    match = re.search(r"\((19\d{2}|20\d{2})\)", path.stem)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _build_search_query(title: str, path: Path, hint: str | None, *, include_year_hint: bool = True) -> str:
+    parts = [title.strip()]
+    if include_year_hint:
+        year_hint = _year_hint_from_path(path)
+        if year_hint:
+            parts.append(str(year_hint))
+    if hint:
+        hint_text = hint.strip()
+        if hint_text:
+            parts.append(hint_text)
+    return " ".join(part for part in parts if part)
+
+
+def _with_title(item: InferredItem, title: str) -> InferredItem:
+    return InferredItem(
+        path=item.path,
+        media_type=item.media_type,
+        title=title,
+        year=item.year,
+        season=item.season,
+        episode=item.episode,
+    )
 
 
 def _pause_progress(progress: Progress | None) -> bool:
@@ -85,12 +147,12 @@ def _confidence_score(title_guess: str, title_actual: str, year_guess: int | Non
 
 
 def _format_value(value: str | None) -> str:
-    return value if value else "—"
+    return value if value else "-"
 
 
 def _format_names(names: list[str] | None, limit: int = 3) -> str:
     if not names:
-        return "—"
+        return "-"
     return ", ".join(names[:limit])
 
 
@@ -148,7 +210,7 @@ def _maybe_enrich_candidates(
         cache.save()
 
 
-def _print_candidates(media_type: str, candidates: list[Candidate]) -> None:
+def _print_candidates(media_type: str, candidates: list[Candidate], progress: Progress | None = None) -> None:
     table = Table(title="Candidates")
     table.add_column("#")
     table.add_column("Title")
@@ -174,7 +236,7 @@ def _print_candidates(media_type: str, candidates: list[Candidate]) -> None:
             row.append(_format_names(enrichment.get("cast")))
         row.extend([cand.source, f"{cand.confidence:.2f}"])
         table.add_row(*row)
-    console.print(table)
+    _console_for(progress).print(table)
 
 
 def _select_candidate(
@@ -183,29 +245,32 @@ def _select_candidate(
     progress: Progress | None,
     has_more: bool,
 ) -> Candidate | None | str:
-    if not candidates:
-        return None
-    instruction = "Press Enter to accept #1, type 1-5 to choose, 's' to search, 'n' for more, 'k' to skip, 'q' to quit."
+    printed_table = False
     while True:
-        _print_candidates(media_type, candidates)
-        console.print(instruction)
-        choice = _prompt_choice("Select >", "1", progress, show_default=False)
-        if choice == "1":
-            return candidates[0]
+        if candidates and not printed_table:
+            _print_candidates(media_type, candidates, progress)
+            printed_table = True
+        _safe_print(_prompt_line(has_more), progress)
+        choice = _prompt_choice("Select", "", progress, show_default=False)
+        if choice == "":
+            if candidates:
+                return candidates[0]
+            _safe_print("No candidates available to accept.", progress)
+            continue
         if choice.isdigit():
             idx = int(choice) - 1
             if 0 <= idx < len(candidates):
                 return candidates[idx]
-            console.print("Invalid selection.")
+            _safe_print("Invalid selection.", progress)
             continue
         if choice == "n":
             if not has_more:
-                console.print("No more candidates.")
+                _safe_print(NO_MORE_RESULTS_MESSAGE, progress)
                 continue
             return "n"
         if choice in {"s", "m", "k", "q"}:
             return choice
-        console.print("Invalid choice.")
+        _safe_print("Invalid choice.", progress)
 
 
 def _tv_candidates(
@@ -216,6 +281,8 @@ def _tv_candidates(
     *,
     offset: int = 0,
     raw_results: list[tvmaze.TVMazeShow] | None = None,
+    search_query: str | None = None,
+    progress: Progress | None = None,
     limit: int = 5,
 ) -> CandidatePage:
     cached = cache.get_show(item.title)
@@ -225,13 +292,21 @@ def _tv_candidates(
             name = cached.get("name") or item.title
             year = cached.get("premiered")
             year_text = f" ({year})" if year else ""
-            console.print(f"Using cached match for: {item.path.name} -> {name}{year_text} [TVMaze]")
+            _safe_print("Cache hit.", progress)
+            _safe_print(f"Using cached match for: {item.path.name} -> {name}{year_text} [TVMaze]", progress)
         show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
         results.append(_tv_candidate_from_show(item, show))
-        return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False)
+        return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
 
     if raw_results is None:
-        raw_results = tvmaze.search_shows(item.title, session=session)
+        query = search_query or item.title
+        _safe_print(f"Searching TVMaze for: {query}", progress)
+        started = time.monotonic()
+        raw_results = tvmaze.search_shows(query, session=session)
+        elapsed = time.monotonic() - started
+        if not raw_results:
+            _safe_print(f"No results ({elapsed:.1f}s).", progress)
+            return CandidatePage(candidates=[], raw_results=raw_results, next_offset=0, has_more=False, search_time=elapsed)
     page = raw_results[offset : offset + limit]
     for show in page:
         results.append(_tv_candidate_from_show(item, show))
@@ -290,6 +365,8 @@ def _movie_candidates(
     *,
     offset: int = 0,
     raw_results: list[wikidata.WikidataCandidate] | None = None,
+    search_query: str | None = None,
+    progress: Progress | None = None,
     limit: int = 5,
 ) -> CandidatePage:
     cached = cache.get_movie(item.title)
@@ -299,13 +376,21 @@ def _movie_candidates(
             title = cached.get("title") or item.title
             year = cached.get("year")
             year_text = f" ({year})" if year else ""
-            console.print(f"Using cached match for: {item.path.name} -> {title}{year_text} [Wikidata]")
+            _safe_print("Cache hit.", progress)
+            _safe_print(f"Using cached match for: {item.path.name} -> {title}{year_text} [Wikidata]", progress)
         film = wikidata.WikidataFilm(qid=cached["qid"], title=cached["title"], year=cached.get("year"), is_film=True)
         results.append(_movie_candidate_from_film(item, film))
-        return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False)
+        return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
 
     if raw_results is None:
-        raw_results = wikidata.search(item.title, session=session, limit=10)
+        query = search_query or item.title
+        _safe_print(f"Searching Wikidata for: {query}", progress)
+        started = time.monotonic()
+        raw_results = wikidata.search(query, session=session, limit=10)
+        elapsed = time.monotonic() - started
+        if not raw_results:
+            _safe_print(f"No results ({elapsed:.1f}s).", progress)
+            return CandidatePage(candidates=[], raw_results=raw_results, next_offset=0, has_more=False, search_time=elapsed)
     idx = offset
     while idx < len(raw_results) and len(results) < limit:
         cand = raw_results[idx]
@@ -350,23 +435,43 @@ def _prompt_manual_tv(item: InferredItem, progress: Progress | None) -> Candidat
     return Candidate(title=show_name, year=year, source="Manual", confidence=1.0, metadata=metadata)
 
 
-def _prompt_manual_movie(item: InferredItem, progress: Progress | None) -> Candidate:
+def _prompt_manual_movie(item: InferredItem, progress: Progress | None) -> tuple[Candidate, str]:
     title = _prompt_text("Movie title", item.title, progress)
-    year_text = _prompt_text("Movie year", str(item.year) if item.year else "", progress)
+    year_text = _prompt_text("Movie year (optional, helps disambiguate) []:", "", progress, show_default=False)
+    hint = _prompt_text("Hint (optional, director/cast/keyword) []:", "", progress, show_default=False)
     year = int(year_text) if year_text else None
     metadata = {"qid": None, "title": title, "year": year, "manual": True}
-    return Candidate(title=title, year=year, source="Manual", confidence=1.0, metadata=metadata)
+    return Candidate(title=title, year=year, source="Manual", confidence=1.0, metadata=metadata), hint
 
 
-def _print_plan(plan: MovePlan) -> None:
-    console.print("PLAN")
-    console.print(f"FROM: {plan.source}")
-    console.print(f"TO:   {plan.destination}")
+def _prompt_search(item: InferredItem, progress: Progress | None) -> tuple[InferredItem, str]:
+    query = _prompt_text("Search query", item.title, progress)
+    hint = _prompt_text("Hint (optional, director/cast/keyword) []:", "", progress, show_default=False)
+    return _with_title(item, query), _build_search_query(query, item.path, hint, include_year_hint=True)
 
 
-def _print_choice(selected: Candidate) -> None:
+def _record_stat(stats: PlanStats | None, outcome: str) -> None:
+    if stats is None:
+        return
+    if outcome == "auto":
+        stats.auto_matched += 1
+    elif outcome == "confirmed":
+        stats.user_confirmed += 1
+    elif outcome == "manual":
+        stats.manual += 1
+    elif outcome == "skipped":
+        stats.skipped += 1
+
+
+def _print_plan(plan: MovePlan, progress: Progress | None = None) -> None:
+    _safe_print("PLAN", progress)
+    _safe_print(f"FROM: {plan.source}", progress)
+    _safe_print(f"TO:   {plan.destination}", progress)
+
+
+def _print_choice(selected: Candidate, progress: Progress | None = None) -> None:
     year_text = str(selected.year) if selected.year else "Unknown"
-    console.print(f"Chosen: {selected.title} ({year_text}) from {selected.source}")
+    _safe_print(f"Chosen: {selected.title} ({year_text}) from {selected.source}", progress)
 
 
 def _fetch_with_retry(
@@ -379,7 +484,7 @@ def _fetch_with_retry(
         try:
             return fetch_fn()
         except requests.RequestException as exc:
-            console.print(f"{label} request failed: {exc.__class__.__name__}")
+            _safe_print(f"{label} request failed: {exc.__class__.__name__}", progress)
             if not interactive:
                 raise
             retry = _prompt_choice("Retry? (y/n)", "y", progress)
@@ -437,7 +542,7 @@ def _plan_items(
     cache_path: Path,
     limit: int | None,
     show_cache: bool,
-) -> tuple[list[MovePlan], list[str]]:
+) -> tuple[list[MovePlan], list[str], PlanStats]:
     cache_store = Cache(cache_path)
     exts = [ext.strip() for ext in extensions.split(",") if ext.strip()]
     files = iter_video_files(incoming, exts)
@@ -446,6 +551,8 @@ def _plan_items(
 
     plans: list[MovePlan] = []
     errors: list[str] = []
+    stats = PlanStats()
+    started = time.monotonic()
 
     with Progress(TextColumn("{task.completed}/{task.total} - {task.description}")) as progress:
         task = progress.add_task("Planning files...", total=len(files))
@@ -453,9 +560,7 @@ def _plan_items(
         session_wd = wikidata.create_session()
         total = len(files)
         for index, path in enumerate(files, start=1):
-            was_running = _pause_progress(progress)
-            console.print(f"File {index}/{total}: {path}")
-            _resume_progress(progress, was_running)
+            _safe_print(f"File {index}/{total}: {path}", progress)
             progress.update(task, description=f"Planning: {path.name}")
             progress.advance(task, 1)
             try:
@@ -473,13 +578,16 @@ def _plan_items(
                     session_wd=session_wd,
                     progress=progress,
                     show_cache=show_cache,
+                    stats=stats,
                 )
                 if plan:
                     plans.append(plan)
             except Exception as exc:  # noqa: BLE001
+                stats.errors += 1
                 errors.append(f"{path}: {exc}")
 
-    return plans, errors
+    stats.elapsed = time.monotonic() - started
+    return plans, errors, stats
 
 
 def _build_command(
@@ -529,16 +637,27 @@ def _process_item(
     session_wd: requests.Session,
     progress: Progress | None,
     show_cache: bool,
+    stats: PlanStats | None = None,
 ) -> MovePlan | None:
-    console.print(f"Detected: {item.media_type.upper()} | Title guess: {item.title}")
+    _safe_print(f"Detected: {item.media_type.upper()} | Title guess: {item.title}", progress)
     if item.media_type == "tv":
-        console.print(f"Season/Episode guess: {item.season}/{item.episode}")
+        _safe_print(f"Season/Episode guess: {item.season}/{item.episode}", progress)
     if item.media_type == "tv":
         raw_results_tv: list[tvmaze.TVMazeShow] | None = None
         next_offset = 0
+        search_query = _build_search_query(item.title, item.path, None, include_year_hint=True)
         page = _fetch_with_retry(
             "TVMaze",
-            lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
+            lambda: _tv_candidates(
+                item,
+                session_tv,
+                cache,
+                show_cache,
+                offset=next_offset,
+                raw_results=raw_results_tv,
+                search_query=search_query,
+                progress=progress,
+            ),
             interactive,
             progress,
         )
@@ -549,100 +668,82 @@ def _process_item(
         next_offset = page.next_offset
         has_more = page.has_more
         selected = None
+        outcome = None
         while True:
             if not candidates:
-                if interactive:
-                    console.print(f"No candidates found for {item.title}.")
-                    empty_choice = _prompt_choice("Choose: s (new search), m (manual), k (skip), q (quit): ", "k", progress)
-                    if empty_choice == "s":
-                        query = _prompt_text("Search query", item.title, progress)
-                        item = InferredItem(
-                            path=item.path,
-                            media_type=item.media_type,
-                            title=query,
-                            year=item.year,
-                            season=item.season,
-                            episode=item.episode,
-                        )
-                        raw_results_tv = None
-                        next_offset = 0
-                        page = _fetch_with_retry(
-                            "TVMaze",
-                            lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
-                            interactive,
-                            progress,
-                        )
-                        if page is None:
-                            return None
-                        candidates = page.candidates
-                        raw_results_tv = page.raw_results
-                        next_offset = page.next_offset
-                        has_more = page.has_more
-                        continue
-                    if empty_choice == "m":
-                        selected = _prompt_manual_tv(item, progress)
-                        break
-                    if empty_choice == "k":
+                if not interactive:
+                    _record_stat(stats, "skipped")
+                    return None
+                _safe_print(f"No candidates found for {item.title}.", progress)
+                empty_choice = _select_candidate("tv", candidates, progress, has_more)
+                if empty_choice == "s":
+                    item, search_query = _prompt_search(item, progress)
+                    raw_results_tv = None
+                    next_offset = 0
+                    page = _fetch_with_retry(
+                        "TVMaze",
+                        lambda: _tv_candidates(
+                            item,
+                            session_tv,
+                            cache,
+                            show_cache,
+                            offset=next_offset,
+                            raw_results=raw_results_tv,
+                            search_query=search_query,
+                            progress=progress,
+                        ),
+                        interactive,
+                        progress,
+                    )
+                    if page is None:
                         return None
-                    if empty_choice == "q":
-                        raise typer.Exit(code=0)
-                    console.print("Invalid choice.")
+                    candidates = page.candidates
+                    raw_results_tv = page.raw_results
+                    next_offset = page.next_offset
+                    has_more = page.has_more
                     continue
-                selected = None
-                break
+                if empty_choice == "m":
+                    selected = _prompt_manual_tv(item, progress)
+                    outcome = "manual"
+                    break
+                if empty_choice == "k":
+                    _record_stat(stats, "skipped")
+                    return None
+                if empty_choice == "q":
+                    raise typer.Exit(code=0)
+                continue
             _maybe_fetch_episode_title(item, candidates[0], session_tv, bump_confidence=True)
-            if candidates[0].confidence < min_confidence and interactive:
-                console.print("Top confidence below minimum threshold.")
-                low_choice = _prompt_choice(
-                    "Choose: s (new search), m (manual), k (skip), q (quit), Enter (review list): ",
-                    "",
-                    progress,
-                )
-                if low_choice in {"s", "m", "k", "q"}:
-                    if low_choice == "s":
-                        query = _prompt_text("Search query", item.title, progress)
-                        item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year, season=item.season, episode=item.episode)
-                        raw_results_tv = None
-                        next_offset = 0
-                        page = _fetch_with_retry(
-                            "TVMaze",
-                            lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
-                            interactive,
-                            progress,
-                        )
-                        if page is None:
-                            return None
-                        candidates = page.candidates
-                        raw_results_tv = page.raw_results
-                        next_offset = page.next_offset
-                        has_more = page.has_more
-                        continue
-                    if low_choice == "m":
-                        selected = _prompt_manual_tv(item, progress)
-                        break
-                    if low_choice == "k":
-                        return None
-                    if low_choice == "q":
-                        raise typer.Exit(code=0)
             if yes and candidates[0].confidence >= min_confidence:
                 selected = candidates[0]
+                outcome = "auto"
                 break
             if not interactive:
-                selected = None
-                break
+                _record_stat(stats, "skipped")
+                return None
+            if candidates[0].confidence < min_confidence:
+                _safe_print("Top confidence below minimum threshold.", progress)
             _maybe_enrich_candidates("tv", candidates, session_tv, session_wd, cache, interactive)
             choice = _select_candidate("tv", candidates, progress, has_more)
             if isinstance(choice, Candidate):
                 selected = choice
+                outcome = "confirmed"
                 break
             if choice == "s":
-                query = _prompt_text("Search query", item.title, progress)
-                item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year, season=item.season, episode=item.episode)
+                item, search_query = _prompt_search(item, progress)
                 raw_results_tv = None
                 next_offset = 0
                 page = _fetch_with_retry(
                     "TVMaze",
-                    lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
+                    lambda: _tv_candidates(
+                        item,
+                        session_tv,
+                        cache,
+                        show_cache,
+                        offset=next_offset,
+                        raw_results=raw_results_tv,
+                        search_query=search_query,
+                        progress=progress,
+                    ),
                     interactive,
                     progress,
                 )
@@ -654,12 +755,18 @@ def _process_item(
                 has_more = page.has_more
                 continue
             if choice == "n":
-                if not has_more:
-                    console.print("No more candidates.")
-                    continue
                 page = _fetch_with_retry(
                     "TVMaze",
-                    lambda: _tv_candidates(item, session_tv, cache, show_cache, offset=next_offset, raw_results=raw_results_tv),
+                    lambda: _tv_candidates(
+                        item,
+                        session_tv,
+                        cache,
+                        show_cache,
+                        offset=next_offset,
+                        raw_results=raw_results_tv,
+                        search_query=search_query,
+                        progress=progress,
+                    ),
                     interactive,
                     progress,
                 )
@@ -672,14 +779,22 @@ def _process_item(
                 continue
             if choice == "m":
                 selected = _prompt_manual_tv(item, progress)
+                outcome = "manual"
                 break
             if choice == "k":
+                _record_stat(stats, "skipped")
                 return None
             if choice == "q":
                 raise typer.Exit(code=0)
         if not selected:
+            _record_stat(stats, "skipped")
             return None
-        _print_choice(selected)
+        if selected.metadata.get("manual"):
+            outcome = "manual"
+        if outcome is None:
+            outcome = "confirmed"
+        _record_stat(stats, outcome)
+        _print_choice(selected, progress)
         _maybe_fetch_episode_title(item, selected, session_tv, bump_confidence=False)
         metadata = selected.metadata
         if selected.metadata.get("manual"):
@@ -717,14 +832,24 @@ def _process_item(
                 "episode_title": metadata.get("episode_title"),
             },
         )
-        _print_plan(plan)
+        _print_plan(plan, progress)
         return plan
 
     raw_results_movie: list[wikidata.WikidataCandidate] | None = None
     next_offset = 0
+    search_query = _build_search_query(item.title, item.path, None, include_year_hint=True)
     page = _fetch_with_retry(
         "Wikidata",
-        lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
+        lambda: _movie_candidates(
+            item,
+            session_wd,
+            cache,
+            show_cache,
+            offset=next_offset,
+            raw_results=raw_results_movie,
+            search_query=search_query,
+            progress=progress,
+        ),
         interactive,
         progress,
     )
@@ -735,92 +860,119 @@ def _process_item(
     next_offset = page.next_offset
     has_more = page.has_more
     selected = None
+    manual_fallback: Candidate | None = None
+    manual_hint = ""
+    outcome = None
     while True:
         if not candidates:
-            if interactive:
-                console.print(f"No candidates found for {item.title}.")
-                empty_choice = _prompt_choice("Choose: s (new search), m (manual), k (skip), q (quit): ", "k", progress)
-                if empty_choice == "s":
-                    query = _prompt_text("Search query", item.title, progress)
-                    item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
-                    raw_results_movie = None
-                    next_offset = 0
-                    page = _fetch_with_retry(
-                        "Wikidata",
-                        lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
-                        interactive,
-                        progress,
-                    )
-                    if page is None:
-                        return None
-                    candidates = page.candidates
-                    raw_results_movie = page.raw_results
-                    next_offset = page.next_offset
-                    has_more = page.has_more
-                    continue
-                if empty_choice == "m":
-                    selected = _prompt_manual_movie(item, progress)
-                    break
-                if empty_choice == "k":
+            if not interactive:
+                _record_stat(stats, "skipped")
+                return None
+            _safe_print(f"No candidates found for {item.title}.", progress)
+            empty_choice = _select_candidate("movie", candidates, progress, has_more)
+            if empty_choice == "s":
+                item, search_query = _prompt_search(item, progress)
+                raw_results_movie = None
+                next_offset = 0
+                page = _fetch_with_retry(
+                    "Wikidata",
+                    lambda: _movie_candidates(
+                        item,
+                        session_wd,
+                        cache,
+                        show_cache,
+                        offset=next_offset,
+                        raw_results=raw_results_movie,
+                        search_query=search_query,
+                        progress=progress,
+                    ),
+                    interactive,
+                    progress,
+                )
+                if page is None:
                     return None
-                if empty_choice == "q":
-                    raise typer.Exit(code=0)
-                console.print("Invalid choice.")
+                candidates = page.candidates
+                raw_results_movie = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
                 continue
-            selected = None
-            break
-        if candidates[0].confidence < min_confidence and interactive:
-            console.print("Top confidence below minimum threshold.")
-            low_choice = _prompt_choice(
-                "Choose: s (new search), m (manual), k (skip), q (quit), Enter (review list): ",
-                "",
-                progress,
-            )
-            if low_choice in {"s", "m", "k", "q"}:
-                if low_choice == "s":
-                    query = _prompt_text("Search query", item.title, progress)
-                    item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
+            if empty_choice == "m":
+                if manual_fallback is None:
+                    manual_fallback, manual_hint = _prompt_manual_movie(item, progress)
+                if manual_fallback.year is None and interactive:
+                    item = _with_title(item, manual_fallback.title)
+                    search_query = _build_search_query(
+                        manual_fallback.title,
+                        item.path,
+                        manual_hint,
+                        include_year_hint=False,
+                    )
                     raw_results_movie = None
                     next_offset = 0
                     page = _fetch_with_retry(
                         "Wikidata",
-                        lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
+                        lambda: _movie_candidates(
+                            item,
+                            session_wd,
+                            cache,
+                            show_cache,
+                            offset=next_offset,
+                            raw_results=raw_results_movie,
+                            search_query=search_query,
+                            progress=progress,
+                        ),
                         interactive,
                         progress,
                     )
                     if page is None:
-                        return None
+                        selected = manual_fallback
+                        outcome = "manual"
+                        break
                     candidates = page.candidates
                     raw_results_movie = page.raw_results
                     next_offset = page.next_offset
                     has_more = page.has_more
                     continue
-                if low_choice == "m":
-                    selected = _prompt_manual_movie(item, progress)
-                    break
-                if low_choice == "k":
-                    return None
-                if low_choice == "q":
-                    raise typer.Exit(code=0)
+                selected = manual_fallback
+                outcome = "manual"
+                break
+            if empty_choice == "k":
+                _record_stat(stats, "skipped")
+                return None
+            if empty_choice == "q":
+                raise typer.Exit(code=0)
+            continue
         if yes and candidates[0].confidence >= min_confidence:
             selected = candidates[0]
+            outcome = "auto"
             break
         if not interactive:
-            selected = None
-            break
+            _record_stat(stats, "skipped")
+            return None
+        if candidates[0].confidence < min_confidence:
+            _safe_print("Top confidence below minimum threshold.", progress)
         _maybe_enrich_candidates("movie", candidates, session_tv, session_wd, cache, interactive)
         choice = _select_candidate("movie", candidates, progress, has_more)
         if isinstance(choice, Candidate):
             selected = choice
+            outcome = "confirmed"
             break
         if choice == "s":
-            query = _prompt_text("Search query", item.title, progress)
-            item = InferredItem(path=item.path, media_type=item.media_type, title=query, year=item.year)
+            item, search_query = _prompt_search(item, progress)
             raw_results_movie = None
             next_offset = 0
             page = _fetch_with_retry(
                 "Wikidata",
-                lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
+                lambda: _movie_candidates(
+                    item,
+                    session_wd,
+                    cache,
+                    show_cache,
+                    offset=next_offset,
+                    raw_results=raw_results_movie,
+                    search_query=search_query,
+                    progress=progress,
+                ),
                 interactive,
                 progress,
             )
@@ -832,12 +984,18 @@ def _process_item(
             has_more = page.has_more
             continue
         if choice == "n":
-            if not has_more:
-                console.print("No more candidates.")
-                continue
             page = _fetch_with_retry(
                 "Wikidata",
-                lambda: _movie_candidates(item, session_wd, cache, show_cache, offset=next_offset, raw_results=raw_results_movie),
+                lambda: _movie_candidates(
+                    item,
+                    session_wd,
+                    cache,
+                    show_cache,
+                    offset=next_offset,
+                    raw_results=raw_results_movie,
+                    search_query=search_query,
+                    progress=progress,
+                ),
                 interactive,
                 progress,
             )
@@ -849,15 +1007,59 @@ def _process_item(
             has_more = page.has_more
             continue
         if choice == "m":
-            selected = _prompt_manual_movie(item, progress)
+            if manual_fallback is None:
+                manual_fallback, manual_hint = _prompt_manual_movie(item, progress)
+            if manual_fallback.year is None and interactive:
+                item = _with_title(item, manual_fallback.title)
+                search_query = _build_search_query(
+                    manual_fallback.title,
+                    item.path,
+                    manual_hint,
+                    include_year_hint=False,
+                )
+                raw_results_movie = None
+                next_offset = 0
+                page = _fetch_with_retry(
+                    "Wikidata",
+                    lambda: _movie_candidates(
+                        item,
+                        session_wd,
+                        cache,
+                        show_cache,
+                        offset=next_offset,
+                        raw_results=raw_results_movie,
+                        search_query=search_query,
+                        progress=progress,
+                    ),
+                    interactive,
+                    progress,
+                )
+                if page is None:
+                    selected = manual_fallback
+                    outcome = "manual"
+                    break
+                candidates = page.candidates
+                raw_results_movie = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
+                continue
+            selected = manual_fallback
+            outcome = "manual"
             break
         if choice == "k":
+            _record_stat(stats, "skipped")
             return None
         if choice == "q":
             raise typer.Exit(code=0)
     if not selected:
+        _record_stat(stats, "skipped")
         return None
-    _print_choice(selected)
+    if selected.metadata.get("manual"):
+        outcome = "manual"
+    if outcome is None:
+        outcome = "confirmed"
+    _record_stat(stats, outcome)
+    _print_choice(selected, progress)
     metadata = selected.metadata
     if metadata.get("manual"):
         cache.set_movie(item.title, {"qid": None, "title": metadata["title"], "year": metadata.get("year"), "manual": True})
@@ -867,7 +1069,7 @@ def _process_item(
 
     year = metadata.get("year") or selected.year
     if year is None and interactive:
-        year_text = _prompt_text("Movie year (blank for Unknown Year)", "", progress)
+        year_text = _prompt_text("Movie year (optional, helps disambiguate) []:", "", progress, show_default=False)
         year = int(year_text) if year_text else None
     destination = plan_movie(library, metadata.get("title") or selected.title, year, item.path.suffix)
     plan = MovePlan(
@@ -877,7 +1079,7 @@ def _process_item(
         media_type="movie",
         metadata={"title": metadata.get("title") or selected.title, "year": year},
     )
-    _print_plan(plan)
+    _print_plan(plan, progress)
     return plan
 
 
@@ -924,7 +1126,7 @@ def organise(
     cache_path = cache or library / ".plexify" / "cache.json"
     report_path = report or library / ".plexify" / "reports" / f"{now_timestamp()}.json"
 
-    plans, errors = _plan_items(
+    plans, errors, _stats = _plan_items(
         incoming=incoming,
         library=library,
         mode=mode,
@@ -1100,7 +1302,7 @@ def wizard() -> None:
 
     cache_path = library / ".plexify" / "cache.json"
     report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
-    plans, errors = _plan_items(
+    plans, errors, stats = _plan_items(
         incoming=incoming,
         library=library,
         mode="dry-run",
@@ -1118,8 +1320,12 @@ def wizard() -> None:
 
     console.print("Plan complete.")
     console.print(f"Planned items: {len(plans)}")
-    console.print(f"Skipped: {len(result.skipped)}")
-    console.print(f"Errors: {len(result.errors) + len(errors)}")
+    console.print(f"Matched automatically: {stats.auto_matched}")
+    console.print(f"Confirmed by user: {stats.user_confirmed}")
+    console.print(f"Entered manually: {stats.manual}")
+    console.print(f"Skipped: {stats.skipped}")
+    console.print(f"Errors: {stats.errors + len(result.errors)}")
+    console.print(f"Planning time: {stats.elapsed:.1f}s")
     if print_tree and plans:
         tree = _build_tree([plan.destination for plan in plans])
         console.print(tree)

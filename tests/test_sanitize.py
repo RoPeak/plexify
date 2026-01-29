@@ -2,7 +2,7 @@ from plexify.util import sanitise_name
 
 
 def test_sanitize_name_removes_windows_invalid_chars():
-    assert sanitise_name('Bad<>:"/\\|?*Name') == "Bad________Name"
+    assert sanitise_name('Bad<>:"/\\|?*Name') == "Bad - Name"
 
 
 def test_sanitize_name_trims_trailing_dots_spaces():

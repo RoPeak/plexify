@@ -23,7 +23,7 @@ def test_sources_unavailable_does_not_crash(monkeypatch, tmp_path: Path) -> None
     library.mkdir()
     (incoming / "Gladiator (2000).mkv").write_text("x", encoding="utf-8")
 
-    plans, errors = cli._plan_items(
+    plans, errors, _stats = cli._plan_items(
         incoming=incoming,
         library=library,
         mode="dry-run",

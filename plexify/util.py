@@ -8,14 +8,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-WINDOWS_INVALID = r'<>:"/\\|?*'
+WINDOWS_INVALID = r'<>"/\\|?*'
 
 
 def sanitise_name(value: str) -> str:
     if not value:
         return "Unknown"
-    cleaned = re.sub(r"[\\/]+", "_", value)
-    cleaned = "".join("_" if ch in WINDOWS_INVALID else ch for ch in cleaned)
+    cleaned = value.replace(":", " - ")
+    cleaned = re.sub(r"[\\/]+", " ", cleaned)
+    cleaned = "".join(" " if ch in WINDOWS_INVALID else ch for ch in cleaned)
+    cleaned = re.sub(r"_\s+", "_", cleaned)
+    cleaned = re.sub(r"\s+_", "_", cleaned)
     cleaned = cleaned.rstrip(". ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned or "Unknown"

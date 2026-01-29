@@ -11,6 +11,35 @@ SEASON_RE = re.compile(r"\b(?:season|series)\s*(\d{1,2})\b", re.IGNORECASE)
 SXXEYY_RE = re.compile(r"\bs(\d{1,2})e(\d{1,2})\b", re.IGNORECASE)
 EPISODE_RE = re.compile(r"\b(?:episode|ep)\s*(\d{1,3})\b", re.IGNORECASE)
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+NOISE_TOKENS = {
+    "1080p",
+    "720p",
+    "2160p",
+    "4k",
+    "x264",
+    "x265",
+    "h264",
+    "h265",
+    "hevc",
+    "av1",
+    "bluray",
+    "blu-ray",
+    "bdrip",
+    "brrip",
+    "web",
+    "web-dl",
+    "webrip",
+    "hdrip",
+    "dvdrip",
+    "hdtv",
+    "remux",
+    "proper",
+    "repack",
+    "extended",
+    "unrated",
+    "yts",
+    "rarbg",
+}
 
 
 @dataclass(frozen=True)
@@ -55,6 +84,29 @@ def _extract_year(name: str) -> Optional[int]:
     return None
 
 
+def _starts_with_number(value: str) -> bool:
+    return bool(re.match(r"^\s*\d+", value))
+
+
+def _clean_title_from_stem(stem: str) -> str:
+    tokens = re.split(r"[.\s_\-]+", stem)
+    cleaned: list[str] = []
+    for token in tokens:
+        if not token:
+            continue
+        lower = token.lower()
+        if YEAR_RE.fullmatch(token):
+            continue
+        if lower in NOISE_TOKENS:
+            continue
+        if re.fullmatch(r"\d{3,4}p", lower):
+            continue
+        if re.fullmatch(r"s\d{1,2}e\d{1,2}", lower):
+            continue
+        cleaned.append(token)
+    return " ".join(cleaned).strip()
+
+
 def _has_tv_context(path: Path) -> bool:
     if SXXEYY_RE.search(path.stem):
         return True
@@ -97,6 +149,13 @@ def infer_item(path: Path) -> InferredItem:
             episode = episode or guessed_episode
 
     title = guess.get("title") or path.stem
+    if media_type == "movie":
+        cleaned = _clean_title_from_stem(path.stem)
+        if cleaned:
+            if _starts_with_number(path.stem) and not _starts_with_number(str(title)):
+                title = cleaned
+            elif title == path.stem:
+                title = cleaned
     if media_type == "tv":
         show_name = _parent_show_name(path)
         title = show_name or title

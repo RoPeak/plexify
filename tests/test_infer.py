@@ -17,3 +17,10 @@ def test_infer_movie_year():
     item = infer_item(path)
     assert item.media_type == "movie"
     assert item.year == 1999
+
+
+def test_infer_movie_leading_number_preserved() -> None:
+    path = Path("28.Days.Later.2002.1080p.BluRay.x264.mkv")
+    item = infer_item(path)
+    assert item.media_type == "movie"
+    assert item.title == "28 Days Later"

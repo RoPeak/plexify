@@ -14,6 +14,8 @@ pip-wheel-metadata/
 htmlcov/
 .tox/
 .nox/
+.plexify/
+.tmp_*/
 
 # Virtual environments
 .venv/
@@ -28,4 +30,3 @@ env/
 # OS
 Thumbs.db
 Desktop.ini
-

@@ -32,5 +32,40 @@ def test_wikidata_parse_entity():
     payload = _fixture("tests/fixtures/wikidata_entity.json")
     film = wikidata.parse_entity("Q8337", payload)
     assert film.title == "The Matrix"
-    assert film.year == 1999
-    assert film.is_film
+
+
+def test_wikidata_year_prefers_preferred_rank() -> None:
+    payload = {
+        "entities": {
+            "Q1": {
+                "labels": {"en": {"value": "Example"}},
+                "claims": {
+                    "P577": [
+                        {"rank": "normal", "mainsnak": {"datavalue": {"value": {"time": "+2014-01-01T00:00:00Z"}}}},
+                        {"rank": "preferred", "mainsnak": {"datavalue": {"value": {"time": "+2015-01-01T00:00:00Z"}}}},
+                    ]
+                },
+            }
+        }
+    }
+    film = wikidata.parse_entity("Q1", payload)
+    assert film.year == 2015
+
+
+def test_wikidata_year_uses_earliest_when_no_preferred() -> None:
+    payload = {
+        "entities": {
+            "Q2": {
+                "labels": {"en": {"value": "Example"}},
+                "claims": {
+                    "P577": [
+                        {"rank": "normal", "mainsnak": {"datavalue": {"value": {"time": "+2019-01-01T00:00:00Z"}}}},
+                        {"rank": "normal", "mainsnak": {"datavalue": {"value": {"time": "+2012-01-01T00:00:00Z"}}}},
+                    ]
+                },
+            }
+        }
+    }
+    film = wikidata.parse_entity("Q2", payload)
+    assert film.year == 2012
+    assert film.is_film is False

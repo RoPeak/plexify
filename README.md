@@ -27,6 +27,10 @@ Wizard (recommended):
 python -m plexify.cli
 ```
 
+The wizard guides you through incoming/library folders, media type, dry-run vs apply, copy vs move,
+auto-accept settings, confidence threshold, and cache usage. It prints the exact command it runs.
+Move mode requires typing MOVE to confirm.
+
 Organise (dry run):
 
 ```powershell
@@ -46,6 +50,34 @@ python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Med
 ```
 
 Warning: move will remove files from the incoming folder. Use copy first.
+
+Filter by media type:
+
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --media-type movie
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --media-type tv
+```
+
+Auto-accept and confidence threshold:
+
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --yes --min-confidence 0.90
+```
+
+Cache control:
+
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --no-cache
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --clear-cache
+```
+
+Conflict handling:
+
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --on-conflict rename
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --on-conflict skip
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --on-conflict overwrite
+```
 
 ## Troubleshooting
 

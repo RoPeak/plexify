@@ -11,6 +11,7 @@ def execute_plans(
     plans: Iterable[MovePlan],
     apply: bool,
     copy_mode: bool,
+    on_conflict: str = "rename",
     on_progress: Callable[[int, int, MovePlan], None] | None = None,
 ) -> ExecutionResult:
     plan_list = list(plans)
@@ -28,7 +29,24 @@ def execute_plans(
                 on_progress(completed, total, plan)
             continue
         try:
-            destination = unique_path(plan.destination)
+            destination = plan.destination
+            if destination.exists():
+                if on_conflict == "skip":
+                    skipped.append(plan)
+                    completed += 1
+                    if on_progress:
+                        on_progress(completed, total, plan)
+                    continue
+                if on_conflict == "overwrite":
+                    if destination.is_dir():
+                        errors.append(f"{plan.source}: destination is a directory ({destination})")
+                        completed += 1
+                        if on_progress:
+                            on_progress(completed, total, plan)
+                        continue
+                    destination.unlink()
+                elif on_conflict == "rename":
+                    destination = unique_path(destination)
             ensure_dir(destination.parent)
             if copy_mode:
                 shutil.copy2(plan.source, destination)

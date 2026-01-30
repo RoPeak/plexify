@@ -7,39 +7,12 @@ from typing import Optional
 
 from guessit import guessit
 
+from .util import NOISE_TOKENS
+
 SEASON_RE = re.compile(r"\b(?:season|series)\s*(\d{1,2})\b", re.IGNORECASE)
 SXXEYY_RE = re.compile(r"\bs(\d{1,2})e(\d{1,2})\b", re.IGNORECASE)
 EPISODE_RE = re.compile(r"\b(?:episode|ep)\s*(\d{1,3})\b", re.IGNORECASE)
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
-NOISE_TOKENS = {
-    "1080p",
-    "720p",
-    "2160p",
-    "4k",
-    "x264",
-    "x265",
-    "h264",
-    "h265",
-    "hevc",
-    "av1",
-    "bluray",
-    "blu-ray",
-    "bdrip",
-    "brrip",
-    "web",
-    "web-dl",
-    "webrip",
-    "hdrip",
-    "dvdrip",
-    "hdtv",
-    "remux",
-    "proper",
-    "repack",
-    "extended",
-    "unrated",
-    "yts",
-    "rarbg",
-}
 
 
 @dataclass(frozen=True)

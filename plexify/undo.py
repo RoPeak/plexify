@@ -15,12 +15,19 @@ def undo_report(path: Path) -> list[str]:
         dest = Path(op.get("destination"))
         try:
             if copy_mode:
-                if dest.exists():
-                    dest.unlink()
+                if not dest.exists():
+                    errors.append(f"{dest}: missing destination to remove")
+                    continue
+                dest.unlink()
             else:
-                if dest.exists():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(dest, src)
+                if not dest.exists():
+                    errors.append(f"{dest}: missing destination to restore")
+                    continue
+                if src.exists():
+                    errors.append(f"{src}: source already exists")
+                    continue
+                src.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(dest, src)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{dest}: {exc}")
     return errors

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .util import MovePlan, ensure_dir
+from .util import MovePlan, json_dump
 
 
 def write_report(path: Path, plans: list[MovePlan], mode: str, copy_mode: bool) -> None:
@@ -21,8 +21,7 @@ def write_report(path: Path, plans: list[MovePlan], mode: str, copy_mode: bool) 
             for plan in plans
         ],
     }
-    ensure_dir(path.parent)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    json_dump(path, payload)
 
 
 def read_report(path: Path) -> dict[str, Any]:

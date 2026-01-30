@@ -110,6 +110,8 @@ def _extract_entity_labels(payload: dict[str, Any]) -> dict[str, str]:
 def _extract_year(entity: dict[str, Any]) -> int | None:
     claims = entity.get("claims", {})
     time_claims = claims.get("P577") or []
+    preferred_years: list[int] = []
+    normal_years: list[int] = []
     for claim in time_claims:
         mainsnak = claim.get("mainsnak", {})
         datavalue = mainsnak.get("datavalue", {})
@@ -117,9 +119,17 @@ def _extract_year(entity: dict[str, Any]) -> int | None:
         time_value = value.get("time")
         if time_value and len(time_value) >= 5:
             try:
-                return int(time_value[1:5])
+                year = int(time_value[1:5])
             except ValueError:
                 continue
+            if claim.get("rank") == "preferred":
+                preferred_years.append(year)
+            else:
+                normal_years.append(year)
+    if preferred_years:
+        return min(preferred_years)
+    if normal_years:
+        return min(normal_years)
     return None
 
 

@@ -41,3 +41,30 @@ class Cache:
 
     def set_enrichment(self, key: str, value: dict[str, Any]) -> None:
         self.data.setdefault("enrichment", {})[key] = value
+
+
+class NullCache(Cache):
+    def __init__(self) -> None:
+        self.path = Path(".")
+        self.data = {"shows": {}, "movies": {}, "enrichment": {}}
+
+    def get_show(self, key: str) -> dict[str, Any] | None:
+        return None
+
+    def set_show(self, key: str, value: dict[str, Any]) -> None:
+        return None
+
+    def get_movie(self, key: str) -> dict[str, Any] | None:
+        return None
+
+    def set_movie(self, key: str, value: dict[str, Any]) -> None:
+        return None
+
+    def save(self) -> None:
+        return None
+
+    def get_enrichment(self, key: str) -> dict[str, Any] | None:
+        return None
+
+    def set_enrichment(self, key: str, value: dict[str, Any]) -> None:
+        return None

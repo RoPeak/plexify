@@ -62,12 +62,15 @@ def test_plan_items_advances_progress(monkeypatch, tmp_path: Path) -> None:
         mode="dry-run",
         copy_mode=True,
         interactive=False,
-        yes=False,
+        auto_accept=False,
         min_confidence=0.55,
         extensions=cli.DEFAULT_EXTENSIONS,
         cache_path=library / ".plexify" / "cache.json",
         limit=None,
         show_cache=False,
+        media_type_filter=None,
+        use_cache=True,
+        on_conflict="rename",
     )
 
     progress = ProgressStub.last
@@ -161,19 +164,22 @@ def test_tv_episode_fetch_called_once_for_selected_candidate(monkeypatch, tmp_pa
     item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=1, episode=2)
     cache = Cache(library / ".plexify" / "cache.json")
 
-    plan = cli._process_item(
+    plan, _collision = cli._process_item(
         item=item,
         library=library,
         cache=cache,
         mode="dry-run",
         copy_mode=True,
         interactive=False,
-        yes=True,
+        auto_accept=True,
         min_confidence=0.55,
         session_tv=requests.Session(),
         session_wd=requests.Session(),
         progress=None,
         show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
     )
 
     assert plan is not None

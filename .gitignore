@@ -16,6 +16,8 @@ htmlcov/
 .nox/
 .pytest_tmp/
 .plexify/
+.plexify/cache.json
+.plexify/reports/
 .tmp_*/
 
 # Virtual environments

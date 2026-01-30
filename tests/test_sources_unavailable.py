@@ -29,12 +29,15 @@ def test_sources_unavailable_does_not_crash(monkeypatch, tmp_path: Path) -> None
         mode="dry-run",
         copy_mode=True,
         interactive=False,
-        yes=True,
+        auto_accept=True,
         min_confidence=0.55,
         extensions=cli.DEFAULT_EXTENSIONS,
         cache_path=library / ".plexify" / "cache.json",
         limit=None,
         show_cache=False,
+        media_type_filter=None,
+        use_cache=True,
+        on_conflict="rename",
     )
 
     assert plans == []

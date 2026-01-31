@@ -224,6 +224,26 @@ def _prompt_text(prompt: str, default: str, progress: Progress | None, show_defa
         _resume_progress(progress, was_running)
 
 
+def _strip_outer_quotes(value: str) -> str:
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {'"', "'"}:
+        return stripped[1:-1]
+    return stripped
+
+
+def _prompt_path(prompt: str, default: str | None, *, directories_only: bool) -> str:
+    if sys.stdin is None or not sys.stdin.isatty():
+        return _strip_outer_quotes(Prompt.ask(prompt, default=default, show_default=default is not None))
+    try:
+        from prompt_toolkit.completion import PathCompleter
+        from prompt_toolkit.shortcuts import prompt as pt_prompt
+    except Exception:  # noqa: BLE001
+        return _strip_outer_quotes(Prompt.ask(prompt, default=default, show_default=default is not None))
+    completer = PathCompleter(only_directories=directories_only, expanduser=True)
+    text = pt_prompt(f"{prompt}: ", default=default or "", completer=completer)
+    return _strip_outer_quotes(text)
+
+
 def _prompt_choice(prompt: str, default: str, progress: Progress | None, show_default: bool = True) -> str:
     return _prompt_text(prompt, default, progress, show_default=show_default).strip().lower()
 
@@ -487,7 +507,8 @@ def _select_candidate(
             ),
             progress,
         )
-        choice = _prompt_choice("Select", "", progress, show_default=False)
+        default_choice = "1" if candidates else ""
+        choice = _prompt_choice("Select", default_choice, progress, show_default=False)
         if choice == "":
             if candidates:
                 return candidates[0]
@@ -1316,6 +1337,8 @@ def _process_item(
         )
         if page is None:
             return None, False
+        if page.cache_hit:
+            _record_cache_hit(stats)
         candidates = page.candidates
         raw_results_tv = page.raw_results
         next_offset = page.next_offset
@@ -1360,6 +1383,8 @@ def _process_item(
                     )
                     if page is None:
                         return None, False
+                    if page.cache_hit:
+                        _record_cache_hit(stats)
                     candidates = page.candidates
                     raw_results_tv = page.raw_results
                     next_offset = page.next_offset
@@ -1497,6 +1522,8 @@ def _process_item(
                     )
                     if page is None:
                         return None, False
+                    if page.cache_hit:
+                        _record_cache_hit(stats)
                     candidates = page.candidates
                     raw_results_tv = page.raw_results
                     next_offset = page.next_offset
@@ -1521,6 +1548,8 @@ def _process_item(
                 )
                 if page is None:
                     return None, False
+                if page.cache_hit:
+                    _record_cache_hit(stats)
                 candidates = page.candidates
                 raw_results_tv = page.raw_results
                 next_offset = page.next_offset
@@ -1757,6 +1786,8 @@ def _process_item(
                     )
                     if page is None:
                         return None, False
+                    if page.cache_hit:
+                        _record_cache_hit(stats)
                     candidates = page.candidates
                     raw_results_movie = page.raw_results
                     next_offset = page.next_offset
@@ -1865,6 +1896,8 @@ def _process_item(
             )
             if page is None:
                 return None, False
+            if page.cache_hit:
+                _record_cache_hit(stats)
             candidates = page.candidates
             raw_results_movie = page.raw_results
             next_offset = page.next_offset
@@ -2258,7 +2291,7 @@ def wizard() -> None:
     console.print("Where are the files you want to organise?")
     incoming_default = Path.cwd()
     while True:
-        incoming_text = _prompt_text("Incoming folder", str(incoming_default), None)
+        incoming_text = _prompt_path("Incoming folder", str(incoming_default), directories_only=True)
         incoming = Path(incoming_text)
         if incoming.exists() and incoming.is_dir():
             break
@@ -2267,13 +2300,13 @@ def wizard() -> None:
     console.print("Where should the organised library be created?")
     library_default = incoming.parent / "Library"
     while True:
-        library_text = _prompt_text("Library folder", str(library_default), None)
+        library_text = _prompt_path("Library folder", str(library_default), directories_only=True)
         library = Path(library_text)
         if library.exists() and library.is_file():
             console.print("That path does not exist or is not a folder. Please try again.")
             continue
         if not library.exists():
-            if _confirm("That folder does not exist. Create it? [Y/n]: ", True, None, show_default=False):
+            if _confirm("That folder does not exist. Create it? [Y/n]", True, None, show_default=False):
                 library.mkdir(parents=True, exist_ok=True)
                 break
             continue
@@ -2314,9 +2347,9 @@ def wizard() -> None:
             if not _confirm_move(None):
                 console.print("Cancelled. No changes were made.")
                 raise typer.Exit(code=0)
-            prune_empty_dirs = _confirm("Prune empty folders after move? [y/N]: ", False, None, show_default=False)
+            prune_empty_dirs = _confirm("Prune empty folders after move? [y/N]", False, None, show_default=False)
 
-    auto_accept = _confirm("Auto-accept high-confidence matches? [Y/n]: ", True, None, show_default=False)
+    auto_accept = _confirm("Auto-accept high-confidence matches? [Y/n]", True, None, show_default=False)
     while True:
         min_text = _prompt_text("Minimum confidence", str(DEFAULT_MIN_CONFIDENCE), None)
         try:
@@ -2328,12 +2361,12 @@ def wizard() -> None:
             break
         console.print("Enter a number between 0 and 1.")
 
-    use_cache = _confirm("Use cache? [Y/n]: ", True, None, show_default=False)
+    use_cache = _confirm("Use cache? [Y/n]", True, None, show_default=False)
     clear_cache = False
     if use_cache:
-        clear_cache = _confirm("Clear cache before running? [y/N]: ", False, None, show_default=False)
+        clear_cache = _confirm("Clear cache before running? [y/N]", False, None, show_default=False)
 
-    interactive = _confirm("Interactive mode? [Y/n]: ", True, None, show_default=False)
+    interactive = _confirm("Interactive mode? [Y/n]", True, None, show_default=False)
 
     command_config = BuildCommandConfig(
         incoming=incoming,

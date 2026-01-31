@@ -26,6 +26,8 @@ GENERIC_TV_FOLDERS = {
     "television",
     "shows",
     "series",
+    "movies",
+    "films",
     "unorganised",
     "unsorted",
     "incoming",
@@ -103,6 +105,12 @@ def _clean_parent_show_name(name: str) -> tuple[str, Optional[int]]:
     cleaned = re.sub(r"\s*[\[(].*?[\])]\s*$", "", name).strip()
     cleaned = re.sub(r"[._]+", " ", cleaned).strip()
     return cleaned, year
+
+
+def _strip_season_tokens(value: str) -> str:
+    cleaned = re.sub(r"(?i)(?:season|series)[\s._-]*\d{1,2}", "", value)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or value
 
 
 def _extract_year(name: str) -> Optional[int]:
@@ -259,6 +267,8 @@ def infer_item(path: Path) -> InferredItem:
             if parent_name and parent_name.strip().lower() not in GENERIC_TV_FOLDERS:
                 show_name = parent_name
         title = title_override or show_name or title
+        if season is not None:
+            title = _strip_season_tokens(str(title))
 
     year = year_override or _extract_year_range(path.stem) or guess.get("year") or _extract_year(path.stem)
     if season is not None and season >= 1900:

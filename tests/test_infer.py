@@ -77,3 +77,14 @@ def test_infer_tv_parent_name_fallback(tmp_path: Path) -> None:
     item = infer_item(video)
     assert item.media_type == "tv"
     assert item.title == "Some Show"
+
+
+def test_infer_tv_under_movies_folder_with_series_pattern() -> None:
+    path = Path(
+        "C:/Video/Unorganised/Movies/The_Young_Offenders_Series_2_-_01._Episode_1_p07rqh8m_editorial.mp4"
+    )
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.season == 2
+    assert item.episode == 1
+    assert "Movies" not in item.title

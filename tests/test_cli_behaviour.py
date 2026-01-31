@@ -6,7 +6,7 @@ import requests
 
 from plexify import cli
 from plexify.cache import Cache
-from plexify.util import movie_cache_key
+from plexify.util import movie_cache_key, tv_show_cache_key
 from plexify.infer import InferredItem
 from plexify.sources import tvmaze
 
@@ -210,3 +210,103 @@ def test_reusable_movie_cache_key_hit(tmp_path: Path) -> None:
     )
     assert page.cache_hit is True
     assert page.candidates[0].title == "Superman II"
+
+
+def test_tv_show_cache_does_not_override_episode(monkeypatch, tmp_path: Path) -> None:
+    library = tmp_path / "library"
+    library.mkdir(parents=True)
+    incoming = tmp_path / "incoming"
+    incoming.mkdir(parents=True)
+    first_path = incoming / "Pride and Prejudice" / "1.mkv"
+    second_path = incoming / "Pride and Prejudice" / "2.mkv"
+    first_path.parent.mkdir(parents=True)
+    first_path.write_text("one", encoding="utf-8")
+    second_path.write_text("two", encoding="utf-8")
+
+    cache = Cache(tmp_path / "cache.json")
+    show_key = tv_show_cache_key("Pride and Prejudice", 1995)
+    cache.set_show(
+        show_key,
+        {
+            "id": 123,
+            "name": "Pride and Prejudice",
+            "premiered": 1995,
+            "chosen_title": "Pride and Prejudice",
+            "chosen_year": 1995,
+            "manual": False,
+            "confirmed_by_user": True,
+            "created_at": "now",
+            "source": "TVMaze",
+        },
+    )
+    cache.save()
+
+    planned: dict[str, int] = {}
+    item1 = InferredItem(
+        path=first_path,
+        media_type="tv",
+        title="Pride and Prejudice",
+        year=1995,
+        season=1,
+        episode=1,
+        episode_title=None,
+    )
+    item2 = InferredItem(
+        path=second_path,
+        media_type="tv",
+        title="Pride and Prejudice",
+        year=1995,
+        season=1,
+        episode=2,
+        episode_title=None,
+    )
+
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_select_candidate", lambda *_args, **_kwargs: _args[1][0])
+
+    plan1, _ = cli._process_item(
+        item=item1,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=False,
+        min_confidence=0.0,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        progress=None,
+        show_cache=False,
+        stats=None,
+        incoming_root=incoming,
+        planned=planned,
+        on_conflict="rename",
+        allow_back=False,
+    )
+    plan2, _ = cli._process_item(
+        item=item2,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=False,
+        min_confidence=0.0,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        progress=None,
+        show_cache=False,
+        stats=None,
+        incoming_root=incoming,
+        planned=planned,
+        on_conflict="rename",
+        allow_back=False,
+    )
+    assert plan1 is not None and plan2 is not None
+    assert "s01e01" in plan1.destination.name.lower()
+    assert "s01e02" in plan2.destination.name.lower()
+    cached_show = cache.get_show(show_key)
+    assert cached_show is not None
+    assert "season" not in cached_show
+    assert "episode" not in cached_show

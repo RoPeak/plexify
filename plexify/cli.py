@@ -419,12 +419,22 @@ def _maybe_enrich_candidates(
         cache.save()
 
 
-def _print_candidates(media_type: str, candidates: list[Candidate], progress: Progress | None = None) -> None:
+def _print_candidates(
+    media_type: str,
+    candidates: list[Candidate],
+    progress: Progress | None = None,
+    *,
+    item: InferredItem | None = None,
+) -> None:
     table = Table(title="Candidates")
     table.add_column("#")
     table.add_column("Title")
     table.add_column("Year")
     show_people = False
+    show_tv_fields = media_type == "tv" and item is not None
+    if show_tv_fields:
+        table.add_column("S/E")
+        table.add_column("Episode title")
     if media_type == "movie":
         show_people = any(
             (cand.enrichment or {}).get("director") or (cand.enrichment or {}).get("cast") for cand in candidates
@@ -437,6 +447,11 @@ def _print_candidates(media_type: str, candidates: list[Candidate], progress: Pr
     for idx, cand in enumerate(candidates, start=1):
         year_text = str(cand.year) if cand.year else "Unknown"
         row = [str(idx), cand.title, year_text]
+        if show_tv_fields:
+            season = item.season if item.season is not None else "-"
+            episode = item.episode if item.episode is not None else "-"
+            row.append(f"{season}/{episode}")
+            row.append(item.episode_title or "-")
         if media_type == "movie" and show_people:
             enrichment = cand.enrichment or {}
             row.append(_format_value(enrichment.get("director")))
@@ -455,11 +470,12 @@ def _select_candidate(
     allow_search: bool,
     allow_manual: bool,
     allow_back: bool,
+    item: InferredItem | None = None,
 ) -> Candidate | None | str:
     printed_table = False
     while True:
         if candidates and not printed_table:
-            _print_candidates(media_type, candidates, progress)
+            _print_candidates(media_type, candidates, progress, item=item)
             printed_table = True
         _safe_print(
             _prompt_line(
@@ -523,12 +539,16 @@ def _tv_candidates(
     if item.season is not None and item.episode is not None:
         reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
     cached = None
+    cached_key = None
     if reusable_episode_key:
         cached = cache.get_show(reusable_episode_key)
+        cached_key = reusable_episode_key if cached else None
     if cached is None:
         cached = cache.get_show(reusable_show_key)
+        cached_key = reusable_show_key if cached else None
     if cached is None:
         cached = cache.get_show(path_key)
+        cached_key = path_key if cached else None
     results: list[Candidate] = []
     elapsed = 0.0
     total_time = None
@@ -543,12 +563,19 @@ def _tv_candidates(
             year = cached.get("premiered")
             year_text = f" ({year})" if year else ""
             _safe_print("Cache hit.", progress)
-            _safe_print(f"Using cached match for: {item.path.name} -> {name}{year_text} [TVMaze]", progress)
+            if cached_key == reusable_show_key:
+                _safe_print(
+                    f"Using cached show match: {name}{year_text} [TVMaze]. Using inferred S/E for this file.",
+                    progress,
+                )
+            else:
+                _safe_print(f"Using cached match for: {item.path.name} -> {name}{year_text} [TVMaze]", progress)
         show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
         candidate = _tv_candidate_from_show(item, show)
-        candidate.metadata["season"] = cached.get("season")
-        candidate.metadata["episode"] = cached.get("episode")
-        candidate.metadata["episode_title"] = cached.get("episode_title")
+        if cached_key != reusable_show_key:
+            candidate.metadata["season"] = cached.get("season")
+            candidate.metadata["episode"] = cached.get("episode")
+            candidate.metadata["episode_title"] = cached.get("episode_title")
         results.append(candidate)
         return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
 
@@ -1309,6 +1336,7 @@ def _process_item(
                     allow_search=True,
                     allow_manual=True,
                     allow_back=allow_back,
+                    item=item,
                 )
                 if empty_choice == "s":
                     item, search_query = _prompt_search(item, progress)
@@ -1411,6 +1439,7 @@ def _process_item(
                 allow_search=True,
                 allow_manual=True,
                 allow_back=allow_back,
+                item=item,
             )
             if isinstance(choice, Candidate):
                 selected = choice
@@ -1553,6 +1582,17 @@ def _process_item(
                 "created_at": now_timestamp(),
                 "source": "Manual",
             }
+            show_entry = {
+                "id": None,
+                "name": metadata["name"],
+                "premiered": None,
+                "chosen_title": metadata["name"],
+                "chosen_year": metadata.get("year"),
+                "manual": True,
+                "confirmed_by_user": confirmed_by_user,
+                "created_at": now_timestamp(),
+                "source": "Manual",
+            }
         else:
             entry = {
                 "id": metadata["id"],
@@ -1568,9 +1608,20 @@ def _process_item(
                 "created_at": now_timestamp(),
                 "source": selected.source,
             }
+            show_entry = {
+                "id": metadata["id"],
+                "name": selected.title,
+                "premiered": selected.year,
+                "chosen_title": selected.title,
+                "chosen_year": selected.year,
+                "manual": False,
+                "confirmed_by_user": confirmed_by_user,
+                "created_at": now_timestamp(),
+                "source": selected.source,
+            }
         cache.set_show(cache_key, entry)
         if reusable_show_key:
-            cache.set_show(reusable_show_key, entry)
+            cache.set_show(reusable_show_key, show_entry)
         if reusable_episode_key:
             cache.set_show(reusable_episode_key, entry)
         cache.save()
@@ -1650,6 +1701,7 @@ def _process_item(
                 allow_search=True,
                 allow_manual=True,
                 allow_back=allow_back,
+                item=item,
             )
             if empty_choice == "s":
                 item, search_query = _prompt_search(item, progress)
@@ -1785,6 +1837,7 @@ def _process_item(
             allow_search=True,
             allow_manual=True,
             allow_back=allow_back,
+            item=item,
         )
         if isinstance(choice, Candidate):
             selected = choice
@@ -2199,6 +2252,8 @@ def undo(report: Path = typer.Option(None, help="Report path"), library: Path = 
 def wizard() -> None:
     console.print("Plexify wizard")
     console.print("This will help you organise video files into a Plex-friendly folder layout.")
+    console.print("Tip: for PowerShell tab-complete paths, run organise with --incoming/--library arguments instead.")
+    console.print("Tip: you can drag-and-drop a folder into the terminal to paste its full path.")
 
     console.print("Where are the files you want to organise?")
     incoming_default = Path.cwd()

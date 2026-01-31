@@ -34,6 +34,14 @@ def test_infer_tv_series_separator_pattern() -> None:
     assert item.episode == 1
 
 
+def test_infer_tv_series_separator_underscores() -> None:
+    path = Path("Show/Series_6_-_04_extra.mkv")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.season == 6
+    assert item.episode == 4
+
+
 def test_infer_tv_year_range_and_episode_title() -> None:
     path = Path("Doctor Who/Series_1/Doctor_Who_2005-2022_-_01_Rose.mkv")
     item = infer_item(path)
@@ -59,3 +67,13 @@ def test_infer_numbered_episode_folder(tmp_path: Path) -> None:
     assert item.year == 1995
     assert item.season == 1
     assert item.episode == 1
+
+
+def test_infer_tv_parent_name_fallback(tmp_path: Path) -> None:
+    folder = tmp_path / "Some Show"
+    folder.mkdir(parents=True)
+    video = folder / "S01E01.mkv"
+    video.write_text("one", encoding="utf-8")
+    item = infer_item(video)
+    assert item.media_type == "tv"
+    assert item.title == "Some Show"

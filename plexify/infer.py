@@ -9,17 +9,27 @@ from guessit import guessit
 
 from .util import NOISE_TOKENS
 
-SEASON_RE = re.compile(r"\b(?:season|series)[-_. ]*(\d{1,2})\b", re.IGNORECASE)
+SEASON_RE = re.compile(r"(?<![A-Za-z0-9])(?:season|series)[-_. ]*(\d{1,2})\b", re.IGNORECASE)
 SXXEYY_RE = re.compile(r"\bs(\d{1,2})e(\d{1,3})\b", re.IGNORECASE)
 XYY_RE = re.compile(r"\b(\d{1,2})x(\d{1,3})\b", re.IGNORECASE)
 SEASON_EP_RE = re.compile(
-    r"\b(?:season|series)[-_. ]*(\d{1,2})[-_. ]+(?:episode|ep)?\s*(\d{1,3})\b",
+    r"(?<![A-Za-z0-9])(?:season|series)[-_. ]*(\d{1,2})[-_. ]+(?:episode|ep)?\s*(\d{1,3})(?!\d)",
     re.IGNORECASE,
 )
 EPISODE_RE = re.compile(r"\b(?:episode|ep)\s*(\d{1,3})\b", re.IGNORECASE)
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 YEAR_RANGE_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*[-–]\s*(19\d{2}|20\d{2})(?!\d)")
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts"}
+GENERIC_TV_FOLDERS = {
+    "tv",
+    "tv shows",
+    "television",
+    "shows",
+    "series",
+    "unorganised",
+    "unsorted",
+    "incoming",
+}
 
 
 @dataclass(frozen=True)
@@ -244,6 +254,10 @@ def infer_item(path: Path) -> InferredItem:
                 title = cleaned
     if media_type == "tv":
         show_name = _parent_show_name(path)
+        if show_name is None:
+            parent_name = path.parent.name
+            if parent_name and parent_name.strip().lower() not in GENERIC_TV_FOLDERS:
+                show_name = parent_name
         title = title_override or show_name or title
 
     year = year_override or _extract_year_range(path.stem) or guess.get("year") or _extract_year(path.stem)

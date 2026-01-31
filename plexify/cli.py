@@ -1,4 +1,5 @@
 import re
+import shlex
 import sys
 import time
 from dataclasses import dataclass
@@ -27,8 +28,12 @@ from .util import (
     MovePlan,
     build_cache_key,
     iter_video_files,
-    normalize_title,
+    make_search_query,
+    movie_cache_key,
+    normalize_title_for_similarity,
     now_timestamp,
+    tv_episode_cache_key,
+    tv_show_cache_key,
     unique_path,
     unique_plan_path,
 )
@@ -36,6 +41,7 @@ from .util import (
 app = typer.Typer(add_completion=False)
 console = Console()
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
+DEFAULT_EXTENSIONS_LIST = [ext.strip() for ext in DEFAULT_EXTENSIONS.split(",") if ext.strip()]
 DEFAULT_MIN_CONFIDENCE = 0.90
 AUTO_ACCEPT_GAP = 0.08
 PROMPT_BASE = "s=search | m=manual | k=skip | q=quit"
@@ -79,6 +85,8 @@ class CandidatePage:
     has_more: bool
     cache_hit: bool = False
     search_time: float | None = None
+    fetch_time: float | None = None
+    total_time: float | None = None
 
 
 @dataclass
@@ -88,7 +96,51 @@ class PlanStats:
     manual: int = 0
     skipped: int = 0
     errors: int = 0
+    cache_hits: int = 0
     elapsed: float = 0.0
+
+
+@dataclass
+class HistoryEntry:
+    index: int
+    plan: MovePlan | None
+    collision: bool
+    cache_snapshots: list["CacheSnapshot"]
+    stats_snapshot: PlanStats
+    errors_len: int
+
+
+@dataclass
+class CacheSnapshot:
+    section: str
+    key: str
+    previous: dict[str, Any] | None
+
+
+@dataclass
+class BuildCommandConfig:
+    incoming: Path
+    library: Path
+    media_type: str
+    mode: str
+    copy_mode: bool
+    extensions: list[str]
+    min_confidence: float
+    limit: int | None
+    interactive: bool
+    print_tree: bool
+    show_enrichment: bool
+    yes: bool
+    no_cache: bool
+    cache_file: Path | None
+    clear_cache: bool
+    report: Path | None
+    on_conflict: str
+    prune_empty_dirs: bool
+
+
+class BackRequested(Exception):
+    pass
 
 
 def _console_for(progress: Progress | None) -> Console:
@@ -97,11 +149,22 @@ def _console_for(progress: Progress | None) -> Console:
     return console
 
 
+def _parse_extensions(extensions: str) -> list[str]:
+    return [ext.strip() for ext in extensions.split(",") if ext.strip()]
+
+
 def _safe_print(message: str, progress: Progress | None = None) -> None:
     _console_for(progress).print(message)
 
 
-def _prompt_line(*, has_candidates: bool, allow_search: bool, allow_manual: bool, has_more: bool) -> str:
+def _prompt_line(
+    *,
+    has_candidates: bool,
+    allow_search: bool,
+    allow_manual: bool,
+    has_more: bool,
+    allow_back: bool,
+) -> str:
     parts: list[str] = []
     if has_candidates:
         parts.append("Enter=accept #1")
@@ -112,13 +175,15 @@ def _prompt_line(*, has_candidates: bool, allow_search: bool, allow_manual: bool
         parts.append("m=manual")
     parts.append("k=skip")
     parts.append("q=quit")
+    if allow_back:
+        parts.append("b=back")
     if has_more:
         parts.append("n=next page")
     return " | ".join(parts) if parts else PROMPT_BASE
 
 
 def _build_search_query(title: str, hint: str | None) -> str:
-    base = normalize_title(title) or title.strip()
+    base = make_search_query(title) or title.strip()
     parts = [base]
     if hint:
         hint_text = hint.strip()
@@ -135,6 +200,7 @@ def _with_title(item: InferredItem, title: str) -> InferredItem:
         year=item.year,
         season=item.season,
         episode=item.episode,
+        episode_title=item.episode_title,
     )
 
 
@@ -192,10 +258,42 @@ def _confirm_move(progress: Progress | None) -> bool:
     return phrase.strip().lower() == "move"
 
 
+def _compact_text(value: str) -> str:
+    return re.sub(r"\s+", "", value)
+
+
+def _compact_sequel_form(value: str) -> str | None:
+    tokens = value.split()
+    if len(tokens) < 2:
+        return None
+    if len(tokens[0]) == 1 and tokens[-1].isdigit():
+        return f"{tokens[0]}{tokens[-1]}"
+    return None
+
+
 def _title_similarity(title_guess: str, title_actual: str) -> float:
-    left = normalize_title(title_guess) or title_guess.lower()
-    right = normalize_title(title_actual) or title_actual.lower()
-    return fuzz.WRatio(left, right) / 100.0
+    norm_left = normalize_title_for_similarity(title_guess) or title_guess.lower()
+    norm_right = normalize_title_for_similarity(title_actual) or title_actual.lower()
+    search_left = make_search_query(title_guess) or title_guess.lower()
+    search_right = make_search_query(title_actual) or title_actual.lower()
+    forms_left = {norm_left, _compact_text(norm_left), search_left, _compact_text(search_left)}
+    forms_right = {norm_right, _compact_text(norm_right), search_right, _compact_text(search_right)}
+    compact_left = _compact_sequel_form(norm_left)
+    compact_right = _compact_sequel_form(norm_right)
+    if compact_left:
+        forms_left.add(compact_left)
+    if compact_right:
+        forms_right.add(compact_right)
+    best = 0.0
+    for left in forms_left:
+        for right in forms_right:
+            score = max(
+                fuzz.WRatio(left, right),
+                fuzz.partial_ratio(left, right),
+            ) / 100.0
+            if score > best:
+                best = score
+    return best
 
 
 def _year_adjustment(target_year: int | None, candidate_year: int | None) -> float:
@@ -217,10 +315,44 @@ def _confidence_score(title_guess: str, title_actual: str, year_guess: int | Non
     return max(0.0, min(1.0, adjusted))
 
 
+def _tv_confidence_score(title_guess: str, title_actual: str, year_guess: int | None, year_actual: int | None) -> float:
+    base = _title_similarity(title_guess, title_actual)
+    if not year_guess or not year_actual:
+        return max(0.0, min(1.0, base))
+    diff = abs(year_guess - year_actual)
+    if diff == 0:
+        adjustment = 0.25
+    elif diff == 1:
+        adjustment = 0.12
+    elif diff == 2:
+        adjustment = 0.06
+    elif diff <= 5:
+        adjustment = -0.08 * diff
+    else:
+        adjustment = -0.6
+    return max(0.0, min(1.0, base + adjustment))
+
+
 def _year_distance(target_year: int | None, candidate_year: int | None) -> int:
     if not target_year or not candidate_year:
         return 999
     return abs(target_year - candidate_year)
+
+
+def _has_sequel_marker(title: str) -> bool:
+    tokens = re.split(r"[.\s_\-:/\\]+", title.strip())
+    if not tokens:
+        return False
+    last = tokens[-1].lower()
+    if last in {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii", "xiii", "xiv", "xv"}:
+        return True
+    return bool(re.fullmatch(r"\d+", last))
+
+
+def _search_lost_sequel_marker(title: str, search_query: str) -> bool:
+    if not _has_sequel_marker(title):
+        return False
+    return not _has_sequel_marker(search_query)
 
 
 def _format_value(value: str | None) -> str:
@@ -322,6 +454,7 @@ def _select_candidate(
     *,
     allow_search: bool,
     allow_manual: bool,
+    allow_back: bool,
 ) -> Candidate | None | str:
     printed_table = False
     while True:
@@ -334,6 +467,7 @@ def _select_candidate(
                 allow_search=allow_search,
                 allow_manual=allow_manual,
                 has_more=has_more,
+                allow_back=allow_back,
             ),
             progress,
         )
@@ -354,12 +488,19 @@ def _select_candidate(
                 _safe_print(NO_MORE_RESULTS_MESSAGE, progress)
                 continue
             return "n"
+        if choice == "b":
+            if not allow_back:
+                _safe_print("No previous decision to return to.", progress)
+                continue
+            return "b"
         if choice == "s" and allow_search:
             return "s"
         if choice == "m" and allow_manual:
             return "m"
         if choice in {"k", "q"}:
             return choice
+        if allow_search:
+            return f"search:{choice}"
         _safe_print("Invalid choice.", progress)
 
 
@@ -376,9 +517,21 @@ def _tv_candidates(
     progress: Progress | None = None,
     limit: int = 5,
 ) -> CandidatePage:
-    cached = cache.get_show(cache_key or item.title)
+    path_key = cache_key or item.title
+    reusable_show_key = tv_show_cache_key(item.title, item.year)
+    reusable_episode_key = None
+    if item.season is not None and item.episode is not None:
+        reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
+    cached = None
+    if reusable_episode_key:
+        cached = cache.get_show(reusable_episode_key)
+    if cached is None:
+        cached = cache.get_show(reusable_show_key)
+    if cached is None:
+        cached = cache.get_show(path_key)
     results: list[Candidate] = []
     elapsed = 0.0
+    total_time = None
     if cached and not cached.get("manual"):
         if not cached.get("confirmed_by_user"):
             cached = None
@@ -392,18 +545,31 @@ def _tv_candidates(
             _safe_print("Cache hit.", progress)
             _safe_print(f"Using cached match for: {item.path.name} -> {name}{year_text} [TVMaze]", progress)
         show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
-        results.append(_tv_candidate_from_show(item, show))
+        candidate = _tv_candidate_from_show(item, show)
+        candidate.metadata["season"] = cached.get("season")
+        candidate.metadata["episode"] = cached.get("episode")
+        candidate.metadata["episode_title"] = cached.get("episode_title")
+        results.append(candidate)
         return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
 
     if raw_results is None:
-        query = search_query or item.title
+        query = search_query or make_search_query(item.title) or item.title
         _safe_print(f"Searching TVMaze for: {query}", progress)
-        started = time.monotonic()
+        total_started = time.monotonic()
+        started = total_started
         raw_results = tvmaze.search_shows(query, session=session)
         elapsed = time.monotonic() - started
+        total_time = time.monotonic() - total_started
         if not raw_results:
             _safe_print(f"No candidates ({elapsed:.2f}s).", progress)
-            return CandidatePage(candidates=[], raw_results=raw_results, next_offset=0, has_more=False, search_time=elapsed)
+            return CandidatePage(
+                candidates=[],
+                raw_results=raw_results,
+                next_offset=0,
+                has_more=False,
+                search_time=elapsed,
+                total_time=total_time,
+            )
     page = raw_results[offset : offset + limit]
     for show in page:
         results.append(_tv_candidate_from_show(item, show))
@@ -412,7 +578,8 @@ def _tv_candidates(
     has_more = next_offset < len(raw_results)
     if raw_results is not None and offset == 0:
         best = results[0].confidence if results else 0.0
-        _safe_print(f"Found {len(results)} candidates (best confidence {best:.2f}, {elapsed:.2f}s).", progress)
+        timing = f"{elapsed:.2f}s" if total_time is None else f"{total_time:.2f}s"
+        _safe_print(f"Found {len(results)} candidates (best confidence {best:.2f}, {timing}).", progress)
     return CandidatePage(candidates=results, raw_results=raw_results, next_offset=next_offset, has_more=has_more)
 
 
@@ -425,7 +592,7 @@ def _tv_candidate_from_show(item: InferredItem, show: tvmaze.TVMazeShow) -> Cand
         match = re.match(r"(\d{4})", premiered)
         if match:
             year = int(match.group(1))
-    confidence = _confidence_score(item.title, show.name, item.year, year)
+    confidence = _tv_confidence_score(item.title, show.name, item.year, year)
     metadata: dict[str, Any] = {"id": show.id, "name": show.name, "year": year}
 
     return Candidate(title=show.name, year=year, source="TVMaze", confidence=confidence, metadata=metadata)
@@ -458,6 +625,56 @@ def _maybe_fetch_episode_title(
         candidate.confidence = min(1.0, candidate.confidence + 0.1)
 
 
+def _resolve_episode_from_title(
+    item: InferredItem,
+    show_id: int | None,
+    session: requests.Session,
+    progress: Progress | None,
+) -> tuple[int, int, str | None] | None:
+    if not item.episode_title or show_id is None:
+        return None
+    episodes = tvmaze.fetch_episodes(int(show_id), session=session)
+    if not episodes:
+        return None
+    scored: list[tuple[float, tvmaze.TVMazeEpisode]] = []
+    for ep in episodes:
+        if not ep.name:
+            continue
+        score = fuzz.WRatio(item.episode_title, ep.name) / 100.0
+        scored.append((score, ep))
+    if not scored:
+        return None
+    scored.sort(key=lambda row: row[0], reverse=True)
+    top = scored[:5]
+    table = Table(title="Episode matches")
+    table.add_column("#")
+    table.add_column("Season")
+    table.add_column("Episode")
+    table.add_column("Title")
+    table.add_column("Score")
+    for idx, (score, ep) in enumerate(top, start=1):
+        table.add_row(str(idx), str(ep.season), str(ep.number), ep.name, f"{score:.2f}")
+    _console_for(progress).print(table)
+    while True:
+        _safe_print("Enter=accept #1 | 1-5=choose | m=manual | k=skip", progress)
+        choice = _prompt_choice("Select episode", "", progress, show_default=False)
+        if choice == "":
+            score, ep = top[0]
+            return ep.season, ep.number, ep.name
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(top):
+                score, ep = top[idx]
+                return ep.season, ep.number, ep.name
+            _safe_print("Invalid selection.", progress)
+            continue
+        if choice == "m":
+            return None
+        if choice == "k":
+            return None
+        _safe_print("Invalid choice.", progress)
+
+
 def _movie_candidates(
     item: InferredItem,
     session: requests.Session,
@@ -471,9 +688,13 @@ def _movie_candidates(
     progress: Progress | None = None,
     limit: int = 5,
 ) -> CandidatePage:
-    cached = cache.get_movie(cache_key or item.title)
+    path_key = cache_key or item.title
+    reusable_key = movie_cache_key(item.title, item.year)
+    cached = cache.get_movie(reusable_key) or cache.get_movie(path_key)
     results: list[Candidate] = []
     elapsed = 0.0
+    fetch_time = 0.0
+    total_time = None
     if cached and not cached.get("manual"):
         if not cached.get("confirmed_by_user"):
             cached = None
@@ -491,15 +712,27 @@ def _movie_candidates(
         return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
 
     if raw_results is None:
-        query = search_query or item.title
+        query = search_query or make_search_query(item.title) or item.title
         _safe_print(f"Searching Wikidata for: {query}", progress)
-        started = time.monotonic()
+        total_started = time.monotonic()
+        started = total_started
         raw_results = wikidata.search(query, session=session, limit=10)
         elapsed = time.monotonic() - started
         if not raw_results:
-            _safe_print(f"No candidates ({elapsed:.2f}s).", progress)
-            return CandidatePage(candidates=[], raw_results=raw_results, next_offset=0, has_more=False, search_time=elapsed)
+            total_time = time.monotonic() - total_started
+            _safe_print(f"No candidates ({total_time:.2f}s).", progress)
+            return CandidatePage(
+                candidates=[],
+                raw_results=raw_results,
+                next_offset=0,
+                has_more=False,
+                search_time=elapsed,
+                total_time=total_time,
+            )
+        total_time = time.monotonic() - total_started
+        total_started = time.monotonic()
     idx = offset
+    fetch_started = time.monotonic()
     while idx < len(raw_results) and len(results) < limit:
         cand = raw_results[idx]
         idx += 1
@@ -507,12 +740,29 @@ def _movie_candidates(
         if not film.is_film:
             continue
         results.append(_movie_candidate_from_film(item, film, description=cand.description))
+    fetch_time = time.monotonic() - fetch_started
     results.sort(key=lambda cand: (-cand.confidence, _year_distance(item.year, cand.year)))
     has_more = idx < len(raw_results)
     if raw_results is not None and offset == 0:
         best = results[0].confidence if results else 0.0
-        _safe_print(f"Found {len(results)} candidates (best confidence {best:.2f}, {elapsed:.2f}s).", progress)
-    return CandidatePage(candidates=results, raw_results=raw_results, next_offset=idx, has_more=has_more)
+        if total_time is None:
+            total_time = elapsed + fetch_time
+        else:
+            total_time = total_time + fetch_time
+        _safe_print(
+            f"Found {len(results)} candidates (best confidence {best:.2f}, "
+            f"search {elapsed:.2f}s, fetch {fetch_time:.2f}s, total {total_time:.2f}s).",
+            progress,
+        )
+    return CandidatePage(
+        candidates=results,
+        raw_results=raw_results,
+        next_offset=idx,
+        has_more=has_more,
+        search_time=elapsed,
+        fetch_time=fetch_time,
+        total_time=total_time,
+    )
 
 
 def _movie_candidate_from_film(
@@ -531,7 +781,7 @@ def _prompt_manual_tv(item: InferredItem, progress: Progress | None) -> Candidat
     year_text = _prompt_text("Show year", str(item.year) if item.year else "", progress)
     season_text = _prompt_text("Season", str(item.season) if item.season else "1", progress)
     episode_text = _prompt_text("Episode", str(item.episode) if item.episode else "1", progress)
-    episode_title = _prompt_text("Episode title", "", progress)
+    episode_title = _prompt_text("Episode title", item.episode_title or "", progress)
     year = int(year_text) if year_text else None
     season = int(season_text)
     episode = int(episode_text)
@@ -575,20 +825,52 @@ def _record_stat(stats: PlanStats | None, outcome: str) -> None:
         stats.skipped += 1
 
 
+def _record_cache_hit(stats: PlanStats | None) -> None:
+    if stats is None:
+        return
+    stats.cache_hits += 1
+
+
+def _snapshot_stats(stats: PlanStats) -> PlanStats:
+    return PlanStats(
+        auto_matched=stats.auto_matched,
+        user_confirmed=stats.user_confirmed,
+        manual=stats.manual,
+        skipped=stats.skipped,
+        errors=stats.errors,
+        cache_hits=stats.cache_hits,
+        elapsed=stats.elapsed,
+    )
+
+
 def _cache_entry_compatible(inferred_year: int | None, cached_year: int | None) -> bool:
     if inferred_year is None or cached_year is None:
         return True
     return _year_distance(inferred_year, cached_year) <= 2
 
 
-def _auto_acceptable(candidates: list[Candidate], min_confidence: float) -> bool:
+def _auto_acceptable(
+    candidates: list[Candidate],
+    min_confidence: float,
+    *,
+    title: str,
+    search_query: str,
+    target_year: int | None,
+) -> bool:
     if not candidates:
         return False
     if candidates[0].confidence < min_confidence:
         return False
+    if _search_lost_sequel_marker(title, search_query):
+        return False
     if len(candidates) == 1:
         return True
-    return (candidates[0].confidence - candidates[1].confidence) >= AUTO_ACCEPT_GAP
+    gap = candidates[0].confidence - candidates[1].confidence
+    if gap >= AUTO_ACCEPT_GAP:
+        return True
+    if _year_distance(target_year, candidates[0].year) <= 2:
+        return True
+    return False
 
 
 def _resolve_destination(
@@ -620,6 +902,8 @@ def _file_panel(index: int, total: int, item: InferredItem) -> Panel:
         season = item.season if item.season is not None else "-"
         episode = item.episode if item.episode is not None else "-"
         lines.append(f"Season/Episode: {season}/{episode}")
+        if item.episode_title:
+            lines.append(f"Episode title: {item.episode_title}")
     return Panel("\n".join(lines), title=title_line, expand=False)
 
 
@@ -690,6 +974,79 @@ def _apply_with_progress(plans: list[MovePlan], copy_mode: bool, on_conflict: st
         return execute_plans(plans, apply=True, copy_mode=copy_mode, on_conflict=on_conflict, on_progress=_on_progress)
 
 
+def _dir_empty_after_removals(path: Path, removed_files: set[Path], removed_dirs: set[Path]) -> bool:
+    try:
+        entries = list(path.iterdir())
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.is_dir():
+            if entry in removed_dirs:
+                continue
+            return False
+        if entry.is_file():
+            if entry in removed_files:
+                continue
+            return False
+    return True
+
+
+def _prune_empty_dirs(
+    plans: list[MovePlan],
+    incoming_root: Path,
+    *,
+    dry_run: bool,
+) -> None:
+    removed_files = {plan.source for plan in plans}
+    removed_dirs: set[Path] = set()
+    for plan in plans:
+        current = plan.source.parent
+        while current != incoming_root:
+            if current in removed_dirs:
+                current = current.parent
+                continue
+            if _dir_empty_after_removals(current, removed_files, removed_dirs):
+                if dry_run:
+                    console.print(f"Would remove empty folder: {current}")
+                else:
+                    try:
+                        current.rmdir()
+                    except OSError:
+                        break
+                removed_dirs.add(current)
+                current = current.parent
+                continue
+            break
+
+
+def _print_run_summary(
+    *,
+    stats: PlanStats,
+    plans: list[MovePlan],
+    errors: list[str],
+    result: ExecutionResult,
+    cache_path: Path | None,
+    report_path: Path | None,
+    apply_report_path: Path | None = None,
+) -> None:
+    failures = stats.errors + len(errors) + len(result.errors)
+    console.print("Summary:")
+    console.print(f"Planned: {len(plans)}")
+    console.print(f"Skipped: {stats.skipped}")
+    console.print(f"Cache hits: {stats.cache_hits}")
+    console.print(f"Manual entries: {stats.manual}")
+    console.print(f"Failures: {failures}")
+    console.print(f"Elapsed: {stats.elapsed:.2f}s")
+    if cache_path is not None:
+        console.print(f"Cache path: {cache_path}")
+    else:
+        console.print("Cache path: disabled")
+    if report_path is not None:
+        console.print(f"Report path: {report_path}")
+    if apply_report_path is not None:
+        console.print(f"Apply report path: {apply_report_path}")
+
+
 def _plan_items(
     incoming: Path,
     library: Path,
@@ -707,7 +1064,7 @@ def _plan_items(
     on_conflict: str,
 ) -> tuple[list[MovePlan], list[str], PlanStats]:
     cache_store: Cache = Cache(cache_path) if use_cache else NullCache()
-    exts = [ext.strip() for ext in extensions.split(",") if ext.strip()]
+    exts = _parse_extensions(extensions)
     files = iter_video_files(incoming, exts)
     if limit:
         files = files[:limit]
@@ -718,21 +1075,40 @@ def _plan_items(
     started = time.monotonic()
     planned: dict[str, int] = {}
     collisions = 0
+    history: list[HistoryEntry] = []
 
     with Progress(TextColumn("{task.completed}/{task.total} - {task.description}")) as progress:
         task = progress.add_task("Planning files...", total=len(files))
         session_tv = tvmaze.create_session()
         session_wd = wikidata.create_session()
         total = len(files)
-        for index, path in enumerate(files, start=1):
+        index = 0
+        while index < len(files):
+            path = files[index]
             progress.update(task, description=f"Planning: {path.name}")
             progress.advance(task, 1)
             try:
                 item = infer_item(path)
                 if media_type_filter and item.media_type != media_type_filter:
+                    index += 1
                     continue
                 _safe_print("", progress)
-                _safe_print(_file_panel(index, total, item), progress)
+                _safe_print(_file_panel(index + 1, total, item), progress)
+                cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
+                cache_snapshots: list[CacheSnapshot] = []
+                if item.media_type == "tv":
+                    reusable_show_key = tv_show_cache_key(item.title, item.year)
+                    keys = [cache_key, reusable_show_key]
+                    if item.season is not None and item.episode is not None:
+                        keys.append(tv_episode_cache_key(item.title, item.year, item.season, item.episode))
+                    for key in keys:
+                        cache_snapshots.append(CacheSnapshot("show", key, cache_store.get_show(key)))
+                else:
+                    reusable_movie_key = movie_cache_key(item.title, item.year)
+                    for key in [cache_key, reusable_movie_key]:
+                        cache_snapshots.append(CacheSnapshot("movie", key, cache_store.get_movie(key)))
+                stats_snapshot = _snapshot_stats(stats)
+                errors_len = len(errors)
                 plan, collision = _process_item(
                     item=item,
                     library=library,
@@ -750,14 +1126,70 @@ def _plan_items(
                     incoming_root=incoming,
                     planned=planned,
                     on_conflict=on_conflict,
+                    allow_back=bool(history),
+                )
+                history.append(
+                    HistoryEntry(
+                        index=index,
+                        plan=plan,
+                        collision=collision,
+                        cache_snapshots=cache_snapshots,
+                        stats_snapshot=stats_snapshot,
+                        errors_len=errors_len,
+                    )
                 )
                 if plan:
                     plans.append(plan)
                     if collision:
                         collisions += 1
+                index += 1
+            except BackRequested:
+                if not history:
+                    _safe_print("No previous decision to return to.", progress)
+                    continue
+                entry = history.pop()
+                if entry.plan:
+                    if plans and plans[-1] == entry.plan:
+                        plans.pop()
+                    else:
+                        try:
+                            plans.remove(entry.plan)
+                        except ValueError:
+                            pass
+                    key = str(entry.plan.destination).lower()
+                    if key in planned:
+                        if planned[key] <= 1:
+                            planned.pop(key, None)
+                        else:
+                            planned[key] -= 1
+                if entry.collision and collisions > 0:
+                    collisions -= 1
+                for snapshot in entry.cache_snapshots:
+                    if snapshot.section == "show":
+                        if snapshot.previous is None:
+                            cache_store.delete_show(snapshot.key)
+                        else:
+                            cache_store.set_show(snapshot.key, snapshot.previous)
+                    else:
+                        if snapshot.previous is None:
+                            cache_store.delete_movie(snapshot.key)
+                        else:
+                            cache_store.set_movie(snapshot.key, snapshot.previous)
+                cache_store.save()
+                stats.auto_matched = entry.stats_snapshot.auto_matched
+                stats.user_confirmed = entry.stats_snapshot.user_confirmed
+                stats.manual = entry.stats_snapshot.manual
+                stats.skipped = entry.stats_snapshot.skipped
+                stats.errors = entry.stats_snapshot.errors
+                stats.cache_hits = entry.stats_snapshot.cache_hits
+                stats.elapsed = entry.stats_snapshot.elapsed
+                del errors[entry.errors_len:]
+                index = entry.index
+                _safe_print("Rewound to previous file.", progress)
             except Exception as exc:  # noqa: BLE001
                 stats.errors += 1
                 errors.append(f"{path}: {exc}")
+                index += 1
 
     stats.elapsed = time.monotonic() - started
     if collisions:
@@ -765,50 +1197,42 @@ def _plan_items(
     return plans, errors, stats
 
 
-def _build_command(
-    incoming: Path,
-    library: Path,
-    mode: str,
-    copy_mode: bool,
-    extensions: str,
-    min_confidence: float,
-    limit: int | None,
-    interactive: bool,
-    print_tree: bool,
-    auto_accept: bool,
-    use_cache: bool,
-    media_type_filter: str | None,
-    clear_cache: bool,
-) -> str:
+def _build_command(config: BuildCommandConfig) -> str:
     parts = [
         "python -m plexify.cli organise",
-        f'--incoming "{incoming}"',
-        f'--library "{library}"',
-        f"--mode {mode}",
+        f"--incoming {shlex.quote(str(config.incoming))}",
+        f"--library {shlex.quote(str(config.library))}",
     ]
-    if mode == "apply":
-        parts.append("--copy" if copy_mode else "--move")
-    if print_tree:
+    if config.mode != "dry-run":
+        parts.append(f"--mode {config.mode}")
+    if config.mode == "apply" and not config.copy_mode:
+        parts.append("--move")
+    if config.print_tree:
         parts.append("--print-tree")
-    if extensions != DEFAULT_EXTENSIONS:
-        parts.append(f'--extensions "{extensions}"')
-    if min_confidence != DEFAULT_MIN_CONFIDENCE:
-        parts.append(f"--min-confidence {min_confidence}")
-    if limit is not None:
-        parts.append(f"--limit {limit}")
-    if media_type_filter:
-        parts.append(f"--media-type {media_type_filter}")
-    if auto_accept:
+    if config.extensions != DEFAULT_EXTENSIONS_LIST:
+        extensions = ",".join(config.extensions)
+        parts.append(f"--extensions {shlex.quote(extensions)}")
+    if config.min_confidence != DEFAULT_MIN_CONFIDENCE:
+        parts.append(f"--min-confidence {config.min_confidence}")
+    if config.limit is not None:
+        parts.append(f"--limit {config.limit}")
+    if config.media_type != "auto":
+        parts.append(f"--media-type {config.media_type}")
+    if config.yes:
         parts.append("--yes")
-    if not use_cache:
+    if config.no_cache:
         parts.append("--no-cache")
-    if clear_cache:
+    if config.cache_file is not None:
+        parts.append(f"--cache {shlex.quote(str(config.cache_file))}")
+    if config.report is not None:
+        parts.append(f"--report {shlex.quote(str(config.report))}")
+    if config.clear_cache:
         parts.append("--clear-cache")
-    if on_conflict != "rename":
-        parts.append(f"--on-conflict {on_conflict}")
-    if interactive:
-        parts.append("--interactive")
-    else:
+    if config.on_conflict != "rename":
+        parts.append(f"--on-conflict {config.on_conflict}")
+    if config.prune_empty_dirs:
+        parts.append("--prune-empty-dirs")
+    if not config.interactive:
         parts.append("--no-interactive")
     return " ".join(parts)
 
@@ -830,8 +1254,18 @@ def _process_item(
     incoming_root: Path | None = None,
     planned: dict[str, int] | None = None,
     on_conflict: str = "rename",
+    allow_back: bool = False,
 ) -> tuple[MovePlan | None, bool]:
     cache_key = build_cache_key(item.path, incoming_root, item.media_type, item.year)
+    reusable_movie_key = None
+    reusable_show_key = None
+    reusable_episode_key = None
+    if item.media_type == "tv":
+        reusable_show_key = tv_show_cache_key(item.title, item.year)
+        if item.season is not None and item.episode is not None:
+            reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
+    else:
+        reusable_movie_key = movie_cache_key(item.title, item.year)
     collision = False
     if item.media_type == "tv":
         raw_results_tv: list[tvmaze.TVMazeShow] | None = None
@@ -874,6 +1308,7 @@ def _process_item(
                     has_more,
                     allow_search=True,
                     allow_manual=True,
+                    allow_back=allow_back,
                 )
                 if empty_choice == "s":
                     item, search_query = _prompt_search(item, progress)
@@ -902,6 +1337,36 @@ def _process_item(
                     next_offset = page.next_offset
                     has_more = page.has_more
                     continue
+                if isinstance(empty_choice, str) and empty_choice.startswith("search:"):
+                    query = empty_choice.split("search:", 1)[1].strip()
+                    if query:
+                        item = _with_title(item, query)
+                        search_query = _build_search_query(query, None)
+                        raw_results_tv = None
+                        next_offset = 0
+                        page = _fetch_with_retry(
+                            "TVMaze",
+                            lambda: _tv_candidates(
+                                item,
+                                session_tv,
+                                cache,
+                                show_cache,
+                                cache_key=cache_key,
+                                offset=next_offset,
+                                raw_results=raw_results_tv,
+                                search_query=search_query,
+                                progress=progress,
+                            ),
+                            interactive,
+                            progress,
+                        )
+                        if page is None:
+                            return None, False
+                        candidates = page.candidates
+                        raw_results_tv = page.raw_results
+                        next_offset = page.next_offset
+                        has_more = page.has_more
+                        continue
                 if empty_choice == "m":
                     selected = _prompt_manual_tv(item, progress)
                     outcome = "manual"
@@ -911,9 +1376,17 @@ def _process_item(
                     return None, False
                 if empty_choice == "q":
                     raise typer.Exit(code=0)
+                if empty_choice == "b":
+                    raise BackRequested
                 continue
             _maybe_fetch_episode_title(item, candidates[0], session_tv, bump_confidence=True)
-            if auto_accept and _auto_acceptable(candidates, min_confidence):
+            if auto_accept and _auto_acceptable(
+                candidates,
+                min_confidence,
+                title=item.title,
+                search_query=search_query,
+                target_year=item.year,
+            ):
                 year_text = str(candidates[0].year) if candidates[0].year else "Unknown"
                 _safe_print(f"Auto-selected: {candidates[0].title} ({year_text}) [{candidates[0].confidence:.2f}]", progress)
                 if not interactive:
@@ -937,6 +1410,7 @@ def _process_item(
                 has_more,
                 allow_search=True,
                 allow_manual=True,
+                allow_back=allow_back,
             )
             if isinstance(choice, Candidate):
                 selected = choice
@@ -969,6 +1443,36 @@ def _process_item(
                 next_offset = page.next_offset
                 has_more = page.has_more
                 continue
+            if isinstance(choice, str) and choice.startswith("search:"):
+                query = choice.split("search:", 1)[1].strip()
+                if query:
+                    item = _with_title(item, query)
+                    search_query = _build_search_query(query, None)
+                    raw_results_tv = None
+                    next_offset = 0
+                    page = _fetch_with_retry(
+                        "TVMaze",
+                        lambda: _tv_candidates(
+                            item,
+                            session_tv,
+                            cache,
+                            show_cache,
+                            cache_key=cache_key,
+                            offset=next_offset,
+                            raw_results=raw_results_tv,
+                            search_query=search_query,
+                            progress=progress,
+                        ),
+                        interactive,
+                        progress,
+                    )
+                    if page is None:
+                        return None, False
+                    candidates = page.candidates
+                    raw_results_tv = page.raw_results
+                    next_offset = page.next_offset
+                    has_more = page.has_more
+                    continue
             if choice == "n":
                 page = _fetch_with_retry(
                     "TVMaze",
@@ -1002,6 +1506,8 @@ def _process_item(
                 return None, False
             if choice == "q":
                 raise typer.Exit(code=0)
+            if choice == "b":
+                raise BackRequested
         if not selected:
             _record_stat(stats, "skipped")
             return None, False
@@ -1014,52 +1520,67 @@ def _process_item(
         _maybe_fetch_episode_title(item, selected, session_tv, bump_confidence=False)
         metadata = selected.metadata
         confirmed_by_user = outcome in {"confirmed", "manual"}
-        if selected.metadata.get("manual"):
-            cache.set_show(
-                cache_key,
-                {
-                    "id": None,
-                    "name": metadata["name"],
-                    "premiered": None,
-                    "chosen_title": metadata["name"],
-                    "chosen_year": metadata.get("year"),
-                    "manual": True,
-                    "confirmed_by_user": confirmed_by_user,
-                    "created_at": now_timestamp(),
-                    "source": "Manual",
-                },
-            )
-        else:
-            cache.set_show(
-                cache_key,
-                {
-                    "id": metadata["id"],
-                    "name": selected.title,
-                    "premiered": selected.year,
-                    "chosen_title": selected.title,
-                    "chosen_year": selected.year,
-                    "manual": False,
-                    "confirmed_by_user": confirmed_by_user,
-                    "created_at": now_timestamp(),
-                    "source": selected.source,
-                },
-            )
-        cache.save()
-
         season = metadata.get("season") or item.season
         episode = metadata.get("episode") or item.episode
+        episode_title = metadata.get("episode_title") or item.episode_title
+        if interactive and (season is None or episode is None) and item.episode_title:
+            resolved = _resolve_episode_from_title(item, metadata.get("id"), session_tv, progress)
+            if resolved:
+                season, episode, resolved_title = resolved
+                episode_title = resolved_title or episode_title
+                metadata["episode_title"] = episode_title
         if season is None or episode is None:
             if not interactive:
                 return None, False
             season = int(_prompt_text("Season", str(item.season or 1), progress))
             episode = int(_prompt_text("Episode", str(item.episode or 1), progress))
+            if not episode_title:
+                episode_title = _prompt_text("Episode title (optional)", item.episode_title or "", progress)
+
+        metadata["episode_title"] = episode_title
+        if selected.metadata.get("manual"):
+            entry = {
+                "id": None,
+                "name": metadata["name"],
+                "premiered": None,
+                "chosen_title": metadata["name"],
+                "chosen_year": metadata.get("year"),
+                "season": season,
+                "episode": episode,
+                "episode_title": episode_title,
+                "manual": True,
+                "confirmed_by_user": confirmed_by_user,
+                "created_at": now_timestamp(),
+                "source": "Manual",
+            }
+        else:
+            entry = {
+                "id": metadata["id"],
+                "name": selected.title,
+                "premiered": selected.year,
+                "chosen_title": selected.title,
+                "chosen_year": selected.year,
+                "season": season,
+                "episode": episode,
+                "episode_title": episode_title,
+                "manual": False,
+                "confirmed_by_user": confirmed_by_user,
+                "created_at": now_timestamp(),
+                "source": selected.source,
+            }
+        cache.set_show(cache_key, entry)
+        if reusable_show_key:
+            cache.set_show(reusable_show_key, entry)
+        if reusable_episode_key:
+            cache.set_show(reusable_episode_key, entry)
+        cache.save()
         destination = plan_tv_show(
             library,
             metadata.get("name") or selected.title,
             metadata.get("year") or selected.year,
             int(season),
             int(episode),
-            metadata.get("episode_title"),
+            metadata.get("episode_title") or episode_title,
             item.path.suffix,
         )
         destination, collision = _resolve_destination(destination, on_conflict, planned, progress)
@@ -1078,7 +1599,7 @@ def _process_item(
                 "year": metadata.get("year") or selected.year,
                 "season": int(season),
                 "episode": int(episode),
-                "episode_title": metadata.get("episode_title"),
+                "episode_title": metadata.get("episode_title") or episode_title,
             },
         )
         _print_plan(plan, progress)
@@ -1105,6 +1626,8 @@ def _process_item(
     )
     if page is None:
         return None, False
+    if page.cache_hit:
+        _record_cache_hit(stats)
     candidates = page.candidates
     raw_results_movie = page.raw_results
     next_offset = page.next_offset
@@ -1126,6 +1649,7 @@ def _process_item(
                 has_more,
                 allow_search=True,
                 allow_manual=True,
+                allow_back=allow_back,
             )
             if empty_choice == "s":
                 item, search_query = _prompt_search(item, progress)
@@ -1149,11 +1673,43 @@ def _process_item(
                 )
                 if page is None:
                     return None, False
+                if page.cache_hit:
+                    _record_cache_hit(stats)
                 candidates = page.candidates
                 raw_results_movie = page.raw_results
                 next_offset = page.next_offset
                 has_more = page.has_more
                 continue
+            if isinstance(empty_choice, str) and empty_choice.startswith("search:"):
+                query = empty_choice.split("search:", 1)[1].strip()
+                if query:
+                    item = _with_title(item, query)
+                    search_query = _build_search_query(query, None)
+                    raw_results_movie = None
+                    next_offset = 0
+                    page = _fetch_with_retry(
+                        "Wikidata",
+                        lambda: _movie_candidates(
+                            item,
+                            session_wd,
+                            cache,
+                            show_cache,
+                            cache_key=cache_key,
+                            offset=next_offset,
+                            raw_results=raw_results_movie,
+                            search_query=search_query,
+                            progress=progress,
+                        ),
+                        interactive,
+                        progress,
+                    )
+                    if page is None:
+                        return None, False
+                    candidates = page.candidates
+                    raw_results_movie = page.raw_results
+                    next_offset = page.next_offset
+                    has_more = page.has_more
+                    continue
             if empty_choice == "m":
                 if manual_fallback is None:
                     manual_fallback, manual_hint = _prompt_manual_movie(item, progress)
@@ -1195,8 +1751,16 @@ def _process_item(
                 return None, False
             if empty_choice == "q":
                 raise typer.Exit(code=0)
+            if empty_choice == "b":
+                raise BackRequested
             continue
-        if auto_accept and _auto_acceptable(candidates, min_confidence):
+        if auto_accept and _auto_acceptable(
+            candidates,
+            min_confidence,
+            title=item.title,
+            search_query=search_query,
+            target_year=item.year,
+        ):
             year_text = str(candidates[0].year) if candidates[0].year else "Unknown"
             _safe_print(f"Auto-selected: {candidates[0].title} ({year_text}) [{candidates[0].confidence:.2f}]", progress)
             if not interactive:
@@ -1220,6 +1784,7 @@ def _process_item(
             has_more,
             allow_search=True,
             allow_manual=True,
+            allow_back=allow_back,
         )
         if isinstance(choice, Candidate):
             selected = choice
@@ -1252,6 +1817,36 @@ def _process_item(
             next_offset = page.next_offset
             has_more = page.has_more
             continue
+        if isinstance(choice, str) and choice.startswith("search:"):
+            query = choice.split("search:", 1)[1].strip()
+            if query:
+                item = _with_title(item, query)
+                search_query = _build_search_query(query, None)
+                raw_results_movie = None
+                next_offset = 0
+                page = _fetch_with_retry(
+                    "Wikidata",
+                    lambda: _movie_candidates(
+                        item,
+                        session_wd,
+                        cache,
+                        show_cache,
+                        cache_key=cache_key,
+                        offset=next_offset,
+                        raw_results=raw_results_movie,
+                        search_query=search_query,
+                        progress=progress,
+                    ),
+                    interactive,
+                    progress,
+                )
+                if page is None:
+                    return None, False
+                candidates = page.candidates
+                raw_results_movie = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
+                continue
         if choice == "n":
             page = _fetch_with_retry(
                 "Wikidata",
@@ -1317,6 +1912,8 @@ def _process_item(
             return None, False
         if choice == "q":
             raise typer.Exit(code=0)
+        if choice == "b":
+            raise BackRequested
     if not selected:
         _record_stat(stats, "skipped")
         return None, False
@@ -1329,35 +1926,32 @@ def _process_item(
     metadata = selected.metadata
     confirmed_by_user = outcome in {"confirmed", "manual"}
     if metadata.get("manual"):
-        cache.set_movie(
-            cache_key,
-            {
-                "qid": None,
-                "title": metadata["title"],
-                "year": metadata.get("year"),
-                "chosen_title": metadata["title"],
-                "chosen_year": metadata.get("year"),
-                "manual": True,
-                "confirmed_by_user": confirmed_by_user,
-                "created_at": now_timestamp(),
-                "source": "Manual",
-            },
-        )
+        entry = {
+            "qid": None,
+            "title": metadata["title"],
+            "year": metadata.get("year"),
+            "chosen_title": metadata["title"],
+            "chosen_year": metadata.get("year"),
+            "manual": True,
+            "confirmed_by_user": confirmed_by_user,
+            "created_at": now_timestamp(),
+            "source": "Manual",
+        }
     else:
-        cache.set_movie(
-            cache_key,
-            {
-                "qid": metadata["qid"],
-                "title": selected.title,
-                "year": selected.year,
-                "chosen_title": selected.title,
-                "chosen_year": selected.year,
-                "manual": False,
-                "confirmed_by_user": confirmed_by_user,
-                "created_at": now_timestamp(),
-                "source": selected.source,
-            },
-        )
+        entry = {
+            "qid": metadata["qid"],
+            "title": selected.title,
+            "year": selected.year,
+            "chosen_title": selected.title,
+            "chosen_year": selected.year,
+            "manual": False,
+            "confirmed_by_user": confirmed_by_user,
+            "created_at": now_timestamp(),
+            "source": selected.source,
+        }
+    cache.set_movie(cache_key, entry)
+    if reusable_movie_key:
+        cache.set_movie(reusable_movie_key, entry)
     cache.save()
 
     year = metadata.get("year") or selected.year
@@ -1402,6 +1996,9 @@ def organise(
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes", is_flag=True),
     clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running", is_flag=True),
     on_conflict: str = typer.Option("rename", "--on-conflict", help="On destination conflict: rename/skip/overwrite"),
+    prune_empty_dirs: bool = typer.Option(
+        False, "--prune-empty-dirs", help="Remove empty folders after move", is_flag=True
+    ),
 ) -> None:
     if move and copy:
         console.print("Choose only one of --move or --copy.")
@@ -1431,6 +2028,8 @@ def organise(
         raise typer.Exit(code=2)
 
     interactive_mode = True if interactive else not no_interactive
+    if mode == "dry-run":
+        console.print("DRY-RUN: no files will be moved/copied.")
     if mode == "apply":
         if move:
             copy_mode = False
@@ -1494,7 +2093,66 @@ def organise(
     else:
         result = execute_plans(plans, apply=apply_mode, copy_mode=copy_mode, on_conflict=on_conflict)
 
+    if prune_empty_dirs and not copy_mode and plans:
+        if apply_mode:
+            _prune_empty_dirs(result.moved, incoming, dry_run=False)
+        else:
+            _prune_empty_dirs(plans, incoming, dry_run=True)
+
     write_report(report_path, result.moved if apply_mode else plans, mode, copy_mode)
+    _print_run_summary(
+        stats=stats,
+        plans=plans,
+        errors=errors,
+        result=result,
+        cache_path=None if no_cache else cache_path,
+        report_path=report_path,
+    )
+
+    apply_report_path = None
+    if not apply_mode and interactive_mode and plans:
+        if _confirm("Apply these changes now? [y/N]", False, None, show_default=False):
+            if not copy_mode:
+                console.print("Warning: move will remove the original files from the incoming folder.")
+                if not _confirm_move(None):
+                    console.print("Cancelled. No changes were made.")
+                else:
+                    result = _apply_with_progress(plans, copy_mode=copy_mode, on_conflict=on_conflict)
+                    if prune_empty_dirs:
+                        _prune_empty_dirs(result.moved, incoming, dry_run=False)
+                    apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
+                    write_report(apply_report_path, result.moved, "apply", copy_mode)
+            else:
+                result = _apply_with_progress(plans, copy_mode=copy_mode, on_conflict=on_conflict)
+                apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
+                write_report(apply_report_path, result.moved, "apply", copy_mode)
+
+    if not apply_mode:
+        apply_config = BuildCommandConfig(
+            incoming=incoming,
+            library=library,
+            media_type=media_type,
+            mode="apply",
+            copy_mode=copy_mode,
+            extensions=_parse_extensions(extensions),
+            min_confidence=min_confidence,
+            limit=limit,
+            interactive=interactive_mode,
+            print_tree=print_tree,
+            show_enrichment=False,
+            yes=yes,
+            no_cache=no_cache,
+            cache_file=cache,
+            clear_cache=clear_cache,
+            report=None,
+            on_conflict=on_conflict,
+            prune_empty_dirs=prune_empty_dirs,
+        )
+        console.print("Apply command:")
+        console.print(_build_command(apply_config))
+        if apply_report_path is not None:
+            console.print(f"Apply report written: {apply_report_path}")
+
     if result.errors or errors:
         console.print("Errors:")
         for error in result.errors + errors:
@@ -1585,6 +2243,7 @@ def wizard() -> None:
     )
 
     copy_mode = True
+    prune_empty_dirs = False
     if mode == "apply":
         copy_choice = _prompt_choice_loop(
             "Copy or move? (copy/move)",
@@ -1600,6 +2259,7 @@ def wizard() -> None:
             if not _confirm_move(None):
                 console.print("Cancelled. No changes were made.")
                 raise typer.Exit(code=0)
+            prune_empty_dirs = _confirm("Prune empty folders after move? [y/N]: ", False, None, show_default=False)
 
     auto_accept = _confirm("Auto-accept high-confidence matches? [Y/n]: ", True, None, show_default=False)
     while True:
@@ -1620,22 +2280,27 @@ def wizard() -> None:
 
     interactive = _confirm("Interactive mode? [Y/n]: ", True, None, show_default=False)
 
-    command = _build_command(
-        incoming,
-        library,
-        mode,
-        copy_mode,
-        DEFAULT_EXTENSIONS,
-        min_confidence,
-        None,
-        interactive,
-        False,
-        auto_accept,
-        use_cache,
-        media_type,
-        clear_cache,
-        "rename",
+    command_config = BuildCommandConfig(
+        incoming=incoming,
+        library=library,
+        media_type=media_type,
+        mode=mode,
+        copy_mode=copy_mode,
+        extensions=DEFAULT_EXTENSIONS_LIST,
+        min_confidence=min_confidence,
+        limit=None,
+        interactive=interactive,
+        print_tree=False,
+        show_enrichment=False,
+        yes=auto_accept,
+        no_cache=not use_cache,
+        cache_file=None,
+        clear_cache=clear_cache,
+        report=None,
+        on_conflict="rename",
+        prune_empty_dirs=prune_empty_dirs,
     )
+    command = _build_command(command_config)
     console.print("Running:")
     console.print(command)
 
@@ -1657,6 +2322,8 @@ def wizard() -> None:
         media_type=media_type,
         no_cache=not use_cache,
         clear_cache=clear_cache,
+        on_conflict="rename",
+        prune_empty_dirs=prune_empty_dirs,
     )
 
 

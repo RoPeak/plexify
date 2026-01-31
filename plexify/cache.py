@@ -33,6 +33,12 @@ class Cache:
     def set_movie(self, key: str, value: dict[str, Any]) -> None:
         self.data.setdefault("movies", {})[key] = value
 
+    def delete_show(self, key: str) -> None:
+        self.data.setdefault("shows", {}).pop(key, None)
+
+    def delete_movie(self, key: str) -> None:
+        self.data.setdefault("movies", {}).pop(key, None)
+
     def save(self) -> None:
         json_dump(self.path, self.data)
 
@@ -58,6 +64,12 @@ class NullCache(Cache):
         return None
 
     def set_movie(self, key: str, value: dict[str, Any]) -> None:
+        return None
+
+    def delete_show(self, key: str) -> None:
+        return None
+
+    def delete_movie(self, key: str) -> None:
         return None
 
     def save(self) -> None:

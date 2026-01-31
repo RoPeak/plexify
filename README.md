@@ -29,7 +29,8 @@ python -m plexify.cli
 
 The wizard guides you through incoming/library folders, media type, dry-run vs apply, copy vs move,
 auto-accept settings, confidence threshold, and cache usage. It prints the exact command it runs.
-Move mode requires typing MOVE to confirm.
+Move mode requires typing MOVE to confirm. During a dry run, it prints a loud warning that no files
+will be moved or copied, and it offers to apply the plan immediately at the end.
 
 Organise (dry run):
 
@@ -50,6 +51,17 @@ python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Med
 ```
 
 Warning: move will remove files from the incoming folder. Use copy first.
+When running in dry-run with interactive mode, Plexify offers to apply the plan at the end without
+redoing the selections. It also prints the exact apply command so you can rerun later.
+
+Optional cleanup (move only):
+
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --mode apply --move --prune-empty-dirs
+```
+
+This removes empty folders under the incoming root after a successful move. In dry-run, it prints
+what would be removed.
 
 Filter by media type:
 
@@ -64,12 +76,33 @@ Auto-accept and confidence threshold:
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --yes --min-confidence 0.90
 ```
 
+Interactive selection shortcuts:
+
+- `Enter` accepts #1 (only when candidates exist)
+- `1-9` chooses a candidate
+- `s` searches again
+- `m` manual entry
+- `k` skip this file
+- `q` quit the run
+- `b` go back to the previous file
+- Any other text is treated as a search query
+
 Cache control:
 
 ```powershell
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --no-cache
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --clear-cache
 ```
+
+Cache reuse:
+
+- Movie cache keys are based on normalised title + year (e.g., `Superman II` caches separately from `Superman`).
+- TV show cache keys include show title + year, and episode keys include season + episode when known.
+
+Matching notes:
+
+- Search queries preserve sequel markers (e.g., `II`, `2`) so sequels do not collapse to the base title.
+- Auto-accept requires a meaningful confidence gap or a close year match; otherwise it asks for confirmation.
 
 Conflict handling:
 
@@ -87,3 +120,6 @@ python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Med
   with cached results.
 - Incoming and library overlap: Plexify exits with code 2; use separate folders to avoid re-scanning output.
 - Reports are stored in `.plexify/reports` under the library folder.
+- Cache is stored at `.plexify/cache.json` under the library folder by default (override with `--cache`).
+- Numbered episode folders (e.g., `Pride and Prejudice\1.mkv`, `2.mkv`) are treated as TV when the folder
+  contains multiple video files. The show name is taken from the folder name and any year is used as a hint.

@@ -39,6 +39,23 @@ NOISE_TOKENS = {
     "rarbg",
 }
 ROMAN_NUMERALS = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii", "xiii", "xiv", "xv"}
+ROMAN_TO_INT = {
+    "i": "1",
+    "ii": "2",
+    "iii": "3",
+    "iv": "4",
+    "v": "5",
+    "vi": "6",
+    "vii": "7",
+    "viii": "8",
+    "ix": "9",
+    "x": "10",
+    "xi": "11",
+    "xii": "12",
+    "xiii": "13",
+    "xiv": "14",
+    "xv": "15",
+}
 WINDOWS_RESERVED = {
     "CON",
     "PRN",
@@ -80,7 +97,7 @@ def sanitise_name(value: str) -> str:
     return cleaned or "Unknown"
 
 
-def normalize_title(value: str) -> str:
+def make_search_query(value: str) -> str:
     if not value:
         return ""
     lowered = value.lower()
@@ -98,12 +115,30 @@ def normalize_title(value: str) -> str:
             continue
         if re.fullmatch(r"\d{3,4}p", token):
             continue
-        if re.fullmatch(r"s\d{1,2}e\d{1,2}", token):
+        if re.fullmatch(r"s\d{1,2}e\d{1,3}", token):
             continue
         cleaned.append(token)
-    if cleaned and cleaned[-1] in ROMAN_NUMERALS:
-        cleaned = cleaned[:-1]
     return re.sub(r"\s+", " ", " ".join(cleaned)).strip()
+
+
+def normalize_title_for_similarity(value: str) -> str:
+    if not value:
+        return ""
+    lowered = make_search_query(value)
+    tokens = re.split(r"\s+", lowered)
+    cleaned: list[str] = []
+    for idx, token in enumerate(tokens):
+        if not token:
+            continue
+        if token in ROMAN_NUMERALS and idx == len(tokens) - 1:
+            cleaned.append(ROMAN_TO_INT[token])
+        else:
+            cleaned.append(token)
+    return re.sub(r"\s+", " ", " ".join(cleaned)).strip()
+
+
+def normalize_title(value: str) -> str:
+    return normalize_title_for_similarity(value)
 
 
 def build_cache_key(
@@ -119,9 +154,26 @@ def build_cache_key(
         except ValueError:
             rel = Path(path.name)
     rel_key = rel.as_posix().lower()
-    stem_norm = normalize_title(rel.stem)
+    stem_norm = normalize_title_for_similarity(rel.stem)
     year_text = str(year) if year else "unknown"
     return f"{media_type}|{rel_key}|{stem_norm}|{year_text}"
+
+
+def movie_cache_key(title: str, year: int | None) -> str:
+    year_text = str(year) if year else "unknown"
+    return f"movie|{normalize_title_for_similarity(title)}|{year_text}"
+
+
+def tv_show_cache_key(title: str, year: int | None) -> str:
+    year_text = str(year) if year else "unknown"
+    return f"tv|{normalize_title_for_similarity(title)}|{year_text}"
+
+
+def tv_episode_cache_key(title: str, year: int | None, season: int | None, episode: int | None) -> str:
+    year_text = str(year) if year else "unknown"
+    season_text = str(season) if season is not None else "unknown"
+    episode_text = str(episode) if episode is not None else "unknown"
+    return f"tv|{normalize_title_for_similarity(title)}|{year_text}|s{season_text}|e{episode_text}"
 
 
 def ensure_dir(path: Path) -> None:

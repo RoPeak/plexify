@@ -6,6 +6,7 @@ import requests
 
 from plexify import cli
 from plexify.cache import Cache
+from plexify.util import movie_cache_key
 from plexify.infer import InferredItem
 from plexify.sources import tvmaze
 
@@ -161,7 +162,7 @@ def test_tv_episode_fetch_called_once_for_selected_candidate(monkeypatch, tmp_pa
     path = incoming / "Show.S01E02.mkv"
     path.write_text("x", encoding="utf-8")
 
-    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=1, episode=2)
+    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=1, episode=2, episode_title=None)
     cache = Cache(library / ".plexify" / "cache.json")
 
     plan, _collision = cli._process_item(
@@ -185,3 +186,27 @@ def test_tv_episode_fetch_called_once_for_selected_candidate(monkeypatch, tmp_pa
     assert plan is not None
     assert calls["count"] == 1
     assert plan.metadata.get("episode_title") == "Pilot"
+
+
+def test_reusable_movie_cache_key_hit(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache.json")
+    item = InferredItem(
+        path=tmp_path / "Movie" / "Superman II.mkv",
+        media_type="movie",
+        title="Superman II",
+        year=1980,
+        episode_title=None,
+    )
+    cache.set_movie(
+        movie_cache_key(item.title, item.year),
+        {"qid": "Q1", "title": "Superman II", "year": 1980, "confirmed_by_user": True, "manual": False},
+    )
+    page = cli._movie_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        cache_key="movie|path|superman ii|1980",
+    )
+    assert page.cache_hit is True
+    assert page.candidates[0].title == "Superman II"

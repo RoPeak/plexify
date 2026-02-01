@@ -1,3 +1,4 @@
+import os
 import re
 import shlex
 import sys
@@ -17,11 +18,13 @@ from rich.table import Table
 from rich.tree import Tree
 
 from .cache import Cache, NullCache
+from . import music as music_util
 from .executor import execute_plans
 from .infer import InferredItem, infer_item
 from .planner import plan_movie, plan_tv_show
+from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_overlapping
 from .report import write_report
-from .sources import tvmaze, wikidata
+from .sources import musicbrainz, tvmaze, wikidata
 from .undo import undo_report
 from .util import (
     ExecutionResult,
@@ -38,10 +41,12 @@ from .util import (
     unique_plan_path,
 )
 
-app = typer.Typer(add_completion=False)
+app = typer.Typer(add_completion=True)
 console = Console()
+COMPLETION_ENABLED = True
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
 DEFAULT_EXTENSIONS_LIST = [ext.strip() for ext in DEFAULT_EXTENSIONS.split(",") if ext.strip()]
+DEFAULT_MUSIC_EXTENSIONS = "flac,mp3,m4a"
 DEFAULT_MIN_CONFIDENCE = 0.90
 AUTO_ACCEPT_GAP = 0.08
 PROMPT_BASE = "s=search | m=manual | k=skip | q=quit"
@@ -65,6 +70,12 @@ WIZARD_MODE_CHOICES = {
     "apply": "apply",
 }
 WIZARD_COPY_CHOICES = {"copy": "copy", "c": "copy", "move": "move", "m": "move"}
+WIZARD_ORGANISE_CHOICES = {
+    "v": "video",
+    "video": "video",
+    "m": "music",
+    "music": "music",
+}
 
 
 @dataclass
@@ -137,6 +148,17 @@ class BuildCommandConfig:
     report: Path | None
     on_conflict: str
     prune_empty_dirs: bool
+
+
+@dataclass(frozen=True)
+class MusicPlannedTrack:
+    source: Path
+    track_number: int
+    track_number_text: str
+    track_title: str
+    track_artist: str
+    ext: str
+    disc_number: int | None = None
 
 
 class BackRequested(Exception):
@@ -231,17 +253,31 @@ def _strip_outer_quotes(value: str) -> str:
     return stripped
 
 
+_path_prompt_tip_shown = False
+_path_prompt_fallback_tip_shown = False
+
+
 def _prompt_path(prompt: str, default: str | None, *, directories_only: bool) -> str:
-    if sys.stdin is None or not sys.stdin.isatty():
-        return _strip_outer_quotes(Prompt.ask(prompt, default=default, show_default=default is not None))
-    try:
-        from prompt_toolkit.completion import PathCompleter
-        from prompt_toolkit.shortcuts import prompt as pt_prompt
-    except Exception:  # noqa: BLE001
-        return _strip_outer_quotes(Prompt.ask(prompt, default=default, show_default=default is not None))
-    completer = PathCompleter(only_directories=directories_only, expanduser=True)
-    text = pt_prompt(f"{prompt}: ", default=default or "", completer=completer)
-    return _strip_outer_quotes(text)
+    global _path_prompt_tip_shown, _path_prompt_fallback_tip_shown
+    is_tty = sys.stdin is not None and sys.stdin.isatty()
+    if is_tty:
+        try:
+            from prompt_toolkit.completion import PathCompleter
+            from prompt_toolkit.shortcuts import prompt as pt_prompt
+        except Exception:  # noqa: BLE001
+            is_tty = False
+        else:
+            if not _path_prompt_tip_shown:
+                console.print("Tip: Tab autocompletes paths.")
+                _path_prompt_tip_shown = True
+            completer = PathCompleter(only_directories=directories_only, expanduser=True)
+            text = pt_prompt(prompt, default=default or "", completer=completer)
+            return _strip_outer_quotes(text)
+
+    if not _path_prompt_fallback_tip_shown:
+        console.print("Tip: install prompt_toolkit to enable in-wizard tab completion: pip install prompt_toolkit")
+        _path_prompt_fallback_tip_shown = True
+    return _strip_outer_quotes(Prompt.ask(prompt, default=default, show_default=default is not None))
 
 
 def _prompt_choice(prompt: str, default: str, progress: Progress | None, show_default: bool = True) -> str:
@@ -273,8 +309,30 @@ def _confirm(prompt: str, default: bool, progress: Progress | None, show_default
     return choice in {"y", "yes"}
 
 
+def _print_overlap_error(exc: PathOverlapError) -> None:
+    issue = exc.issue
+    console.print(issue.reason)
+    for suggestion in issue.suggestions:
+        console.print(suggestion)
+
+
+def _detect_media_in_path(path: Path, audio_exts: set[str], video_exts: set[str]) -> tuple[bool, bool]:
+    has_audio = False
+    has_video = False
+    for base, _, files in os.walk(path):
+        for name in files:
+            suffix = Path(name).suffix.lower().lstrip(".")
+            if suffix in audio_exts:
+                has_audio = True
+            if suffix in video_exts:
+                has_video = True
+            if has_audio and has_video:
+                return True, True
+    return has_audio, has_video
+
+
 def _confirm_move(progress: Progress | None) -> bool:
-    phrase = _prompt_text("To proceed, type: MOVE", "", progress, show_default=False)
+    phrase = _prompt_text("To proceed, type MOVE", "", progress, show_default=False)
     return phrase.strip().lower() == "move"
 
 
@@ -847,8 +905,8 @@ def _prompt_manual_tv(item: InferredItem, progress: Progress | None) -> Candidat
 
 def _prompt_manual_movie(item: InferredItem, progress: Progress | None) -> tuple[Candidate, str]:
     title = _prompt_text("Movie title", item.title, progress)
-    year_text = _prompt_text("Movie year (optional, helps disambiguate) []:", "", progress, show_default=False)
-    hint = _prompt_text("Hint (optional, director/cast/keyword) []:", "", progress, show_default=False)
+    year_text = _prompt_text("Movie year (optional, helps disambiguate)", "", progress, show_default=False)
+    hint = _prompt_text("Hint (optional, director/cast/keyword)", "", progress, show_default=False)
     year = int(year_text) if year_text else None
     metadata = {"qid": None, "title": title, "year": year, "manual": True}
     return Candidate(title=title, year=year, source="Manual", confidence=1.0, metadata=metadata), hint
@@ -856,7 +914,7 @@ def _prompt_manual_movie(item: InferredItem, progress: Progress | None) -> tuple
 
 def _prompt_search(item: InferredItem, progress: Progress | None) -> tuple[InferredItem, str]:
     query = _prompt_text("Search query", item.title, progress)
-    hint = _prompt_text("Hint (optional, director/cast/keyword) []:", "", progress, show_default=False)
+    hint = _prompt_text("Hint (optional, director/cast/keyword)", "", progress, show_default=False)
     return _with_title(item, query), _build_search_query(query, hint)
 
 
@@ -955,6 +1013,204 @@ def _file_panel(index: int, total: int, item: InferredItem) -> Panel:
     return Panel("\n".join(lines), title=title_line, expand=False)
 
 
+def _album_panel(index: int, total: int, album: music_util.AlbumGroup) -> Panel:
+    title_line = f"Album {index}/{total} - {album.source.name}"
+    lines = [f"Detected: Artist={album.artist}, Album={album.album}", f"Tracks: {len(album.tracks)}"]
+    return Panel("\n".join(lines), title=title_line, expand=False)
+
+
+def _print_music_candidates(candidates: list[musicbrainz.ReleaseCandidate]) -> None:
+    table = Table(title="MusicBrainz releases")
+    table.add_column("#")
+    table.add_column("Artist")
+    table.add_column("Album")
+    table.add_column("Year")
+    table.add_column("Country")
+    table.add_column("Confidence")
+    for idx, cand in enumerate(candidates, start=1):
+        year_text = str(cand.year) if cand.year else "-"
+        country = cand.country or "-"
+        table.add_row(str(idx), cand.artist, cand.title, year_text, country, f"{cand.score:.2f}")
+    console.print(table)
+
+
+def _select_music_candidate(
+    candidates: list[musicbrainz.ReleaseCandidate],
+) -> musicbrainz.ReleaseCandidate | None | str:
+    printed = False
+    while True:
+        if candidates and not printed:
+            _print_music_candidates(candidates)
+            printed = True
+        _safe_print("Enter=accept #1 | 1-9=choose | s=skip verification | q=quit", None)
+        default_choice = "1" if candidates else ""
+        choice = _prompt_choice("Select", default_choice, None, show_default=False)
+        if choice == "":
+            if candidates:
+                return candidates[0]
+            return "s"
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(candidates):
+                return candidates[idx]
+            _safe_print("Invalid selection.", None)
+            continue
+        if choice == "s":
+            return "s"
+        if choice == "q":
+            return "q"
+        _safe_print("Invalid choice.", None)
+
+
+def _music_tracks_from_filenames(tracks: list[music_util.TrackInfo]) -> list[MusicPlannedTrack]:
+    planned: list[MusicPlannedTrack] = []
+    for track in tracks:
+        multi_disc = track.track_number >= 100
+        track_number_text = music_util.format_track_number(track.track_number, multi_disc=multi_disc)
+        planned.append(
+            MusicPlannedTrack(
+                source=track.source,
+                track_number=track.track_number,
+                track_number_text=track_number_text,
+                track_title=track.track_title,
+                track_artist=track.track_artist,
+                ext=track.ext,
+            )
+        )
+    return planned
+
+
+def _map_musicbrainz_tracks(
+    tracks: list[music_util.TrackInfo],
+    mb_tracks: list[musicbrainz.Track],
+) -> tuple[list[MusicPlannedTrack] | None, str | None]:
+    if not tracks or not mb_tracks:
+        return None, "Missing tracks to map"
+    if len(tracks) != len(mb_tracks):
+        return None, "Track count mismatch"
+    disc_numbers = {track.disc for track in mb_tracks}
+    disc_count = len(disc_numbers)
+    has_multiple_discs = disc_count > 1 or any(disc > 1 for disc in disc_numbers)
+    use_disc_numbers = any(track.track_number >= 100 for track in tracks)
+
+    if use_disc_numbers:
+        input_map: dict[tuple[int, int], music_util.TrackInfo] = {}
+        for track in tracks:
+            disc = track.track_number // 100
+            number = track.track_number % 100
+            if disc <= 0 or number <= 0:
+                return None, "Invalid disc-style track numbering"
+            key = (disc, number)
+            if key in input_map:
+                return None, "Duplicate disc-style track numbers"
+            input_map[key] = track
+        mapped: list[MusicPlannedTrack] = []
+        for mb_track in mb_tracks:
+            key = (mb_track.disc, mb_track.number)
+            source_track = input_map.get(key)
+            if source_track is None:
+                return None, "Missing disc/track matches"
+            track_number_text = music_util.format_track_number(
+                mb_track.number,
+                disc_number=mb_track.disc,
+                multi_disc=disc_count > 1,
+            )
+            mapped.append(
+                MusicPlannedTrack(
+                    source=source_track.source,
+                    track_number=mb_track.disc * 100 + mb_track.number if disc_count > 1 else mb_track.number,
+                    track_number_text=track_number_text,
+                    track_title=mb_track.title,
+                    track_artist=source_track.track_artist,
+                    ext=source_track.ext,
+                    disc_number=mb_track.disc,
+                )
+            )
+        return mapped, None
+
+    if has_multiple_discs:
+        return None, "Multi-disc release without disc numbers in filenames"
+
+    input_by_number: dict[int, music_util.TrackInfo] = {}
+    for track in tracks:
+        if track.track_number in input_by_number:
+            return None, "Duplicate track numbers in filenames"
+        input_by_number[track.track_number] = track
+    mapped: list[MusicPlannedTrack] = []
+    for mb_track in mb_tracks:
+        source_track = input_by_number.get(mb_track.number)
+        if source_track is None:
+            return None, "Missing track numbers in filenames"
+        track_number_text = music_util.format_track_number(mb_track.number)
+        mapped.append(
+            MusicPlannedTrack(
+                source=source_track.source,
+                track_number=mb_track.number,
+                track_number_text=track_number_text,
+                track_title=mb_track.title,
+                track_artist=source_track.track_artist,
+                ext=source_track.ext,
+                disc_number=mb_track.disc,
+            )
+        )
+    return mapped, None
+
+
+def _map_musicbrainz_by_order(
+    tracks: list[music_util.TrackInfo],
+    mb_tracks: list[musicbrainz.Track],
+) -> list[MusicPlannedTrack]:
+    sorted_tracks = sorted(tracks, key=lambda track: (track.track_number, track.source.name.lower()))
+    sorted_mb = sorted(mb_tracks, key=lambda track: (track.disc, track.number))
+    disc_count = len({track.disc for track in sorted_mb})
+    mapped: list[MusicPlannedTrack] = []
+    for source_track, mb_track in zip(sorted_tracks, sorted_mb, strict=False):
+        track_number_text = music_util.format_track_number(
+            mb_track.number,
+            disc_number=mb_track.disc,
+            multi_disc=disc_count > 1,
+        )
+        mapped.append(
+            MusicPlannedTrack(
+                source=source_track.source,
+                track_number=mb_track.disc * 100 + mb_track.number if disc_count > 1 else mb_track.number,
+                track_number_text=track_number_text,
+                track_title=mb_track.title,
+                track_artist=source_track.track_artist,
+                ext=source_track.ext,
+                disc_number=mb_track.disc,
+            )
+        )
+    return mapped
+
+
+def _should_use_various_artists(album: music_util.AlbumGroup, candidate_artist: str | None) -> bool:
+    if candidate_artist and candidate_artist.strip().lower() == "various artists":
+        return True
+    if album.artist.strip().lower() in {"various artists", "va"}:
+        return True
+    unique_artists = {track.track_artist.strip().lower() for track in album.tracks if track.track_artist.strip()}
+    return len(unique_artists) > 1
+
+
+def _print_music_album_summary(
+    *,
+    album_dest: Path,
+    track_count: int,
+    artwork: bool,
+    cue_count: int,
+    log_count: int,
+) -> None:
+    console.print(f"Album destination: {album_dest}")
+    console.print(f"Tracks: {track_count}")
+    if artwork:
+        console.print("Artwork: cover.jpg")
+    if cue_count:
+        console.print(f"CUE files: {cue_count}")
+    if log_count:
+        console.print(f"LOG files: {log_count}")
+
+
 def _print_plan(plan: MovePlan, progress: Progress | None = None) -> None:
     _safe_print("PLAN", progress)
     _safe_print(f"FROM: {plan.source}", progress)
@@ -979,7 +1235,7 @@ def _fetch_with_retry(
             _safe_print(f"{label} request failed: {exc.__class__.__name__}", progress)
             if not interactive:
                 raise
-            retry = _prompt_choice("Retry? (y/n)", "y", progress)
+            retry = _prompt_choice("Retry? [Y/n]", "y", progress)
             if retry in {"y", "yes"}:
                 continue
             return None
@@ -1305,6 +1561,18 @@ def _process_item(
     allow_back: bool = False,
 ) -> tuple[MovePlan | None, bool]:
     cache_key = build_cache_key(item.path, incoming_root, item.media_type, item.year)
+    if item.media_type == "movie" and interactive:
+        if re.search(r"\b(series|episode)\b", item.path.stem, re.IGNORECASE):
+            if _confirm("This looks like TV. Treat as TV? [Y/n]", True, progress, show_default=False):
+                item = InferredItem(
+                    path=item.path,
+                    media_type="tv",
+                    title=item.title,
+                    year=item.year,
+                    season=item.season,
+                    episode=item.episode,
+                    episode_title=item.episode_title,
+                )
     reusable_movie_key = None
     reusable_show_key = None
     reusable_episode_key = None
@@ -2042,7 +2310,7 @@ def _process_item(
 
     year = metadata.get("year") or selected.year
     if year is None and interactive:
-        year_text = _prompt_text("Movie year (optional, helps disambiguate) []:", "", progress, show_default=False)
+        year_text = _prompt_text("Movie year (optional, helps disambiguate)", "", progress, show_default=False)
         year = int(year_text) if year_text else None
     destination = plan_movie(library, metadata.get("title") or selected.title, year, item.path.suffix)
     destination, collision = _resolve_destination(destination, on_conflict, planned, progress)
@@ -2102,15 +2370,10 @@ def organise(
         console.print("Invalid on-conflict policy. Use rename, skip, or overwrite.")
         raise typer.Exit(code=2)
 
-    incoming_resolved = incoming.resolve()
-    library_resolved = library.resolve()
-    overlap = (
-        incoming_resolved == library_resolved
-        or incoming_resolved.is_relative_to(library_resolved)
-        or library_resolved.is_relative_to(incoming_resolved)
-    )
-    if overlap:
-        console.print("Incoming and library folders must not overlap. Use separate folders.")
+    try:
+        ensure_non_overlapping_paths(incoming, library, label_source="Incoming", label_library="Library")
+    except PathOverlapError as exc:
+        _print_overlap_error(exc)
         raise typer.Exit(code=2)
 
     interactive_mode = True if interactive else not no_interactive
@@ -2249,6 +2512,258 @@ def organise(
     raise typer.Exit(code=0)
 
 
+@app.command()
+def music(
+    source: Path = typer.Option(None, "--source", help="Folder containing album directories"),
+    library: Path = typer.Option(None, "--library", help="Library root (will contain Music)"),
+    apply: bool = typer.Option(False, "--apply/--dry-run", help="Apply changes or dry-run"),
+    copy: bool = typer.Option(False, "--copy", help="Copy files instead of moving", is_flag=True),
+    extensions: str = typer.Option(DEFAULT_MUSIC_EXTENSIONS, help="Comma-separated extensions"),
+    verify: bool = typer.Option(True, "--verify/--no-verify", help="Verify albums via MusicBrainz"),
+    keep_art: bool = typer.Option(True, "--keep-art/--no-art", help="Move/copy album artwork to cover.jpg"),
+    keep_cue: bool = typer.Option(False, "--keep-cue", help="Keep .cue sidecars", is_flag=True),
+    keep_log: bool = typer.Option(False, "--keep-log", help="Keep .log sidecars", is_flag=True),
+    cleanup_empty_dirs: bool = typer.Option(
+        False, "--cleanup-empty-dirs", help="Remove empty folders after move", is_flag=True
+    ),
+    verbose_plan: bool = typer.Option(False, "--verbose-plan", help="Print per-track plan output", is_flag=True),
+) -> None:
+    if source is None:
+        source_default = Path.cwd()
+        while True:
+            source_text = _prompt_path("Source folder", str(source_default), directories_only=True)
+            source = Path(source_text)
+            if source.exists() and source.is_dir():
+                break
+            console.print("That path does not exist or is not a folder. Please try again.")
+    if library is None:
+        library_default = source.parent / "Library"
+        while True:
+            library_text = _prompt_path("Library folder", str(library_default), directories_only=True)
+            library = Path(library_text)
+            if library.exists() and library.is_file():
+                console.print("That path is a file. Please choose a folder path.")
+                continue
+            if not library.exists():
+                if _confirm("That folder does not exist. Create it? [Y/n]", True, None, show_default=False):
+                    library.mkdir(parents=True, exist_ok=True)
+                    break
+                continue
+            break
+
+    if source is None or library is None:
+        raise typer.Exit(code=2)
+    if not source.exists() or not source.is_dir():
+        console.print("Source folder must exist and be a directory.")
+        raise typer.Exit(code=2)
+    if library.exists() and library.is_file():
+        console.print("Library path must be a directory.")
+        raise typer.Exit(code=2)
+    if not library.exists():
+        if _confirm("Library folder does not exist. Create it? [Y/n]", True, None, show_default=False):
+            library.mkdir(parents=True, exist_ok=True)
+        else:
+            console.print("Cancelled. No changes were made.")
+            raise typer.Exit(code=0)
+    try:
+        ensure_non_overlapping_paths(source, library, label_source="Source", label_library="Library")
+    except PathOverlapError as exc:
+        _print_overlap_error(exc)
+        raise typer.Exit(code=2)
+
+    if not apply:
+        console.print("DRY-RUN: no files will be moved/copied.")
+    copy_mode = copy
+
+    albums, errors = music_util.discover_albums(source, _parse_extensions(extensions))
+    if not albums:
+        console.print("No valid albums found.")
+        for error in errors:
+            console.print(f"- {error}")
+        raise typer.Exit(code=1)
+
+    mb_disabled_reported = False
+    if verify and not musicbrainz.is_available():
+        reason = musicbrainz.unavailable_reason() or "offline"
+        console.print(f"MusicBrainz disabled: {reason}")
+        mb_disabled_reported = True
+
+    planned: dict[str, int] = {}
+    plans: list[MovePlan] = []
+    for idx, album in enumerate(albums, start=1):
+        console.print(_album_panel(idx, len(albums), album))
+        album_artist = album.artist
+        album_title = album.album
+        planned_tracks = _music_tracks_from_filenames(album.tracks)
+
+        if verify:
+            if not musicbrainz.is_available():
+                if not mb_disabled_reported:
+                    reason = musicbrainz.unavailable_reason() or "offline"
+                    console.print(f"MusicBrainz disabled: {reason}")
+                    mb_disabled_reported = True
+                console.print("Skipped MusicBrainz (offline).")
+            else:
+                candidates = musicbrainz.search_releases(album_artist, album_title, limit=8)
+                if not musicbrainz.is_available():
+                    if not mb_disabled_reported:
+                        reason = musicbrainz.unavailable_reason() or "offline"
+                        console.print(f"MusicBrainz disabled: {reason}")
+                        mb_disabled_reported = True
+                    console.print("Skipped MusicBrainz (offline).")
+                elif not candidates:
+                    console.print("No MusicBrainz matches found. Using filename metadata.")
+                else:
+                    selection = _select_music_candidate(candidates)
+                    if selection == "q":
+                        raise typer.Exit(code=0)
+                    if selection == "s":
+                        console.print("Skipping MusicBrainz verification for this album.")
+                    elif isinstance(selection, musicbrainz.ReleaseCandidate):
+                        album_artist = selection.artist
+                        album_title = selection.title
+                        mb_tracks = musicbrainz.fetch_release_tracks(selection.mbid)
+                        if not mb_tracks:
+                            if not musicbrainz.is_available():
+                                if not mb_disabled_reported:
+                                    reason = musicbrainz.unavailable_reason() or "offline"
+                                    console.print(f"MusicBrainz disabled: {reason}")
+                                    mb_disabled_reported = True
+                                console.print("Skipped MusicBrainz (offline).")
+                            else:
+                                console.print("No tracklist found. Using filename metadata.")
+                        else:
+                            mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
+                            if reason:
+                                console.print(f"Warning: {reason}.")
+                                if _confirm("Fallback to filename titles? [Y/n]", True, None, show_default=False):
+                                    mapped = None
+                                else:
+                                    mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
+                                    console.print("Using MusicBrainz titles by track order.")
+                            if mapped is not None:
+                                planned_tracks = mapped
+
+        dest_artist = "Various Artists" if _should_use_various_artists(album, album_artist) else album_artist
+        dest_album = album_title
+
+        for track in planned_tracks:
+            destination = music_util.track_destination(
+                library,
+                dest_artist,
+                dest_album,
+                track.track_number_text,
+                track.track_title,
+                track.ext,
+            )
+            destination, _collision = _resolve_destination(destination, "rename", planned, None)
+            if destination is None:
+                continue
+            plan = MovePlan(
+                source=track.source,
+                destination=destination,
+                mode="apply" if apply else "dry-run",
+                media_type="music",
+                metadata={
+                    "artist": dest_artist,
+                    "album": dest_album,
+                    "track_number": track.track_number,
+                },
+            )
+            plans.append(plan)
+            if verbose_plan:
+                _print_plan(plan, None)
+
+        album_folder = music_util.album_destination(library, dest_artist, dest_album)
+        if keep_art:
+            artwork = music_util.select_best_artwork(album.images)
+            if artwork:
+                destination = album_folder / "cover.jpg"
+                destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                if destination is not None:
+                    plans.append(
+                        MovePlan(
+                            source=artwork,
+                            destination=destination,
+                            mode="apply" if apply else "dry-run",
+                            media_type="music",
+                            metadata={"artist": dest_artist, "album": dest_album, "type": "artwork"},
+                        )
+                    )
+        if keep_cue:
+            for cue in album.cues:
+                destination = album_folder / cue.name
+                destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                if destination is not None:
+                    plans.append(
+                        MovePlan(
+                            source=cue,
+                            destination=destination,
+                            mode="apply" if apply else "dry-run",
+                            media_type="music",
+                            metadata={"artist": dest_artist, "album": dest_album, "type": "cue"},
+                        )
+                    )
+        if keep_log:
+            for log in album.logs:
+                destination = album_folder / log.name
+                destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                if destination is not None:
+                    plans.append(
+                        MovePlan(
+                            source=log,
+                            destination=destination,
+                            mode="apply" if apply else "dry-run",
+                            media_type="music",
+                            metadata={"artist": dest_artist, "album": dest_album, "type": "log"},
+                        )
+                    )
+
+        if not verbose_plan:
+            _print_music_album_summary(
+                album_dest=album_folder,
+                track_count=len(planned_tracks),
+                artwork=keep_art and bool(album.images),
+                cue_count=len(album.cues) if keep_cue else 0,
+                log_count=len(album.logs) if keep_log else 0,
+            )
+
+    if apply and not copy_mode:
+        console.print("Warning: move will remove the original files from the source folder.")
+        if not _confirm_move(None):
+            console.print("Cancelled. No changes were made.")
+            raise typer.Exit(code=0)
+
+    report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
+    if apply and plans:
+        result = _apply_with_progress(plans, copy_mode=copy_mode, on_conflict="rename")
+    else:
+        result = execute_plans(plans, apply=apply, copy_mode=copy_mode, on_conflict="rename")
+
+    if cleanup_empty_dirs and apply and not copy_mode and plans:
+        _prune_empty_dirs(result.moved, source, dry_run=False)
+
+    write_report(report_path, result.moved if apply else plans, "apply" if apply else "dry-run", copy_mode)
+
+    console.print("Summary:")
+    console.print(f"Albums: {len(albums)}")
+    console.print(f"Planned files: {len(plans)}")
+    if errors:
+        console.print(f"Warnings: {len(errors)}")
+        for error in errors:
+            console.print(f"- {error}")
+    console.print(f"Report path: {report_path}")
+
+    if result.errors:
+        console.print("Errors:")
+        for error in result.errors:
+            console.print(f"- {error}")
+        raise typer.Exit(code=1)
+    if not plans:
+        raise typer.Exit(code=1)
+    raise typer.Exit(code=0)
+
+
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
@@ -2284,33 +2799,86 @@ def undo(report: Path = typer.Option(None, help="Report path"), library: Path = 
 @app.command()
 def wizard() -> None:
     console.print("Plexify wizard")
-    console.print("This will help you organise video files into a Plex-friendly folder layout.")
-    console.print("Tip: for PowerShell tab-complete paths, run organise with --incoming/--library arguments instead.")
     console.print("Tip: you can drag-and-drop a folder into the terminal to paste its full path.")
 
-    console.print("Where are the files you want to organise?")
-    incoming_default = Path.cwd()
-    while True:
-        incoming_text = _prompt_path("Incoming folder", str(incoming_default), directories_only=True)
-        incoming = Path(incoming_text)
-        if incoming.exists() and incoming.is_dir():
-            break
-        console.print("That path does not exist or is not a folder. Please try again.")
+    choice = _prompt_choice_loop(
+        "Organise: (v)ideo or (m)usic",
+        WIZARD_ORGANISE_CHOICES,
+        None,
+        allow_empty=True,
+        error="Enter v for video or m for music.",
+        default="video",
+    )
+    if choice == "music":
+        _wizard_music()
+    else:
+        _wizard_video()
 
-    console.print("Where should the organised library be created?")
-    library_default = incoming.parent / "Library"
+
+def _prompt_non_overlapping_paths(
+    *,
+    label_source: str,
+    label_library: str,
+    source_default: Path,
+    library_default: Path,
+) -> tuple[Path, Path]:
+    source_text = _prompt_path(f"{label_source} folder", str(source_default), directories_only=True)
+    source = Path(source_text)
+    while not source.exists() or not source.is_dir():
+        console.print("That path does not exist or is not a folder. Please try again.")
+        source_text = _prompt_path(f"{label_source} folder", str(source_default), directories_only=True)
+        source = Path(source_text)
+
     while True:
-        library_text = _prompt_path("Library folder", str(library_default), directories_only=True)
+        library_text = _prompt_path(f"{label_library} folder", str(library_default), directories_only=True)
         library = Path(library_text)
         if library.exists() and library.is_file():
-            console.print("That path does not exist or is not a folder. Please try again.")
+            console.print("That path is a file. Please choose a folder path.")
             continue
         if not library.exists():
             if _confirm("That folder does not exist. Create it? [Y/n]", True, None, show_default=False):
                 library.mkdir(parents=True, exist_ok=True)
-                break
-            continue
-        break
+            else:
+                console.print("Cancelled. No changes were made.")
+                raise typer.Exit(code=0)
+        ok, reason, suggestion = validate_non_overlapping(source, library)
+        if ok:
+            return source, library
+        console.print(reason)
+        if suggestion is not None:
+            console.print(f"Suggested {label_library}: {suggestion}")
+            library_default = suggestion
+        if _confirm(f"Edit {label_source.lower()} instead? [y/N]", False, None, show_default=False):
+            source_text = _prompt_path(f"{label_source} folder", str(source_default), directories_only=True)
+            source = Path(source_text)
+            while not source.exists() or not source.is_dir():
+                console.print("That path does not exist or is not a folder. Please try again.")
+                source_text = _prompt_path(f"{label_source} folder", str(source_default), directories_only=True)
+                source = Path(source_text)
+
+
+def _wizard_video() -> None:
+    console.print("This will help you organise video files into a Plex-friendly folder layout.")
+    console.print("Tip: for PowerShell tab-complete paths, run organise with --incoming/--library arguments instead.")
+    if COMPLETION_ENABLED:
+        console.print("Tip: run python -m plexify.cli --install-completion to enable shell autocompletion.")
+
+    incoming_default = Path.cwd()
+    library_default = incoming_default.parent / "Library"
+    incoming, library = _prompt_non_overlapping_paths(
+        label_source="Incoming",
+        label_library="Library",
+        source_default=incoming_default,
+        library_default=library_default,
+    )
+
+    audio_exts = {ext.strip().lstrip(".") for ext in DEFAULT_MUSIC_EXTENSIONS.split(",") if ext.strip()}
+    video_exts = {ext.strip().lstrip(".") for ext in DEFAULT_EXTENSIONS_LIST}
+    has_audio, has_video = _detect_media_in_path(incoming, audio_exts, video_exts)
+    if has_audio and not has_video:
+        if _confirm("This looks like music. Switch to music mode? [Y/n]", True, None, show_default=False):
+            _wizard_music(source_override=incoming, library_override=library)
+            return
 
     media_type = _prompt_choice_loop(
         "Media type (movie/tv/both)",
@@ -2415,5 +2983,69 @@ def wizard() -> None:
     )
 
 
+def _wizard_music(source_override: Path | None = None, library_override: Path | None = None) -> None:
+    console.print("This will help you organise music into a Plex-friendly folder layout.")
+    if COMPLETION_ENABLED:
+        console.print("Tip: run python -m plexify.cli --install-completion to enable shell autocompletion.")
+
+    source_default = source_override or Path.cwd()
+    library_default = library_override or source_default.parent / "Library"
+    source, library = _prompt_non_overlapping_paths(
+        label_source="Source",
+        label_library="Library",
+        source_default=source_default,
+        library_default=library_default,
+    )
+
+    audio_exts = {ext.strip().lstrip(".") for ext in DEFAULT_MUSIC_EXTENSIONS.split(",") if ext.strip()}
+    video_exts = {ext.strip().lstrip(".") for ext in DEFAULT_EXTENSIONS_LIST}
+    has_audio, has_video = _detect_media_in_path(source, audio_exts, video_exts)
+    if has_video and not has_audio:
+        if _confirm("This looks like video. Switch to video mode? [Y/n]", True, None, show_default=False):
+            _wizard_video()
+            return
+
+    mode = _prompt_choice_loop(
+        "Mode (dry-run/apply)",
+        WIZARD_MODE_CHOICES,
+        None,
+        allow_empty=True,
+        error="Enter one of: dry-run, apply.",
+        default="dry-run",
+    )
+
+    copy_mode = False
+    cleanup_empty_dirs = False
+    if mode == "apply":
+        copy_mode = _confirm("Copy files instead of moving? [y/N]", False, None, show_default=False)
+        if not copy_mode:
+            console.print("Warning: move will remove the original files from the source folder.")
+            if not _confirm_move(None):
+                console.print("Cancelled. No changes were made.")
+                raise typer.Exit(code=0)
+            cleanup_empty_dirs = _confirm("Clean up empty folders after move? [y/N]", False, None, show_default=False)
+
+    verify = _confirm("Verify albums with MusicBrainz? [Y/n]", True, None, show_default=False)
+    keep_art = _confirm("Keep album artwork? [Y/n]", True, None, show_default=False)
+    keep_cue = _confirm("Keep .cue sidecars? [y/N]", False, None, show_default=False)
+    keep_log = _confirm("Keep .log sidecars? [y/N]", False, None, show_default=False)
+    verbose_plan = _confirm("Show per-track plan? [y/N]", False, None, show_default=False)
+
+    music(
+        source=source,
+        library=library,
+        apply=mode == "apply",
+        copy=copy_mode,
+        extensions=DEFAULT_MUSIC_EXTENSIONS,
+        verify=verify,
+        keep_art=keep_art,
+        keep_cue=keep_cue,
+        keep_log=keep_log,
+        cleanup_empty_dirs=cleanup_empty_dirs,
+        verbose_plan=verbose_plan,
+    )
+
+
 if __name__ == "__main__":
     app()
+

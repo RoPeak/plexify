@@ -85,6 +85,18 @@ def test_infer_tv_under_movies_folder_with_series_pattern() -> None:
     )
     item = infer_item(path)
     assert item.media_type == "tv"
+
+
+def test_infer_tv_series_episode_night_manager() -> None:
+    path = Path("The_Night_Manager_Series_2_-_01._Episode_1_p01.mp4")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+
+
+def test_infer_tv_series_episode_young_offenders() -> None:
+    path = Path("The_Young_Offenders_Series_1_-_04._Episode_4_p02.mp4")
+    item = infer_item(path)
+    assert item.media_type == "tv"
     assert item.season == 2
     assert item.episode == 1
     assert "Movies" not in item.title

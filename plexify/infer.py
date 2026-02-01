@@ -17,6 +17,7 @@ SEASON_EP_RE = re.compile(
     re.IGNORECASE,
 )
 EPISODE_RE = re.compile(r"\b(?:episode|ep)\s*(\d{1,3})\b", re.IGNORECASE)
+TV_HINT_RE = re.compile(r"\b(?:series|season|episode|ep)\b", re.IGNORECASE)
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 YEAR_RANGE_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*[-–]\s*(19\d{2}|20\d{2})(?!\d)")
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts"}
@@ -197,6 +198,10 @@ def _has_tv_context(path: Path) -> bool:
         return True
     if any(SEASON_RE.search(parent.name) for parent in path.parents):
         return True
+    if any(part.lower() in {"tv", "tv shows"} for part in path.parts):
+        return True
+    if TV_HINT_RE.search(path.stem):
+        return True
     return False
 
 
@@ -207,6 +212,7 @@ def infer_item(path: Path) -> InferredItem:
     episode = None
     explicit_episode = False
     has_tv_context = _has_tv_context(path)
+    has_tv_hint = TV_HINT_RE.search(path.stem) is not None
     title_override = None
     year_override = None
 
@@ -241,18 +247,21 @@ def infer_item(path: Path) -> InferredItem:
     episode_from_name, explicit_from_name = _extract_episode_from_name(stem_for_tv)
     explicit_episode = explicit_episode or explicit_from_name
     episode = episode or episode_from_name
-    if episode is not None and (has_tv_context or season is not None or explicit_episode):
+    if episode is not None and (has_tv_context or has_tv_hint or season is not None or explicit_episode):
         media_type = "tv"
 
     if guess.get("type") == "episode":
         guessed_season = guess.get("season")
         guessed_episode = guess.get("episode")
-        if has_tv_context or season is not None or guessed_season is not None or explicit_episode:
+        if has_tv_context or has_tv_hint or season is not None or guessed_season is not None or explicit_episode:
             media_type = "tv"
             season = season or guessed_season
             episode = episode or guessed_episode
 
     title = guess.get("title") or path.stem
+    if media_type == "movie" and has_tv_hint:
+        media_type = "tv"
+
     if media_type == "movie":
         cleaned = _clean_title_from_stem(path.stem)
         if cleaned:

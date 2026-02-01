@@ -1,1 +1,1 @@
-__all__ = ["tvmaze", "wikidata"]
+__all__ = ["musicbrainz", "tvmaze", "wikidata"]

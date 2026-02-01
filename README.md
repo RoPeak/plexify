@@ -112,10 +112,55 @@ python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Med
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --on-conflict overwrite
 ```
 
+Completions:
+
+```powershell
+python -m plexify.cli --install-completion
+```
+
+Run once to enable shell autocompletion for options and paths.
+For in-wizard tab completion, install prompt_toolkit:
+
+```powershell
+python -m pip install prompt_toolkit
+```
+
+Music organisation (dry-run):
+
+```powershell
+python -m plexify.cli music --source "D:\Rips" --library "D:\Media" --dry-run
+```
+
+Music organisation (apply, move, skip verification):
+
+```powershell
+python -m plexify.cli music --source "D:\Rips" --library "D:\Media" --apply --no-verify
+```
+
+Verbose per-track plan output:
+
+```powershell
+python -m plexify.cli music --source "D:\Rips" --library "D:\Media" --dry-run --verbose-plan
+```
+
+Example CD layout:
+
+```
+Alanis Morissette - Jagged Little Pill\
+  01 - Alanis Morissette - All I Really Want.flac
+```
+
+Output:
+
+```
+D:\Media\Music\Alanis Morissette\Jagged Little Pill\01 - All I Really Want.flac
+```
+
 ## Troubleshooting
 
 - Click/Typer compatibility: keep the pinned versions in `requirements.txt`.
 - Wikidata blocked or 403: set `PLEXIFY_USER_AGENT` to include contact details.
+- MusicBrainz throttling: set `PLEXIFY_USER_AGENT` to include contact details.
 - Offline/proxy networks: lookups may fail; confirm your proxy settings or run
   with cached results.
 - Incoming and library overlap: Plexify exits with code 2; use separate folders to avoid re-scanning output.

@@ -16,6 +16,7 @@ from .. import __version__
 BASE_URL = "https://musicbrainz.org/ws/2"
 _available = True
 _warned = False
+_warned_user_agent = False
 _last_request = 0.0
 _unavailable_reason: str | None = None
 
@@ -24,7 +25,6 @@ def _warn_unavailable(message: str) -> None:
     global _warned
     if _warned:
         return
-    print(message)
     _warned = True
 
 
@@ -54,6 +54,7 @@ class ReleaseCandidate:
     year: int | None
     country: str | None
     score: float
+    track_count: int | None
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,13 @@ def _session() -> requests.Session:
     session = requests.Session()
     retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[429, 500, 502, 503, 504])
     session.mount("https://", HTTPAdapter(max_retries=retries))
-    user_agent = os.environ.get("PLEXIFY_USER_AGENT") or f"plexify/{__version__} (contact: set PLEXIFY_USER_AGENT)"
+    user_agent = os.environ.get("PLEXIFY_USER_AGENT")
+    if not user_agent:
+        global _warned_user_agent
+        if not _warned_user_agent:
+            print("MusicBrainz: set PLEXIFY_USER_AGENT with contact info to avoid throttling.")
+            _warned_user_agent = True
+        user_agent = f"plexify/{__version__} (contact: set PLEXIFY_USER_AGENT)"
     session.headers.update(
         {
             "User-Agent": user_agent,
@@ -145,6 +152,8 @@ def search_releases(artist: str, album: str, limit: int = 8, session: requests.S
         except (TypeError, ValueError):
             score = 0.0
         artist_name = _parse_artist_credit(item.get("artist-credit"))
+        track_count = item.get("track-count")
+        track_count_val = int(track_count) if isinstance(track_count, int) else None
         results.append(
             ReleaseCandidate(
                 mbid=str(mbid),
@@ -153,6 +162,7 @@ def search_releases(artist: str, album: str, limit: int = 8, session: requests.S
                 year=year,
                 country=str(country) if country else None,
                 score=score,
+                track_count=track_count_val,
             )
         )
     return results

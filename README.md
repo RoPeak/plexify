@@ -103,6 +103,7 @@ Matching notes:
 
 - Search queries preserve sequel markers (e.g., `II`, `2`) so sequels do not collapse to the base title.
 - Auto-accept requires a meaningful confidence gap or a close year match; otherwise it asks for confirmation.
+- Timing output labels `api=` for API calls and `total=` for end-to-end processing.
 
 Conflict handling:
 

@@ -3,7 +3,7 @@ import re
 import shlex
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -26,6 +26,7 @@ from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_
 from .report import write_report
 from .sources import musicbrainz, tvmaze, wikidata
 from .undo import undo_report
+from .ui import format_path, rich_escape
 from .util import (
     ExecutionResult,
     MovePlan,
@@ -271,7 +272,7 @@ def _prompt_path(prompt: str, default: str | None, *, directories_only: bool) ->
                 console.print("Tip: Tab autocompletes paths.")
                 _path_prompt_tip_shown = True
             completer = PathCompleter(only_directories=directories_only, expanduser=True)
-            text = pt_prompt(prompt, default=default or "", completer=completer)
+            text = pt_prompt(f"{prompt}: ", default=default or "", completer=completer)
             return _strip_outer_quotes(text)
 
     if not _path_prompt_fallback_tip_shown:
@@ -311,9 +312,9 @@ def _confirm(prompt: str, default: bool, progress: Progress | None, show_default
 
 def _print_overlap_error(exc: PathOverlapError) -> None:
     issue = exc.issue
-    console.print(issue.reason)
+    console.print(rich_escape(issue.reason))
     for suggestion in issue.suggestions:
-        console.print(suggestion)
+        console.print(rich_escape(suggestion))
 
 
 def _detect_media_in_path(path: Path, audio_exts: set[str], video_exts: set[str]) -> tuple[bool, bool]:
@@ -399,13 +400,15 @@ def _tv_confidence_score(title_guess: str, title_actual: str, year_guess: int | 
         return max(0.0, min(1.0, base))
     diff = abs(year_guess - year_actual)
     if diff == 0:
-        adjustment = 0.25
-    elif diff == 1:
-        adjustment = 0.12
-    elif diff == 2:
-        adjustment = 0.06
+        adjustment = 0.35
+    elif diff <= 1:
+        adjustment = 0.18
+    elif diff <= 2:
+        adjustment = 0.10
     elif diff <= 5:
         adjustment = -0.08 * diff
+    elif diff <= 10:
+        adjustment = -0.35
     else:
         adjustment = -0.6
     return max(0.0, min(1.0, base + adjustment))
@@ -524,12 +527,12 @@ def _print_candidates(
     table.add_column("Confidence")
     for idx, cand in enumerate(candidates, start=1):
         year_text = str(cand.year) if cand.year else "Unknown"
-        row = [str(idx), cand.title, year_text]
+        row = [str(idx), rich_escape(cand.title), year_text]
         if show_tv_fields:
             season = item.season if item.season is not None else "-"
             episode = item.episode if item.episode is not None else "-"
             row.append(f"{season}/{episode}")
-            row.append(item.episode_title or "-")
+            row.append(rich_escape(item.episode_title) if item.episode_title else "-")
         if media_type == "movie" and show_people:
             enrichment = cand.enrichment or {}
             row.append(_format_value(enrichment.get("director")))
@@ -648,7 +651,10 @@ def _tv_candidates(
                     progress,
                 )
             else:
-                _safe_print(f"Using cached match for: {item.path.name} -> {name}{year_text} [TVMaze]", progress)
+                _safe_print(
+                    f"Using cached match for: {rich_escape(item.path.name)} -> {rich_escape(name)}{year_text} [TVMaze]",
+                    progress,
+                )
         show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
         candidate = _tv_candidate_from_show(item, show)
         if cached_key != reusable_show_key:
@@ -660,14 +666,14 @@ def _tv_candidates(
 
     if raw_results is None:
         query = search_query or make_search_query(item.title) or item.title
-        _safe_print(f"Searching TVMaze for: {query}", progress)
+        _safe_print(f"Searching TVMaze for: {rich_escape(query)}", progress)
         total_started = time.monotonic()
         started = total_started
         raw_results = tvmaze.search_shows(query, session=session)
         elapsed = time.monotonic() - started
         total_time = time.monotonic() - total_started
         if not raw_results:
-            _safe_print(f"No candidates ({elapsed:.2f}s).", progress)
+            _safe_print(f"No candidates (api={elapsed:.2f}s).", progress)
             return CandidatePage(
                 candidates=[],
                 raw_results=raw_results,
@@ -684,8 +690,11 @@ def _tv_candidates(
     has_more = next_offset < len(raw_results)
     if raw_results is not None and offset == 0:
         best = results[0].confidence if results else 0.0
-        timing = f"{elapsed:.2f}s" if total_time is None else f"{total_time:.2f}s"
-        _safe_print(f"Found {len(results)} candidates (best confidence {best:.2f}, {timing}).", progress)
+        total_text = f"{total_time:.2f}s" if total_time is not None else f"{elapsed:.2f}s"
+        _safe_print(
+            f"Found {len(results)} candidates (best confidence {best:.2f}, api={elapsed:.2f}s, total={total_text}).",
+            progress,
+        )
     return CandidatePage(candidates=results, raw_results=raw_results, next_offset=next_offset, has_more=has_more)
 
 
@@ -812,21 +821,24 @@ def _movie_candidates(
             year = cached.get("year")
             year_text = f" ({year})" if year else ""
             _safe_print("Cache hit.", progress)
-            _safe_print(f"Using cached match for: {item.path.name} -> {title}{year_text} [Wikidata]", progress)
+            _safe_print(
+                f"Using cached match for: {rich_escape(item.path.name)} -> {rich_escape(title)}{year_text} [Wikidata]",
+                progress,
+            )
         film = wikidata.WikidataFilm(qid=cached["qid"], title=cached["title"], year=cached.get("year"), is_film=True)
         results.append(_movie_candidate_from_film(item, film))
         return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
 
     if raw_results is None:
         query = search_query or make_search_query(item.title) or item.title
-        _safe_print(f"Searching Wikidata for: {query}", progress)
+        _safe_print(f"Searching Wikidata for: {rich_escape(query)}", progress)
         total_started = time.monotonic()
         started = total_started
         raw_results = wikidata.search(query, session=session, limit=10)
         elapsed = time.monotonic() - started
         if not raw_results:
             total_time = time.monotonic() - total_started
-            _safe_print(f"No candidates ({total_time:.2f}s).", progress)
+            _safe_print(f"No candidates (api={total_time:.2f}s).", progress)
             return CandidatePage(
                 candidates=[],
                 raw_results=raw_results,
@@ -857,7 +869,7 @@ def _movie_candidates(
             total_time = total_time + fetch_time
         _safe_print(
             f"Found {len(results)} candidates (best confidence {best:.2f}, "
-            f"search {elapsed:.2f}s, fetch {fetch_time:.2f}s, total {total_time:.2f}s).",
+            f"api={elapsed:.2f}s, fetch={fetch_time:.2f}s, total={total_time:.2f}s).",
             progress,
         )
     return CandidatePage(
@@ -988,7 +1000,7 @@ def _resolve_destination(
     changed = False
     if destination.exists():
         if on_conflict == "skip":
-            _safe_print(f"Skipping due to existing destination: {destination}", progress)
+            _safe_print(f"Skipping due to existing destination: {format_path(destination)}", progress)
             return None, False
         if on_conflict == "rename":
             destination = unique_path(destination)
@@ -1001,21 +1013,24 @@ def _resolve_destination(
 
 
 def _file_panel(index: int, total: int, item: InferredItem) -> Panel:
-    title_line = f"File {index}/{total} - {item.media_type.upper()} - {item.path.name}"
+    title_line = f"File {index}/{total} - {item.media_type.upper()} - {rich_escape(item.path.name)}"
     year_text = str(item.year) if item.year else "Unknown"
-    lines = [f"Detected: Title={item.title}, Year={year_text}"]
+    lines = [f"Detected: Title={rich_escape(item.title)}, Year={year_text}"]
     if item.media_type == "tv":
         season = item.season if item.season is not None else "-"
         episode = item.episode if item.episode is not None else "-"
         lines.append(f"Season/Episode: {season}/{episode}")
         if item.episode_title:
-            lines.append(f"Episode title: {item.episode_title}")
+            lines.append(f"Episode title: {rich_escape(item.episode_title)}")
     return Panel("\n".join(lines), title=title_line, expand=False)
 
 
 def _album_panel(index: int, total: int, album: music_util.AlbumGroup) -> Panel:
-    title_line = f"Album {index}/{total} - {album.source.name}"
-    lines = [f"Detected: Artist={album.artist}, Album={album.album}", f"Tracks: {len(album.tracks)}"]
+    title_line = f"Album {index}/{total} - {rich_escape(album.source.name)}"
+    lines = [
+        f"Detected: Artist={rich_escape(album.artist)}, Album={rich_escape(album.album)}",
+        f"Tracks: {len(album.tracks)}",
+    ]
     return Panel("\n".join(lines), title=title_line, expand=False)
 
 
@@ -1024,14 +1039,45 @@ def _print_music_candidates(candidates: list[musicbrainz.ReleaseCandidate]) -> N
     table.add_column("#")
     table.add_column("Artist")
     table.add_column("Album")
+    table.add_column("Tracks")
     table.add_column("Year")
     table.add_column("Country")
     table.add_column("Confidence")
     for idx, cand in enumerate(candidates, start=1):
+        track_count = str(cand.track_count) if cand.track_count is not None else "-"
         year_text = str(cand.year) if cand.year else "-"
         country = cand.country or "-"
-        table.add_row(str(idx), cand.artist, cand.title, year_text, country, f"{cand.score:.2f}")
+        table.add_row(
+            str(idx),
+            rich_escape(cand.artist),
+            rich_escape(cand.title),
+            track_count,
+            year_text,
+            country,
+            f"{cand.score:.2f}",
+        )
     console.print(table)
+
+
+def _rank_music_candidates(
+    candidates: list[musicbrainz.ReleaseCandidate],
+    track_count: int,
+) -> list[musicbrainz.ReleaseCandidate]:
+    ranked: list[musicbrainz.ReleaseCandidate] = []
+    for cand in candidates:
+        bonus = 0.0
+        if cand.track_count is not None:
+            diff = abs(cand.track_count - track_count)
+            if diff == 0:
+                bonus = 0.20
+            elif diff == 1:
+                bonus = 0.10
+            elif diff >= 5:
+                bonus = -0.05
+        adjusted = min(1.0, max(0.0, cand.score + bonus))
+        ranked.append(replace(cand, score=adjusted))
+    ranked.sort(key=lambda candidate: candidate.score, reverse=True)
+    return ranked
 
 
 def _select_music_candidate(
@@ -1201,7 +1247,7 @@ def _print_music_album_summary(
     cue_count: int,
     log_count: int,
 ) -> None:
-    console.print(f"Album destination: {album_dest}")
+    console.print(f"Album destination: {format_path(album_dest)}")
     console.print(f"Tracks: {track_count}")
     if artwork:
         console.print("Artwork: cover.jpg")
@@ -1213,13 +1259,13 @@ def _print_music_album_summary(
 
 def _print_plan(plan: MovePlan, progress: Progress | None = None) -> None:
     _safe_print("PLAN", progress)
-    _safe_print(f"FROM: {plan.source}", progress)
-    _safe_print(f"TO:   {plan.destination}", progress)
+    _safe_print(f"FROM: {format_path(plan.source)}", progress)
+    _safe_print(f"TO:   {format_path(plan.destination)}", progress)
 
 
 def _print_choice(selected: Candidate, progress: Progress | None = None) -> None:
     year_text = str(selected.year) if selected.year else "Unknown"
-    _safe_print(f"Chosen: {selected.title} ({year_text}) from {selected.source}", progress)
+    _safe_print(f"Chosen: {rich_escape(selected.title)} ({year_text}) from {selected.source}", progress)
 
 
 def _fetch_with_retry(
@@ -1250,10 +1296,11 @@ def _build_tree(paths: list[Path]) -> Tree:
             if current not in root_map:
                 root_map[current] = {}
             current_children = root_map[current]
-            child = current_children.get(part)
+            safe_part = rich_escape(part)
+            child = current_children.get(safe_part)
             if child is None:
-                child = current.add(part)
-                current_children[part] = child
+                child = current.add(safe_part)
+                current_children[safe_part] = child
             current = child
     return tree
 
@@ -1271,7 +1318,7 @@ def _apply_with_progress(plans: list[MovePlan], copy_mode: bool, on_conflict: st
         task = progress.add_task("Preparing...", total=len(plans))
 
         def _on_progress(completed: int, total: int, plan: MovePlan) -> None:
-            description = f"{action}: {plan.source.name}"
+            description = f"{action}: {rich_escape(plan.source.name)}"
             progress.update(task, description=description)
             progress.advance(task, 1)
 
@@ -1311,7 +1358,7 @@ def _prune_empty_dirs(
                 continue
             if _dir_empty_after_removals(current, removed_files, removed_dirs):
                 if dry_run:
-                    console.print(f"Would remove empty folder: {current}")
+                    console.print(f"Would remove empty folder: {format_path(current)}")
                 else:
                     try:
                         current.rmdir()
@@ -1342,13 +1389,13 @@ def _print_run_summary(
     console.print(f"Failures: {failures}")
     console.print(f"Elapsed: {stats.elapsed:.2f}s")
     if cache_path is not None:
-        console.print(f"Cache path: {cache_path}")
+        console.print(f"Cache path: {format_path(cache_path)}")
     else:
         console.print("Cache path: disabled")
     if report_path is not None:
-        console.print(f"Report path: {report_path}")
+        console.print(f"Report path: {format_path(report_path)}")
     if apply_report_path is not None:
-        console.print(f"Apply report path: {apply_report_path}")
+        console.print(f"Apply report path: {format_path(apply_report_path)}")
 
 
 def _plan_items(
@@ -1389,7 +1436,7 @@ def _plan_items(
         index = 0
         while index < len(files):
             path = files[index]
-            progress.update(task, description=f"Planning: {path.name}")
+            progress.update(task, description=f"Planning: {rich_escape(path.name)}")
             progress.advance(task, 1)
             try:
                 item = infer_item(path)
@@ -1618,7 +1665,7 @@ def _process_item(
                 if not interactive:
                     _record_stat(stats, "skipped")
                     return None, False
-                _safe_print(f"No candidates found for {item.title}.", progress)
+                _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
                 empty_choice = _select_candidate(
                     "tv",
                     candidates,
@@ -1989,7 +2036,7 @@ def _process_item(
             if not interactive:
                 _record_stat(stats, "skipped")
                 return None, False
-            _safe_print(f"No candidates found for {item.title}.", progress)
+            _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
             empty_choice = _select_candidate(
                 "movie",
                 candidates,
@@ -2426,8 +2473,8 @@ def organise(
         if preview:
             console.print("Preview:")
             for plan in preview:
-                console.print(f"FROM: {plan.source}")
-                console.print(f"TO:   {plan.destination}")
+                console.print(f"FROM: {format_path(plan.source)}")
+                console.print(f"TO:   {format_path(plan.destination)}")
         if not copy_mode:
             console.print("Warning: move will remove the original files from the incoming folder.")
             if not _confirm_move(None):
@@ -2500,12 +2547,12 @@ def organise(
         console.print("Apply command:")
         console.print(_build_command(apply_config))
         if apply_report_path is not None:
-            console.print(f"Apply report written: {apply_report_path}")
+            console.print(f"Apply report written: {format_path(apply_report_path)}")
 
     if result.errors or errors:
         console.print("Errors:")
         for error in result.errors + errors:
-            console.print(f"- {error}")
+            console.print(f"- {rich_escape(error)}")
         raise typer.Exit(code=1)
     if not plans:
         raise typer.Exit(code=1)
@@ -2579,7 +2626,7 @@ def music(
     if not albums:
         console.print("No valid albums found.")
         for error in errors:
-            console.print(f"- {error}")
+            console.print(f"- {rich_escape(error)}")
         raise typer.Exit(code=1)
 
     mb_disabled_reported = False
@@ -2614,12 +2661,16 @@ def music(
                 elif not candidates:
                     console.print("No MusicBrainz matches found. Using filename metadata.")
                 else:
-                    selection = _select_music_candidate(candidates)
-                    if selection == "q":
-                        raise typer.Exit(code=0)
-                    if selection == "s":
-                        console.print("Skipping MusicBrainz verification for this album.")
-                    elif isinstance(selection, musicbrainz.ReleaseCandidate):
+                    candidates = _rank_music_candidates(candidates, len(album.tracks))
+                    while True:
+                        selection = _select_music_candidate(candidates)
+                        if selection == "q":
+                            raise typer.Exit(code=0)
+                        if selection == "s":
+                            console.print("Skipping MusicBrainz verification for this album.")
+                            break
+                        if not isinstance(selection, musicbrainz.ReleaseCandidate):
+                            break
                         album_artist = selection.artist
                         album_title = selection.title
                         mb_tracks = musicbrainz.fetch_release_tracks(selection.mbid)
@@ -2632,17 +2683,39 @@ def music(
                                 console.print("Skipped MusicBrainz (offline).")
                             else:
                                 console.print("No tracklist found. Using filename metadata.")
-                        else:
-                            mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
-                            if reason:
-                                console.print(f"Warning: {reason}.")
-                                if _confirm("Fallback to filename titles? [Y/n]", True, None, show_default=False):
-                                    mapped = None
-                                else:
-                                    mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                    console.print("Using MusicBrainz titles by track order.")
-                            if mapped is not None:
+                            break
+
+                        if len(mb_tracks) != len(album.tracks):
+                            console.print(
+                                f"Track count mismatch: files={len(album.tracks)} release={len(mb_tracks)}."
+                            )
+                            choice = _prompt_choice(
+                                "r=re-pick release | f=filename titles | o=order",
+                                "r",
+                                None,
+                                show_default=False,
+                            )
+                            if choice == "r":
+                                continue
+                            if choice == "o":
+                                mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
+                                console.print("Using MusicBrainz titles by track order.")
                                 planned_tracks = mapped
+                                break
+                            console.print("Using filename metadata.")
+                            break
+
+                        mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
+                        if reason:
+                            console.print(f"Warning: {reason}.")
+                            if _confirm("Fallback to filename titles? [Y/n]", True, None, show_default=False):
+                                mapped = None
+                            else:
+                                mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
+                                console.print("Using MusicBrainz titles by track order.")
+                        if mapped is not None:
+                            planned_tracks = mapped
+                        break
 
         dest_artist = "Various Artists" if _should_use_various_artists(album, album_artist) else album_artist
         dest_album = album_title
@@ -2751,13 +2824,13 @@ def music(
     if errors:
         console.print(f"Warnings: {len(errors)}")
         for error in errors:
-            console.print(f"- {error}")
-    console.print(f"Report path: {report_path}")
+            console.print(f"- {rich_escape(error)}")
+    console.print(f"Report path: {format_path(report_path)}")
 
     if result.errors:
         console.print("Errors:")
         for error in result.errors:
-            console.print(f"- {error}")
+            console.print(f"- {rich_escape(error)}")
         raise typer.Exit(code=1)
     if not plans:
         raise typer.Exit(code=1)
@@ -2790,7 +2863,7 @@ def undo(report: Path = typer.Option(None, help="Report path"), library: Path = 
     if errors:
         console.print("Undo completed with warnings:")
         for error in errors:
-            console.print(f"- {error}")
+            console.print(f"- {rich_escape(error)}")
         raise typer.Exit(code=1)
     console.print("Undo completed.")
     raise typer.Exit(code=0)
@@ -2912,9 +2985,6 @@ def _wizard_video() -> None:
         copy_mode = copy_choice == "copy"
         if not copy_mode:
             console.print("Warning: move will remove the original files from the incoming folder.")
-            if not _confirm_move(None):
-                console.print("Cancelled. No changes were made.")
-                raise typer.Exit(code=0)
             prune_empty_dirs = _confirm("Prune empty folders after move? [y/N]", False, None, show_default=False)
 
     auto_accept = _confirm("Auto-accept high-confidence matches? [Y/n]", True, None, show_default=False)
@@ -3020,9 +3090,6 @@ def _wizard_music(source_override: Path | None = None, library_override: Path | 
         copy_mode = _confirm("Copy files instead of moving? [y/N]", False, None, show_default=False)
         if not copy_mode:
             console.print("Warning: move will remove the original files from the source folder.")
-            if not _confirm_move(None):
-                console.print("Cancelled. No changes were made.")
-                raise typer.Exit(code=0)
             cleanup_empty_dirs = _confirm("Clean up empty folders after move? [y/N]", False, None, show_default=False)
 
     verify = _confirm("Verify albums with MusicBrainz? [Y/n]", True, None, show_default=False)

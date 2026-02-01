@@ -97,6 +97,6 @@ def test_infer_tv_series_episode_young_offenders() -> None:
     path = Path("The_Young_Offenders_Series_1_-_04._Episode_4_p02.mp4")
     item = infer_item(path)
     assert item.media_type == "tv"
-    assert item.season == 2
-    assert item.episode == 1
+    assert item.season == 1
+    assert item.episode == 4
     assert "Movies" not in item.title

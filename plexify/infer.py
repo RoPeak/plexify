@@ -7,7 +7,7 @@ from typing import Optional
 
 from guessit import guessit
 
-from .util import NOISE_TOKENS
+from .util import NOISE_TOKENS, normalize_title_for_similarity
 
 SEASON_RE = re.compile(r"(?<![A-Za-z0-9])(?:season|series)[-_. ]*(\d{1,2})(?![A-Za-z0-9])", re.IGNORECASE)
 SXXEYY_RE = re.compile(r"\bs(\d{1,2})e(\d{1,3})\b", re.IGNORECASE)
@@ -20,6 +20,7 @@ EPISODE_RE = re.compile(r"(?<![A-Za-z0-9])(?:episode|ep)[-_. ]*(\d{1,3})(?![A-Za
 TV_HINT_RE = re.compile(r"\b(?:series|season|episode|ep)\b", re.IGNORECASE)
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 YEAR_RANGE_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*[-–]\s*(19\d{2}|20\d{2})(?!\d)")
+LEADING_EPISODE_RE = re.compile(r"^\s*(\d{1,3})\s*[-_. ]+\s*(.+?)\s*$")
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts"}
 GENERIC_TV_FOLDERS = {
     "tv",
@@ -144,6 +145,53 @@ def _clean_title_from_stem(stem: str) -> str:
     return " ".join(cleaned).strip()
 
 
+def _strip_bracket_suffix(value: str) -> str:
+    cleaned = re.sub(r"\s*[\[(].*?[\])]\s*$", "", value).strip()
+    return cleaned or value
+
+
+def _looks_like_title_fragment(value: str) -> bool:
+    tokens = [token for token in re.split(r"[.\s_\-]+", value) if token]
+    cleaned: list[str] = []
+    for token in tokens:
+        lower = token.lower()
+        if YEAR_RE.fullmatch(token):
+            continue
+        if lower in NOISE_TOKENS:
+            continue
+        if re.fullmatch(r"\d{3,4}p", lower):
+            continue
+        cleaned.append(token)
+    return bool(cleaned)
+
+
+def infer_tv_episode_from_stem(stem: str) -> Optional[int]:
+    cleaned = YEAR_RANGE_RE.sub("", stem).strip()
+    cleaned = _strip_bracket_suffix(cleaned)
+    cleaned = re.sub(r"[\u2013\u2014\u2212]", "-", cleaned)
+    match = LEADING_EPISODE_RE.match(cleaned)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def infer_movie_title_from_stem(stem: str, guess_title: Optional[str]) -> Optional[str]:
+    if " - " not in stem:
+        return None
+    left, right = stem.split(" - ", 1)
+    left = left.strip()
+    right = right.strip()
+    if not left or not right:
+        return None
+    if guess_title:
+        if normalize_title_for_similarity(guess_title) != normalize_title_for_similarity(left):
+            return None
+    right = _strip_bracket_suffix(right)
+    if not right or not _looks_like_title_fragment(right):
+        return None
+    return f"{left}: {right}"
+
+
 def _extract_episode_title(stem: str, episode: Optional[int]) -> Optional[str]:
     if episode is None:
         return None
@@ -215,6 +263,7 @@ def infer_item(path: Path) -> InferredItem:
     has_tv_hint = TV_HINT_RE.search(path.stem) is not None
     title_override = None
     year_override = None
+    guess_title = guess.get("title")
 
     if path.stem.isdigit() and 1 <= len(path.stem) <= 3 and _parent_has_multiple_videos(path):
         media_type = "tv"
@@ -259,7 +308,13 @@ def infer_item(path: Path) -> InferredItem:
             season = season or guessed_season
             episode = episode or guessed_episode
 
-    title = guess.get("title") or path.stem
+    if episode is None and (media_type == "tv" or has_tv_context or has_tv_hint or season is not None):
+        episode_candidate = infer_tv_episode_from_stem(stem_for_tv)
+        if episode_candidate is not None:
+            episode = episode_candidate
+            media_type = "tv"
+
+    title = guess_title or path.stem
     if media_type == "movie" and has_tv_hint:
         media_type = "tv"
 
@@ -270,6 +325,9 @@ def infer_item(path: Path) -> InferredItem:
                 title = cleaned
             elif title == path.stem:
                 title = cleaned
+        subtitle = infer_movie_title_from_stem(path.stem, guess_title)
+        if subtitle:
+            title = subtitle
     if media_type == "tv":
         show_name = _parent_show_name(path)
         if show_name is None:

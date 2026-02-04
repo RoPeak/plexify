@@ -12,6 +12,30 @@ def test_infer_tv_from_season_folder():
     assert item.episode == 2
 
 
+def test_infer_tv_leading_episode_number_with_separator() -> None:
+    path = Path("Sherlock/Season 1/2 - The Blind Banker.mkv")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.season == 1
+    assert item.episode == 2
+
+
+def test_infer_tv_leading_zero_episode_number_with_separator() -> None:
+    path = Path("Sherlock/Season 1/02 - The Blind Banker.mkv")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.season == 1
+    assert item.episode == 2
+
+
+def test_infer_tv_sxxeyy_still_wins() -> None:
+    path = Path("Sherlock/Season 1/S01E02 - The Blind Banker.mkv")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.season == 1
+    assert item.episode == 2
+
+
 def test_infer_movie_year():
     path = Path("The Matrix (1999).mkv")
     item = infer_item(path)
@@ -24,6 +48,29 @@ def test_infer_movie_leading_number_preserved() -> None:
     item = infer_item(path)
     assert item.media_type == "movie"
     assert item.title == "28 Days Later"
+
+
+def test_infer_movie_title_keeps_hyphen_subtitle() -> None:
+    path = Path("Bridget Jones - The Edge of Reason (2004).mkv")
+    item = infer_item(path)
+    assert item.media_type == "movie"
+    assert item.title.startswith("Bridget Jones")
+    assert "Edge of Reason" in item.title
+    assert item.year == 2004
+
+
+def test_infer_movie_title_without_hyphen_unchanged() -> None:
+    path = Path("Inception (2010).mkv")
+    item = infer_item(path)
+    assert item.media_type == "movie"
+    assert item.title == "Inception"
+
+
+def test_infer_movie_hyphen_noise_ignored() -> None:
+    path = Path("Movie - 1080p.mkv")
+    item = infer_item(path)
+    assert item.media_type == "movie"
+    assert item.title == "Movie"
 
 
 def test_infer_tv_series_separator_pattern() -> None:

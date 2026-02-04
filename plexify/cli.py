@@ -651,7 +651,7 @@ def _tv_candidates(
     limit: int = 5,
 ) -> CandidatePage:
     path_key = cache_key or item.title
-    reusable_show_key = tv_show_cache_key(item.title, item.year)
+    reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
     reusable_episode_key = None
     if item.season is not None and item.episode is not None:
         reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
@@ -660,7 +660,7 @@ def _tv_candidates(
     if reusable_episode_key:
         cached = cache.get_show(reusable_episode_key)
         cached_key = reusable_episode_key if cached else None
-    if cached is None:
+    if cached is None and reusable_show_key:
         cached = cache.get_show(reusable_show_key)
         cached_key = reusable_show_key if cached else None
     if cached is None:
@@ -1018,6 +1018,12 @@ def _cache_entry_compatible(inferred_year: int | None, cached_year: int | None) 
 
 
 def _reusable_movie_cache_safe(item: InferredItem) -> bool:
+    if item.year is not None:
+        return True
+    return False
+
+
+def _reusable_tv_cache_safe(item: InferredItem) -> bool:
     if item.year is not None:
         return True
     return False
@@ -1516,8 +1522,10 @@ def _plan_items(
                 cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
                 cache_snapshots: list[CacheSnapshot] = []
                 if item.media_type == "tv":
-                    reusable_show_key = tv_show_cache_key(item.title, item.year)
-                    keys = [cache_key, reusable_show_key]
+                    reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
+                    keys = [cache_key]
+                    if reusable_show_key:
+                        keys.append(reusable_show_key)
                     if item.season is not None and item.episode is not None:
                         keys.append(tv_episode_cache_key(item.title, item.year, item.season, item.episode))
                     for key in keys:
@@ -1700,7 +1708,8 @@ def _process_item(
     reusable_show_key = None
     reusable_episode_key = None
     if item.media_type == "tv":
-        reusable_show_key = tv_show_cache_key(item.title, item.year)
+        if _reusable_tv_cache_safe(item):
+            reusable_show_key = tv_show_cache_key(item.title, item.year)
         if item.season is not None and item.episode is not None:
             reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
     else:

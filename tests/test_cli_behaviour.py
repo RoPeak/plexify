@@ -334,6 +334,56 @@ def test_reusable_movie_cache_disabled_without_year(monkeypatch, tmp_path: Path)
     assert page.cache_hit is False
 
 
+def test_reusable_tv_cache_not_written_without_year(monkeypatch, tmp_path: Path) -> None:
+    def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Show",
+            year=2010,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 123, "name": "Show", "year": 2010},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Show.S01E02.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=1, episode=2, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    cache_key = cli.build_cache_key(path, incoming, "tv", None)
+    assert cache.get_show(cache_key) is not None
+    assert cache.get_show(cli.tv_show_cache_key(item.title, item.year)) is None
+
+
 def test_auto_accept_skips_prompt_in_interactive(monkeypatch, tmp_path: Path) -> None:
     def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
         candidate = cli.Candidate(

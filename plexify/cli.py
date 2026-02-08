@@ -23,6 +23,7 @@ from .executor import execute_plans
 from .infer import InferredItem, infer_item
 from .planner import plan_movie, plan_tv_show
 from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_overlapping
+from .prompting import _prompt_text
 from .report import write_report
 from .sources import musicbrainz, tvmaze, wikidata
 from .tv_episode_cache import EpisodeCache
@@ -229,26 +230,6 @@ def _with_title(item: InferredItem, title: str) -> InferredItem:
         episode=item.episode,
         episode_title=item.episode_title,
     )
-
-
-def _pause_progress(progress: Progress | None) -> bool:
-    if progress is not None and getattr(progress, "live", None):
-        progress.stop()
-        return True
-    return False
-
-
-def _resume_progress(progress: Progress | None, was_running: bool) -> None:
-    if progress is not None and was_running:
-        progress.start()
-
-
-def _prompt_text(prompt: str, default: str, progress: Progress | None, show_default: bool = True) -> str:
-    was_running = _pause_progress(progress)
-    try:
-        return Prompt.ask(prompt, default=default, show_default=show_default)
-    finally:
-        _resume_progress(progress, was_running)
 
 
 def _strip_outer_quotes(value: str) -> str:

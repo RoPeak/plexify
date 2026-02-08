@@ -6,6 +6,9 @@ from typing import Any
 
 from .util import json_dump, json_load
 
+CACHE_SCHEMA_VERSION = 2
+MIN_SUPPORTED_SCHEMA_VERSION = 1
+
 
 @dataclass
 class CacheEntry:
@@ -13,13 +16,26 @@ class CacheEntry:
     value: dict[str, Any]
 
 
+def _upgrade_cache_data(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {}
+    schema_version = data.get("schema_version")
+    if not isinstance(schema_version, int):
+        schema_version = 1
+    if schema_version < MIN_SUPPORTED_SCHEMA_VERSION:
+        schema_version = MIN_SUPPORTED_SCHEMA_VERSION
+    upgraded = dict(data)
+    upgraded.setdefault("shows", {})
+    upgraded.setdefault("movies", {})
+    upgraded.setdefault("enrichment", {})
+    upgraded["schema_version"] = CACHE_SCHEMA_VERSION
+    return upgraded
+
+
 class Cache:
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.data = json_load(path)
-        self.data.setdefault("shows", {})
-        self.data.setdefault("movies", {})
-        self.data.setdefault("enrichment", {})
+        self.data = _upgrade_cache_data(json_load(path))
 
     def get_show(self, key: str) -> dict[str, Any] | None:
         return self.data.get("shows", {}).get(key)
@@ -52,7 +68,12 @@ class Cache:
 class NullCache(Cache):
     def __init__(self) -> None:
         self.path = Path(".")
-        self.data = {"shows": {}, "movies": {}, "enrichment": {}}
+        self.data = {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "shows": {},
+            "movies": {},
+            "enrichment": {},
+        }
 
     def get_show(self, key: str) -> dict[str, Any] | None:
         return None

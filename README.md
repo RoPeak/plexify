@@ -98,6 +98,9 @@ Cache reuse:
 
 - Movie cache keys are based on normalised title + year (e.g., `Superman II` caches separately from `Superman`).
 - TV show cache keys include show title + year, and episode keys include season + episode when known.
+- TV folder keys are stored as `tvfolder|<relative show folder>` so confirming one episode can reuse the show choice for sibling episodes in the same folder, even when inferred year is unknown.
+- Reuse only applies to entries confirmed by the user (`confirmed_by_user: true`).
+- TV cache lookup precedence is: episode key -> reusable show key -> folder key -> file-specific key.
 
 Matching notes:
 

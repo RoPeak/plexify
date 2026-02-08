@@ -12,6 +12,31 @@ from plexify.infer import InferredItem
 from plexify.sources import tvmaze
 
 
+def _tv_cache_entry(
+    *,
+    id_value: int,
+    name: str,
+    premiered: int,
+    season: int | None = None,
+    episode: int | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": id_value,
+        "name": name,
+        "premiered": premiered,
+        "chosen_title": name,
+        "chosen_year": premiered,
+        "manual": False,
+        "confirmed_by_user": True,
+        "source": "TVMaze",
+    }
+    if season is not None:
+        payload["season"] = season
+    if episode is not None:
+        payload["episode"] = episode
+    return payload
+
+
 def test_plan_items_advances_progress(monkeypatch, tmp_path: Path) -> None:
     class ProgressStub:
         last = None
@@ -624,6 +649,140 @@ def test_tv_folder_cache_hit_without_year_uses_inferred_season_episode(monkeypat
     assert candidate.metadata.get("episode") is None
 
 
+def test_tv_cache_precedence_episode_over_reusable_folder_and_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
+
+    incoming = tmp_path / "incoming"
+    path = incoming / "Show" / "Season 1" / "Show.S01E02.mkv"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(path=path, media_type="tv", title="Show", year=2005, season=1, episode=2, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+
+    path_key = cli.build_cache_key(path, incoming, "tv", item.year)
+    episode_key = cli.tv_episode_cache_key(item.title, item.year, item.season, item.episode)
+    reusable_show_key = cli.tv_show_cache_key(item.title, item.year)
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+
+    cache.set_show(path_key, _tv_cache_entry(id_value=1, name="File Show", premiered=2005, season=8, episode=88))
+    cache.set_show(folder_key, _tv_cache_entry(id_value=2, name="Folder Show", premiered=2005))
+    cache.set_show(reusable_show_key, _tv_cache_entry(id_value=3, name="Reusable Show", premiered=2005))
+    cache.set_show(episode_key, _tv_cache_entry(id_value=4, name="Episode Show", premiered=2005, season=9, episode=99))
+
+    page = cli._tv_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        incoming_root=incoming,
+        cache_key=path_key,
+    )
+
+    assert page.cache_hit is True
+    candidate = page.candidates[0]
+    assert candidate.metadata["name"] == "Episode Show"
+    assert candidate.metadata.get("season") == 9
+    assert candidate.metadata.get("episode") == 99
+
+
+def test_tv_cache_precedence_reusable_over_folder_and_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
+
+    incoming = tmp_path / "incoming"
+    path = incoming / "Show" / "Season 1" / "Show.S01E02.mkv"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(path=path, media_type="tv", title="Show", year=2005, season=1, episode=2, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+
+    path_key = cli.build_cache_key(path, incoming, "tv", item.year)
+    reusable_show_key = cli.tv_show_cache_key(item.title, item.year)
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+
+    cache.set_show(path_key, _tv_cache_entry(id_value=1, name="File Show", premiered=2005, season=8, episode=88))
+    cache.set_show(folder_key, _tv_cache_entry(id_value=2, name="Folder Show", premiered=2005))
+    cache.set_show(reusable_show_key, _tv_cache_entry(id_value=3, name="Reusable Show", premiered=2005))
+
+    page = cli._tv_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        incoming_root=incoming,
+        cache_key=path_key,
+    )
+
+    assert page.cache_hit is True
+    candidate = page.candidates[0]
+    assert candidate.metadata["name"] == "Reusable Show"
+    assert candidate.metadata.get("season") is None
+    assert candidate.metadata.get("episode") is None
+
+
+def test_tv_cache_precedence_folder_over_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
+
+    incoming = tmp_path / "incoming"
+    path = incoming / "Show" / "Season 1" / "Show.S01E02.mkv"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=1, episode=2, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+
+    path_key = cli.build_cache_key(path, incoming, "tv", item.year)
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+
+    cache.set_show(path_key, _tv_cache_entry(id_value=1, name="File Show", premiered=2005, season=8, episode=88))
+    cache.set_show(folder_key, _tv_cache_entry(id_value=2, name="Folder Show", premiered=2005))
+
+    page = cli._tv_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        incoming_root=incoming,
+        cache_key=path_key,
+    )
+
+    assert page.cache_hit is True
+    candidate = page.candidates[0]
+    assert candidate.metadata["name"] == "Folder Show"
+    assert candidate.metadata.get("season") is None
+    assert candidate.metadata.get("episode") is None
+
+
+def test_tv_cache_file_used_when_higher_precedence_keys_missing(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
+
+    incoming = tmp_path / "incoming"
+    path = incoming / "Show" / "Season 1" / "Show.S01E02.mkv"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=1, episode=2, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+
+    path_key = cli.build_cache_key(path, incoming, "tv", item.year)
+    cache.set_show(path_key, _tv_cache_entry(id_value=1, name="File Show", premiered=2005, season=8, episode=88))
+
+    page = cli._tv_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        incoming_root=incoming,
+        cache_key=path_key,
+    )
+
+    assert page.cache_hit is True
+    candidate = page.candidates[0]
+    assert candidate.metadata["name"] == "File Show"
+    assert candidate.metadata.get("season") == 8
+    assert candidate.metadata.get("episode") == 88
+
+
 def test_tv_folder_cache_hit_supports_manual_entries(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
 
@@ -818,3 +977,155 @@ def test_auto_accept_skips_prompt_in_interactive(monkeypatch, tmp_path: Path) ->
     )
 
     assert plan is not None
+
+
+def test_tv_long_path_warns_but_plans(monkeypatch, tmp_path: Path) -> None:
+    def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Show",
+            year=2010,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 123, "name": "Show", "year": 2010},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    long_destination = tmp_path / ("x" * 260 + ".mkv")
+    messages: list[str] = []
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli, "plan_tv_show", lambda *_args, **_kwargs: long_destination)
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_safe_print", lambda message, _progress=None: messages.append(str(message)))
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Show.S01E02.mkv"
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(path=path, media_type="tv", title="Show", year=2010, season=1, episode=2, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert any("destination path is very long" in message for message in messages)
+
+
+def test_movie_long_path_warns_but_plans(monkeypatch, tmp_path: Path) -> None:
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Movie",
+            year=2001,
+            source="Wikidata",
+            confidence=1.0,
+            metadata={"qid": "Q1", "title": "Movie", "year": 2001},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    long_destination = tmp_path / ("y" * 260 + ".mkv")
+    messages: list[str] = []
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "plan_movie", lambda *_args, **_kwargs: long_destination)
+    monkeypatch.setattr(cli, "_safe_print", lambda message, _progress=None: messages.append(str(message)))
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Movie.mkv"
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(path=path, media_type="movie", title="Movie", year=2001, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert any("destination path is very long" in message for message in messages)
+
+
+def test_tv_long_path_collision_rename_stays_stable(monkeypatch, tmp_path: Path) -> None:
+    def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Show",
+            year=2010,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 123, "name": "Show", "year": 2010},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    long_destination = tmp_path / ("z" * 260 + ".mkv")
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli, "plan_tv_show", lambda *_args, **_kwargs: long_destination)
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Show.S01E02.mkv"
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(path=path, media_type="tv", title="Show", year=2010, season=1, episode=2, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+    planned = {str(long_destination).lower(): 1}
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned=planned,
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert plan.destination != long_destination
+    assert "(2)" in plan.destination.stem

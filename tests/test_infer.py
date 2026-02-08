@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from plexify.infer import infer_item
 
 
@@ -177,3 +179,40 @@ def test_infer_tv_prefers_deepest_season_folder() -> None:
     assert item.title == "ShowName"
     assert item.season == 2
     assert item.episode == 3
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_media_type", "expected_title", "expected_season", "expected_episode"),
+    [
+        ("Movies/The Last of Us/Season 01/S01E02.mkv", "tv", "The Last of Us", 1, 2),
+        ("Show Name/Specials/Show Name - S00E01 - Pilot.mkv", "tv", "Specials", 0, 1),
+        ("Season 01/ShowName/Season 02/03 - Title.mkv", "tv", "ShowName", 2, 3),
+    ],
+)
+def test_infer_edge_cases_matrix(
+    path: str,
+    expected_media_type: str,
+    expected_title: str,
+    expected_season: int | None,
+    expected_episode: int | None,
+) -> None:
+    item = infer_item(Path(path))
+    assert item.media_type == expected_media_type
+    assert item.title == expected_title
+    assert item.season == expected_season
+    assert item.episode == expected_episode
+
+
+def test_infer_anime_style_numbering_in_season_folder(tmp_path: Path) -> None:
+    season_dir = tmp_path / "Anime Show" / "Season 1"
+    season_dir.mkdir(parents=True)
+    episode_12 = season_dir / "12.mkv"
+    episode_13 = season_dir / "13.mkv"
+    episode_12.write_text("x", encoding="utf-8")
+    episode_13.write_text("x", encoding="utf-8")
+
+    item = infer_item(episode_12)
+    assert item.media_type == "tv"
+    assert item.title == "Anime Show"
+    assert item.season == 1
+    assert item.episode == 12

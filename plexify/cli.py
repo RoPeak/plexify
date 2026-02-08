@@ -766,6 +766,13 @@ def _tv_candidates(
         return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
 
     if offline:
+        log_event(
+            logger,
+            "offline_no_cached_match",
+            media_type=item.media_type,
+            path=item.path,
+            title=item.title,
+        )
         return CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
 
     if raw_results is None:
@@ -974,6 +981,13 @@ def _movie_candidates(
         return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
 
     if offline:
+        log_event(
+            logger,
+            "offline_no_cached_match",
+            media_type=item.media_type,
+            path=item.path,
+            title=item.title,
+        )
         return CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
 
     if raw_results is None:
@@ -1901,6 +1915,14 @@ def _process_item(
         while True:
             if not candidates:
                 if not interactive:
+                    if offline:
+                        log_event(
+                            logger,
+                            "offline_no_cached_match",
+                            media_type=item.media_type,
+                            path=item.path,
+                            title=item.title,
+                        )
                     _record_stat(stats, "skipped")
                     return None, False
                 _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
@@ -2275,6 +2297,7 @@ def _process_item(
             raw_results=raw_results_movie,
             search_query=search_query,
             progress=progress,
+            offline=offline,
         ),
         interactive,
         progress,
@@ -2294,6 +2317,14 @@ def _process_item(
     while True:
         if not candidates:
             if not interactive:
+                if offline:
+                    log_event(
+                        logger,
+                        "offline_no_cached_match",
+                        media_type=item.media_type,
+                        path=item.path,
+                        title=item.title,
+                    )
                 _record_stat(stats, "skipped")
                 return None, False
             _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
@@ -2719,6 +2750,7 @@ def organise(
         console.print("DRY-RUN: no files will be moved/copied.")
     if offline:
         console.print("Offline mode enabled: network lookups disabled.")
+        log_event(logger, "offline_mode_enabled", run_id=run_id, command="organise")
     if mode == "apply":
         if move:
             copy_mode = False
@@ -2911,6 +2943,9 @@ def music(
         library=library,
         mode="apply" if apply else "dry-run",
     )
+    if offline:
+        console.print("Offline mode enabled: network lookups disabled.")
+        log_event(logger, "offline_mode_enabled", run_id=run_id, command="music")
 
     if source is None:
         source_default, library_default = _wizard_defaults("music")
@@ -2982,6 +3017,9 @@ def music(
     if not apply:
         console.print("DRY-RUN: no files will be moved/copied.")
     copy_mode = copy
+    if offline and verify:
+        console.print("Offline mode: MusicBrainz verification disabled for this run.")
+        verify = False
 
     albums, errors = music_util.discover_albums(source, _parse_extensions(extensions))
     if not albums:

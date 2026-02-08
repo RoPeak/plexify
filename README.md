@@ -94,6 +94,20 @@ python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Med
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --clear-cache
 ```
 
+Logging:
+
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --log-level DEBUG
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --log-format json
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --log-file ".plexify\run.log"
+```
+
+JSON logs are line-delimited and include event metadata, for example:
+
+```json
+{"timestamp":"2026-02-08T12:00:00+00:00","level":"INFO","logger":"plexify.plexify.cli","message":"run_started","event":"run_started","command":"organise"}
+```
+
 Cache reuse:
 
 - Movie cache keys are based on normalised title + year (e.g., `Superman II` caches separately from `Superman`).

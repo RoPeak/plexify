@@ -3,6 +3,7 @@ import re
 import shlex
 import sys
 import time
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -21,6 +22,7 @@ from .cache import Cache, NullCache
 from . import music as music_util
 from .executor import execute_plans
 from .infer import InferredItem, infer_item
+from .logging_config import configure_logging, get_logger, log_event
 from .planner import plan_movie, plan_tv_show
 from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_overlapping
 from .prompting import _prompt_text
@@ -49,6 +51,7 @@ from .util import (
 
 app = typer.Typer(add_completion=True)
 console = Console()
+logger = get_logger(__name__)
 COMPLETION_ENABLED = True
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
 DEFAULT_EXTENSIONS_LIST = [ext.strip() for ext in DEFAULT_EXTENSIONS.split(",") if ext.strip()]
@@ -82,6 +85,18 @@ WIZARD_ORGANISE_CHOICES = {
     "m": "music",
     "music": "music",
 }
+WIZARD_LOG_LEVEL_CHOICES = {
+    "debug": "DEBUG",
+    "info": "INFO",
+    "warning": "WARNING",
+    "error": "ERROR",
+}
+WIZARD_LOG_FORMAT_CHOICES = {
+    "text": "text",
+    "json": "json",
+}
+LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
+LOG_FORMATS = {"text", "json"}
 
 
 @dataclass
@@ -183,6 +198,17 @@ def _parse_extensions(extensions: str) -> list[str]:
 
 def _safe_print(message: str, progress: Progress | None = None) -> None:
     _console_for(progress).print(message)
+
+
+def _initialise_logging(log_level: str, log_format: str, log_file: Path | None) -> None:
+    level = log_level.upper()
+    if level not in LOG_LEVELS:
+        console.print("Invalid log level. Use DEBUG, INFO, WARNING, or ERROR.")
+        raise typer.Exit(code=2)
+    if log_format not in LOG_FORMATS:
+        console.print("Invalid log format. Use text or json.")
+        raise typer.Exit(code=2)
+    configure_logging(level=level, fmt=log_format, log_file=log_file)
 
 
 def _prompt_line(
@@ -676,6 +702,14 @@ def _tv_candidates(
         elif not cached.get("manual") and not _cache_entry_compatible(item.year, cached.get("premiered")):
             cached = None
     if cached:
+        log_event(
+            logger,
+            "cache_hit",
+            cache_scope="tv",
+            cache_key=cached_key,
+            path=item.path,
+            media_type=item.media_type,
+        )
         if show_cache:
             name = cached.get("name") or item.title
             year = cached.get("chosen_year") or cached.get("premiered")
@@ -732,12 +766,30 @@ def _tv_candidates(
 
     if raw_results is None:
         query = search_query or make_search_query(item.title) or item.title
+        log_event(
+            logger,
+            "candidate_search_started",
+            source="TVMaze",
+            query=query,
+            media_type=item.media_type,
+            path=item.path,
+        )
         _safe_print(f"Searching TVMaze for: {rich_escape(query)}", progress)
         total_started = time.monotonic()
         started = total_started
         raw_results = tvmaze.search_shows(query, session=session)
         elapsed = time.monotonic() - started
         total_time = time.monotonic() - total_started
+        log_event(
+            logger,
+            "candidate_search_finished",
+            source="TVMaze",
+            query=query,
+            media_type=item.media_type,
+            path=item.path,
+            result_count=len(raw_results),
+            duration_ms=int(total_time * 1000),
+        )
         if not raw_results:
             _safe_print(f"No candidates (api={elapsed:.2f}s).", progress)
             return CandidatePage(
@@ -891,6 +943,14 @@ def _movie_candidates(
         elif not _cache_entry_compatible(item.year, cached.get("year")):
             cached = None
     if cached and not cached.get("manual"):
+        log_event(
+            logger,
+            "cache_hit",
+            cache_scope="movie",
+            cache_key=cached_key,
+            path=item.path,
+            media_type=item.media_type,
+        )
         if show_cache:
             title = cached.get("title") or item.title
             year = cached.get("year")
@@ -910,6 +970,14 @@ def _movie_candidates(
 
     if raw_results is None:
         query = search_query or make_search_query(item.title) or item.title
+        log_event(
+            logger,
+            "candidate_search_started",
+            source="Wikidata",
+            query=query,
+            media_type=item.media_type,
+            path=item.path,
+        )
         _safe_print(f"Searching Wikidata for: {rich_escape(query)}", progress)
         total_started = time.monotonic()
         started = total_started
@@ -927,6 +995,16 @@ def _movie_candidates(
                 total_time=total_time,
             )
         total_time = time.monotonic() - total_started
+        log_event(
+            logger,
+            "candidate_search_finished",
+            source="Wikidata",
+            query=query,
+            media_type=item.media_type,
+            path=item.path,
+            result_count=len(raw_results),
+            duration_ms=int(total_time * 1000),
+        )
         total_started = time.monotonic()
     idx = offset
     fetch_started = time.monotonic()
@@ -1559,6 +1637,17 @@ def _plan_items(
             progress.update(task, completed=min(index + 1, total), description=f"Planning: {rich_escape(path.name)}")
             try:
                 item = infer_item(path)
+                log_event(
+                    logger,
+                    "file_inferred",
+                    level=10,
+                    path=path,
+                    media_type=item.media_type,
+                    title=item.title,
+                    year=item.year,
+                    season=item.season,
+                    episode=item.episode,
+                )
                 if media_type_filter and item.media_type != media_type_filter:
                     index += 1
                     continue
@@ -2141,6 +2230,17 @@ def _process_item(
             },
         )
         _print_plan(plan, progress)
+        log_event(
+            logger,
+            "plan_created",
+            source_path=item.path,
+            destination=destination,
+            media_type="tv",
+            title=metadata.get("name") or selected.title,
+            year=metadata.get("year") or selected.year,
+            season=int(season),
+            episode=int(episode),
+        )
         return plan, collision
 
     raw_results_movie: list[wikidata.WikidataCandidate] | None = None
@@ -2516,6 +2616,15 @@ def _process_item(
         metadata={"title": metadata.get("title") or selected.title, "year": year},
     )
     _print_plan(plan, progress)
+    log_event(
+        logger,
+        "plan_created",
+        source_path=item.path,
+        destination=destination,
+        media_type="movie",
+        title=metadata.get("title") or selected.title,
+        year=year,
+    )
     return plan, collision
 
 
@@ -2539,10 +2648,25 @@ def organise(
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes", is_flag=True),
     clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running", is_flag=True),
     on_conflict: str = typer.Option("rename", "--on-conflict", help="On destination conflict: rename/skip/overwrite"),
+    log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
+    log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
+    log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
     prune_empty_dirs: bool = typer.Option(
         False, "--prune-empty-dirs", help="Remove empty folders after move", is_flag=True
     ),
 ) -> None:
+    _initialise_logging(log_level, log_format, log_file)
+    run_id = uuid.uuid4().hex
+    log_event(
+        logger,
+        "run_started",
+        run_id=run_id,
+        command="organise",
+        incoming=incoming,
+        library=library,
+        mode=mode,
+    )
+
     if move and copy:
         console.print("Choose only one of --move or --copy.")
         raise typer.Exit(code=2)
@@ -2692,12 +2816,39 @@ def organise(
             console.print(f"Apply report written: {format_path(apply_report_path)}")
 
     if result.errors or errors:
+        log_event(
+            logger,
+            "run_finished",
+            run_id=run_id,
+            command="organise",
+            status="error",
+            planned_count=len(plans),
+            error_count=len(result.errors) + len(errors),
+        )
         console.print("Errors:")
         for error in result.errors + errors:
             console.print(f"- {rich_escape(error)}")
         raise typer.Exit(code=1)
     if not plans:
+        log_event(
+            logger,
+            "run_finished",
+            run_id=run_id,
+            command="organise",
+            status="empty",
+            planned_count=0,
+            error_count=0,
+        )
         raise typer.Exit(code=1)
+    log_event(
+        logger,
+        "run_finished",
+        run_id=run_id,
+        command="organise",
+        status="success",
+        planned_count=len(plans),
+        error_count=0,
+    )
     raise typer.Exit(code=0)
 
 
@@ -2716,7 +2867,22 @@ def music(
         False, "--cleanup-empty-dirs", help="Remove empty folders after move", is_flag=True
     ),
     verbose_plan: bool = typer.Option(False, "--verbose-plan", help="Print per-track plan output", is_flag=True),
+    log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
+    log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
+    log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
 ) -> None:
+    _initialise_logging(log_level, log_format, log_file)
+    run_id = uuid.uuid4().hex
+    log_event(
+        logger,
+        "run_started",
+        run_id=run_id,
+        command="music",
+        source=source,
+        library=library,
+        mode="apply" if apply else "dry-run",
+    )
+
     if source is None:
         source_default, library_default = _wizard_defaults("music")
         while True:
@@ -2994,12 +3160,39 @@ def music(
     console.print(f"Report path: {format_path(report_path)}")
 
     if result.errors:
+        log_event(
+            logger,
+            "run_finished",
+            run_id=run_id,
+            command="music",
+            status="error",
+            planned_count=len(plans),
+            error_count=len(result.errors),
+        )
         console.print("Errors:")
         for error in result.errors:
             console.print(f"- {rich_escape(error)}")
         raise typer.Exit(code=1)
     if not plans:
+        log_event(
+            logger,
+            "run_finished",
+            run_id=run_id,
+            command="music",
+            status="empty",
+            planned_count=0,
+            error_count=0,
+        )
         raise typer.Exit(code=1)
+    log_event(
+        logger,
+        "run_finished",
+        run_id=run_id,
+        command="music",
+        status="success",
+        planned_count=len(plans),
+        error_count=0,
+    )
     raise typer.Exit(code=0)
 
 
@@ -3036,9 +3229,46 @@ def undo(report: Path = typer.Option(None, help="Report path"), library: Path = 
 
 
 @app.command()
-def wizard() -> None:
+def wizard(
+    log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
+    log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
+    log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
+) -> None:
     console.print("Plexify wizard")
     console.print("Tip: you can drag-and-drop a folder into the terminal to paste its full path.")
+    use_log_file = _confirm(
+        "Write logs to a file for this run? [y/N]",
+        bool(log_file),
+        None,
+        show_default=False,
+    )
+    selected_log_file = log_file
+    selected_log_level = log_level.upper()
+    selected_log_format = log_format
+    if use_log_file:
+        default_path = str(log_file) if log_file is not None else str(Path(".plexify") / "run.log")
+        selected_log_file = Path(_prompt_text("Log file path", default_path, None))
+        selected_log_level = _prompt_choice_loop(
+            "Log level (debug/info/warning/error)",
+            WIZARD_LOG_LEVEL_CHOICES,
+            None,
+            allow_empty=True,
+            error="Enter one of: debug, info, warning, error.",
+            default=selected_log_level.lower(),
+        )
+        selected_log_format = _prompt_choice_loop(
+            "Log format (text/json)",
+            WIZARD_LOG_FORMAT_CHOICES,
+            None,
+            allow_empty=True,
+            error="Enter one of: text, json.",
+            default=selected_log_format,
+        )
+    else:
+        selected_log_file = None
+
+    _initialise_logging(selected_log_level, selected_log_format, selected_log_file)
+    log_event(logger, "run_started", run_id=uuid.uuid4().hex, command="wizard")
 
     choice = _prompt_choice_loop(
         "Organise: (v)ideo or (m)usic",
@@ -3049,9 +3279,17 @@ def wizard() -> None:
         default="video",
     )
     if choice == "music":
-        _wizard_music()
+        _wizard_music(
+            log_level=selected_log_level,
+            log_format=selected_log_format,
+            log_file=selected_log_file,
+        )
     else:
-        _wizard_video()
+        _wizard_video(
+            log_level=selected_log_level,
+            log_format=selected_log_format,
+            log_file=selected_log_file,
+        )
 
 
 def _prompt_non_overlapping_paths(
@@ -3151,7 +3389,12 @@ def _prompt_non_overlapping_paths(
                 source = Path(source_text)
 
 
-def _wizard_video() -> None:
+def _wizard_video(
+    *,
+    log_level: str = "INFO",
+    log_format: str = "text",
+    log_file: Path | None = None,
+) -> None:
     console.print("This will help you organise video files into a Plex-friendly folder layout.")
     console.print("Tip: for PowerShell tab-complete paths, run organise with --incoming/--library arguments instead.")
     if COMPLETION_ENABLED:
@@ -3171,7 +3414,13 @@ def _wizard_video() -> None:
     has_audio, has_video = _detect_media_in_path(incoming, audio_exts, video_exts)
     if has_audio and not has_video:
         if _confirm("This looks like music. Switch to music mode? [Y/n]", True, None, show_default=False):
-            _wizard_music(source_override=incoming, library_override=library)
+            _wizard_music(
+                source_override=incoming,
+                library_override=library,
+                log_level=log_level,
+                log_format=log_format,
+                log_file=log_file,
+            )
             return
 
     media_type = _prompt_choice_loop(
@@ -3270,11 +3519,21 @@ def _wizard_video() -> None:
         no_cache=not use_cache,
         clear_cache=clear_cache,
         on_conflict="rename",
+        log_level=log_level,
+        log_format=log_format,
+        log_file=log_file,
         prune_empty_dirs=prune_empty_dirs,
     )
 
 
-def _wizard_music(source_override: Path | None = None, library_override: Path | None = None) -> None:
+def _wizard_music(
+    source_override: Path | None = None,
+    library_override: Path | None = None,
+    *,
+    log_level: str = "INFO",
+    log_format: str = "text",
+    log_file: Path | None = None,
+) -> None:
     console.print("This will help you organise music into a Plex-friendly folder layout.")
     if COMPLETION_ENABLED:
         console.print("Tip: run python -m plexify.cli --install-completion to enable shell autocompletion.")
@@ -3297,7 +3556,11 @@ def _wizard_music(source_override: Path | None = None, library_override: Path | 
     has_audio, has_video = _detect_media_in_path(source, audio_exts, video_exts)
     if has_video and not has_audio:
         if _confirm("This looks like video. Switch to video mode? [Y/n]", True, None, show_default=False):
-            _wizard_video()
+            _wizard_video(
+                log_level=log_level,
+                log_format=log_format,
+                log_file=log_file,
+            )
             return
 
     mode = _prompt_choice_loop(
@@ -3335,6 +3598,9 @@ def _wizard_music(source_override: Path | None = None, library_override: Path | 
         keep_log=keep_log,
         cleanup_empty_dirs=cleanup_empty_dirs,
         verbose_plan=verbose_plan,
+        log_level=log_level,
+        log_format=log_format,
+        log_file=log_file,
     )
 
 

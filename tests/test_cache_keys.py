@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from plexify import cli
-from plexify.util import build_cache_key, movie_cache_key, tv_episode_cache_key, tv_show_cache_key
+from plexify.util import (
+    build_cache_key,
+    movie_cache_key,
+    tv_episode_cache_key,
+    tv_show_cache_key,
+    tv_show_folder_cache_key,
+)
 
 
 def test_cache_key_uses_relative_path_and_normalised_stem() -> None:
@@ -26,3 +32,24 @@ def test_reusable_cache_keys() -> None:
 def test_cache_year_compatibility() -> None:
     assert cli._cache_entry_compatible(2000, 2001) is True
     assert cli._cache_entry_compatible(2000, 2010) is False
+
+
+def test_tv_show_folder_cache_key_from_season_folder() -> None:
+    incoming = Path("incoming")
+    path = incoming / "Show" / "Season 2" / "Ep.mkv"
+    key = tv_show_folder_cache_key(path, incoming)
+    assert key == "tvfolder|show"
+
+
+def test_tv_show_folder_cache_key_nested_under_season_folder() -> None:
+    incoming = Path("incoming")
+    path = incoming / "Show" / "Season 2" / "Disc 1" / "Ep.mkv"
+    key = tv_show_folder_cache_key(path, incoming)
+    assert key == "tvfolder|show"
+
+
+def test_tv_show_folder_cache_key_none_for_root_file() -> None:
+    incoming = Path("incoming")
+    path = incoming / "Ep.mkv"
+    key = tv_show_folder_cache_key(path, incoming)
+    assert key is None

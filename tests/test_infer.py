@@ -168,3 +168,12 @@ def test_infer_tv_series_episode_young_offenders() -> None:
     assert item.season == 1
     assert item.episode == 4
     assert "Movies" not in item.title
+
+
+def test_infer_tv_prefers_deepest_season_folder() -> None:
+    path = Path("Season 01/ShowName/Season 02/03 - Title.mkv")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.title == "ShowName"
+    assert item.season == 2
+    assert item.episode == 3

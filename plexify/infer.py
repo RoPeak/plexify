@@ -56,7 +56,7 @@ def _parent_show_name(path: Path) -> Optional[str]:
 
 
 def _extract_season_from_parts(path: Path) -> Optional[int]:
-    for part in path.parts:
+    for part in reversed(path.parts):
         match = SEASON_RE.search(part)
         if match:
             return int(match.group(1))

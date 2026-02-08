@@ -80,6 +80,10 @@ WINDOWS_RESERVED = {
     "LPT8",
     "LPT9",
 }
+TV_SEASON_FOLDER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:season|series)[-_. ]*(\d{1,2})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def sanitise_name(value: str) -> str:
@@ -174,6 +178,30 @@ def tv_episode_cache_key(title: str, year: int | None, season: int | None, episo
     season_text = str(season) if season is not None else "unknown"
     episode_text = str(episode) if episode is not None else "unknown"
     return f"tv|{normalize_title_for_similarity(title)}|{year_text}|s{season_text}|e{episode_text}"
+
+
+def tv_show_folder_cache_key(path: Path, incoming_root: Path | None) -> str | None:
+    rel = path
+    if incoming_root is not None:
+        try:
+            rel = path.relative_to(incoming_root)
+        except ValueError:
+            rel = Path(path.name)
+    current = rel.parent
+    season_folder = None
+    while str(current) not in {"", "."}:
+        if TV_SEASON_FOLDER_RE.search(current.name):
+            season_folder = current
+            break
+        current = current.parent
+
+    if season_folder is not None:
+        show_folder = season_folder.parent
+    else:
+        show_folder = rel.parent
+    if str(show_folder) in {"", "."}:
+        return None
+    return f"tvfolder|{show_folder.as_posix().lower()}"
 
 
 def ensure_dir(path: Path) -> None:

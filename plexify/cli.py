@@ -40,6 +40,7 @@ from .util import (
     normalize_title_for_similarity,
     now_timestamp,
     tv_episode_cache_key,
+    tv_show_folder_cache_key,
     tv_show_cache_key,
     unique_path,
     unique_plan_path,
@@ -340,8 +341,13 @@ def _prompt_choice_loop(
 
 def _confirm(prompt: str, default: bool, progress: Progress | None, show_default: bool = True) -> bool:
     default_text = "y" if default else "n"
-    choice = _prompt_choice(prompt, default_text, progress, show_default=show_default)
-    return choice in {"y", "yes"}
+    while True:
+        choice = _prompt_choice(prompt, default_text, progress, show_default=show_default)
+        if choice in {"y", "yes"}:
+            return True
+        if choice in {"n", "no"}:
+            return False
+        _safe_print("Please enter y/n.", progress)
 
 
 def _print_overlap_error(exc: PathOverlapError) -> None:
@@ -643,6 +649,7 @@ def _tv_candidates(
     cache: Cache,
     show_cache: bool,
     *,
+    incoming_root: Path | None = None,
     cache_key: str | None = None,
     offset: int = 0,
     raw_results: list[tvmaze.TVMazeShow] | None = None,
@@ -653,6 +660,7 @@ def _tv_candidates(
     path_key = cache_key or item.title
     reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
     reusable_episode_key = None
+    folder_show_key = tv_show_folder_cache_key(item.path, incoming_root)
     if item.season is not None and item.episode is not None:
         reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
     cached = None
@@ -663,21 +671,24 @@ def _tv_candidates(
     if cached is None and reusable_show_key:
         cached = cache.get_show(reusable_show_key)
         cached_key = reusable_show_key if cached else None
+    if cached is None and folder_show_key:
+        cached = cache.get_show(folder_show_key)
+        cached_key = folder_show_key if cached else None
     if cached is None:
         cached = cache.get_show(path_key)
         cached_key = path_key if cached else None
     results: list[Candidate] = []
     elapsed = 0.0
     total_time = None
-    if cached and not cached.get("manual"):
+    if cached:
         if not cached.get("confirmed_by_user"):
             cached = None
-        elif not _cache_entry_compatible(item.year, cached.get("premiered")):
+        elif not cached.get("manual") and not _cache_entry_compatible(item.year, cached.get("premiered")):
             cached = None
-    if cached and not cached.get("manual"):
+    if cached:
         if show_cache:
             name = cached.get("name") or item.title
-            year = cached.get("premiered")
+            year = cached.get("chosen_year") or cached.get("premiered")
             year_text = f" ({year})" if year else ""
             _safe_print("Cache hit.", progress)
             if cached_key == reusable_show_key:
@@ -686,15 +697,43 @@ def _tv_candidates(
                     f"Using cached show match: {name}{year_text} [TVMaze]. Using inferred S/E for this file.",
                     progress,
                 )
+            elif cached_key == folder_show_key:
+                _safe_print("Cache type: FOLDER", progress)
+                _safe_print(
+                    f"Using cached show match for folder: {name}{year_text} [TVMaze]. Using inferred S/E for this file.",
+                    progress,
+                )
             else:
                 _safe_print("Cache type: FILE-SPECIFIC", progress)
                 _safe_print(
                     f"Using cached match for: {rich_escape(item.path.name)} -> {rich_escape(name)}{year_text} [TVMaze]",
                     progress,
                 )
-        show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
-        candidate = _tv_candidate_from_show(item, show)
-        if cached_key != reusable_show_key:
+        if cached.get("manual"):
+            metadata: dict[str, Any] = {
+                "id": None,
+                "name": cached.get("name") or item.title,
+                "year": cached.get("chosen_year") or cached.get("premiered"),
+                "manual": True,
+            }
+            if cached_key not in {reusable_show_key, folder_show_key}:
+                if "season" in cached:
+                    metadata["season"] = cached.get("season")
+                if "episode" in cached:
+                    metadata["episode"] = cached.get("episode")
+                if "episode_title" in cached:
+                    metadata["episode_title"] = cached.get("episode_title")
+            candidate = Candidate(
+                title=metadata["name"],
+                year=metadata.get("year"),
+                source="Manual",
+                confidence=1.0,
+                metadata=metadata,
+            )
+        else:
+            show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
+            candidate = _tv_candidate_from_show(item, show)
+        if cached_key not in {reusable_show_key, folder_show_key}:
             candidate.metadata["season"] = cached.get("season")
             candidate.metadata["episode"] = cached.get("episode")
             candidate.metadata["episode_title"] = cached.get("episode_title")
@@ -1523,9 +1562,12 @@ def _plan_items(
                 cache_snapshots: list[CacheSnapshot] = []
                 if item.media_type == "tv":
                     reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
+                    folder_show_key = tv_show_folder_cache_key(item.path, incoming)
                     keys = [cache_key]
                     if reusable_show_key:
                         keys.append(reusable_show_key)
+                    if folder_show_key:
+                        keys.append(folder_show_key)
                     if item.season is not None and item.episode is not None:
                         keys.append(tv_episode_cache_key(item.title, item.year, item.season, item.episode))
                     for key in keys:
@@ -1707,11 +1749,13 @@ def _process_item(
     reusable_movie_key = None
     reusable_show_key = None
     reusable_episode_key = None
+    folder_show_key = None
     if item.media_type == "tv":
         if _reusable_tv_cache_safe(item):
             reusable_show_key = tv_show_cache_key(item.title, item.year)
         if item.season is not None and item.episode is not None:
             reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
+        folder_show_key = tv_show_folder_cache_key(item.path, incoming_root)
     else:
         reusable_movie_key = movie_cache_key(item.title, item.year)
     collision = False
@@ -1726,6 +1770,7 @@ def _process_item(
                 session_tv,
                 cache,
                 show_cache,
+                incoming_root=incoming_root,
                 cache_key=cache_key,
                 offset=next_offset,
                 raw_results=raw_results_tv,
@@ -1772,6 +1817,7 @@ def _process_item(
                             session_tv,
                             cache,
                             show_cache,
+                            incoming_root=incoming_root,
                             cache_key=cache_key,
                             offset=next_offset,
                             raw_results=raw_results_tv,
@@ -1804,6 +1850,7 @@ def _process_item(
                                 session_tv,
                                 cache,
                                 show_cache,
+                                incoming_root=incoming_root,
                                 cache_key=cache_key,
                                 offset=next_offset,
                                 raw_results=raw_results_tv,
@@ -1880,6 +1927,7 @@ def _process_item(
                         session_tv,
                         cache,
                         show_cache,
+                        incoming_root=incoming_root,
                         cache_key=cache_key,
                         offset=next_offset,
                         raw_results=raw_results_tv,
@@ -1910,6 +1958,7 @@ def _process_item(
                             session_tv,
                             cache,
                             show_cache,
+                            incoming_root=incoming_root,
                             cache_key=cache_key,
                             offset=next_offset,
                             raw_results=raw_results_tv,
@@ -1936,6 +1985,7 @@ def _process_item(
                         session_tv,
                         cache,
                         show_cache,
+                        incoming_root=incoming_root,
                         cache_key=cache_key,
                         offset=next_offset,
                         raw_results=raw_results_tv,
@@ -2050,6 +2100,8 @@ def _process_item(
         cache.set_show(cache_key, entry)
         if reusable_show_key:
             cache.set_show(reusable_show_key, show_entry)
+        if folder_show_key and confirmed_by_user:
+            cache.set_show(folder_show_key, show_entry)
         if reusable_episode_key:
             cache.set_show(reusable_episode_key, entry)
         cache.save()

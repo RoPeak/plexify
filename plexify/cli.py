@@ -672,6 +672,7 @@ def _tv_candidates(
     search_query: str | None = None,
     progress: Progress | None = None,
     limit: int = 5,
+    offline: bool = False,
 ) -> CandidatePage:
     path_key = cache_key or item.title
     reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
@@ -763,6 +764,9 @@ def _tv_candidates(
             candidate.metadata["episode_title"] = cached.get("episode_title")
         results.append(candidate)
         return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
+
+    if offline:
+        return CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
 
     if raw_results is None:
         query = search_query or make_search_query(item.title) or item.title
@@ -922,6 +926,7 @@ def _movie_candidates(
     search_query: str | None = None,
     progress: Progress | None = None,
     limit: int = 5,
+    offline: bool = False,
 ) -> CandidatePage:
     path_key = cache_key or item.title
     reusable_key = movie_cache_key(item.title, item.year)
@@ -967,6 +972,9 @@ def _movie_candidates(
         film = wikidata.WikidataFilm(qid=cached["qid"], title=cached["title"], year=cached.get("year"), is_film=True)
         results.append(_movie_candidate_from_film(item, film))
         return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
+
+    if offline:
+        return CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
 
     if raw_results is None:
         query = search_query or make_search_query(item.title) or item.title
@@ -1607,6 +1615,7 @@ def _plan_items(
     media_type_filter: str | None,
     use_cache: bool,
     on_conflict: str,
+    offline: bool = False,
 ) -> tuple[list[MovePlan], list[str], PlanStats]:
     cache_store: Cache = Cache(cache_path) if use_cache else NullCache()
     exts = _parse_extensions(extensions)
@@ -1693,6 +1702,7 @@ def _plan_items(
                     planned=planned,
                     on_conflict=on_conflict,
                     allow_back=bool(history),
+                    offline=offline,
                 )
                 history.append(
                     HistoryEntry(
@@ -1828,6 +1838,7 @@ def _process_item(
     planned: dict[str, int] | None = None,
     on_conflict: str = "rename",
     allow_back: bool = False,
+    offline: bool = False,
 ) -> tuple[MovePlan | None, bool]:
     cache_key = build_cache_key(item.path, incoming_root, item.media_type, item.year)
     if item.media_type == "movie" and interactive:
@@ -1872,6 +1883,7 @@ def _process_item(
                 raw_results=raw_results_tv,
                 search_query=search_query,
                 progress=progress,
+                offline=offline,
             ),
             interactive,
             progress,
@@ -1919,6 +1931,7 @@ def _process_item(
                             raw_results=raw_results_tv,
                             search_query=search_query,
                             progress=progress,
+                            offline=offline,
                         ),
                         interactive,
                         progress,
@@ -1952,6 +1965,7 @@ def _process_item(
                                 raw_results=raw_results_tv,
                                 search_query=search_query,
                                 progress=progress,
+                                offline=offline,
                             ),
                             interactive,
                             progress,
@@ -2029,6 +2043,7 @@ def _process_item(
                         raw_results=raw_results_tv,
                         search_query=search_query,
                         progress=progress,
+                        offline=offline,
                     ),
                     interactive,
                     progress,
@@ -2060,6 +2075,7 @@ def _process_item(
                             raw_results=raw_results_tv,
                             search_query=search_query,
                             progress=progress,
+                            offline=offline,
                         ),
                         interactive,
                         progress,
@@ -2087,6 +2103,7 @@ def _process_item(
                         raw_results=raw_results_tv,
                         search_query=search_query,
                         progress=progress,
+                        offline=offline,
                     ),
                     interactive,
                     progress,
@@ -2306,6 +2323,7 @@ def _process_item(
                         raw_results=raw_results_movie,
                         search_query=search_query,
                         progress=progress,
+                        offline=offline,
                     ),
                     interactive,
                     progress,
@@ -2338,6 +2356,7 @@ def _process_item(
                             raw_results=raw_results_movie,
                             search_query=search_query,
                             progress=progress,
+                            offline=offline,
                         ),
                         interactive,
                         progress,
@@ -2371,6 +2390,7 @@ def _process_item(
                             raw_results=raw_results_movie,
                             search_query=search_query,
                             progress=progress,
+                            offline=offline,
                         ),
                         interactive,
                         progress,
@@ -2447,6 +2467,7 @@ def _process_item(
                     raw_results=raw_results_movie,
                     search_query=search_query,
                     progress=progress,
+                    offline=offline,
                 ),
                 interactive,
                 progress,
@@ -2479,6 +2500,7 @@ def _process_item(
                         raw_results=raw_results_movie,
                         search_query=search_query,
                         progress=progress,
+                        offline=offline,
                     ),
                     interactive,
                     progress,
@@ -2503,6 +2525,7 @@ def _process_item(
                     raw_results=raw_results_movie,
                     search_query=search_query,
                     progress=progress,
+                    offline=offline,
                 ),
                 interactive,
                 progress,
@@ -2534,6 +2557,7 @@ def _process_item(
                         raw_results=raw_results_movie,
                         search_query=search_query,
                         progress=progress,
+                        offline=offline,
                     ),
                     interactive,
                     progress,
@@ -2647,6 +2671,7 @@ def organise(
     media_type: str = typer.Option("auto", "--media-type", help="Filter by media type: auto/movie/tv"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes", is_flag=True),
     clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running", is_flag=True),
+    offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run", is_flag=True),
     on_conflict: str = typer.Option("rename", "--on-conflict", help="On destination conflict: rename/skip/overwrite"),
     log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
@@ -2692,6 +2717,8 @@ def organise(
     interactive_mode = True if interactive else not no_interactive
     if mode == "dry-run":
         console.print("DRY-RUN: no files will be moved/copied.")
+    if offline:
+        console.print("Offline mode enabled: network lookups disabled.")
     if mode == "apply":
         if move:
             copy_mode = False
@@ -2723,6 +2750,7 @@ def organise(
         media_type_filter=media_type_filter,
         use_cache=not no_cache,
         on_conflict=on_conflict,
+        offline=offline,
     )
 
     if print_tree and plans:
@@ -2863,6 +2891,7 @@ def music(
     keep_art: bool = typer.Option(True, "--keep-art/--no-art", help="Move/copy album artwork to cover.jpg"),
     keep_cue: bool = typer.Option(False, "--keep-cue", help="Keep .cue sidecars", is_flag=True),
     keep_log: bool = typer.Option(False, "--keep-log", help="Keep .log sidecars", is_flag=True),
+    offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run", is_flag=True),
     cleanup_empty_dirs: bool = typer.Option(
         False, "--cleanup-empty-dirs", help="Remove empty folders after move", is_flag=True
     ),

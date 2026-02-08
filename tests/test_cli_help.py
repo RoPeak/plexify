@@ -36,3 +36,20 @@ def test_music_help():
     assert "--log-level" in result.output
     assert "--log-format" in result.output
     assert "--log-file" in result.output
+
+
+def test_default_callback_invokes_wizard_with_parsed_defaults(monkeypatch) -> None:
+    runner = CliRunner()
+    called: dict[str, object] = {}
+
+    def _fake_wizard(*, log_level: str, log_format: str, log_file):
+        called["log_level"] = log_level
+        called["log_format"] = log_format
+        called["log_file"] = log_file
+
+    monkeypatch.setattr("plexify.cli.wizard", _fake_wizard)
+    result = runner.invoke(app, [])
+    assert result.exit_code == 0
+    assert called["log_level"] == "INFO"
+    assert called["log_format"] == "text"
+    assert called["log_file"] is None

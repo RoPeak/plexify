@@ -3199,7 +3199,7 @@ def music(
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
-        wizard()
+        wizard(log_level="INFO", log_format="text", log_file=None)
 
 
 @app.command()

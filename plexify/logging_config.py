@@ -78,6 +78,7 @@ def configure_logging(level: str = "INFO", fmt: str = "text", log_file: Path | N
     logger.addHandler(stream_handler)
 
     if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)

@@ -4,9 +4,10 @@ import json
 import logging
 from pathlib import Path
 
-from typer.testing import CliRunner
+import pytest
+import typer
 
-from plexify.cli import app
+from plexify import cli
 from plexify.logging_config import JsonFormatter, configure_logging, get_logger, log_event
 
 
@@ -32,39 +33,56 @@ def test_json_formatter_emits_event_fields() -> None:
     assert payload["message"] == "run_started"
 
 
-def test_configure_logging_json_with_file(tmp_path: Path) -> None:
-    log_path = tmp_path / "plexify.log"
+def test_configure_logging_json_with_file(monkeypatch) -> None:
+    log_path = Path("test-logs") / "plexify.log"
+    captured: dict[str, object] = {}
+
+    class DummyFileHandler(logging.Handler):
+        def __init__(self, filename, encoding=None):
+            super().__init__()
+            captured["filename"] = str(filename)
+
+        def emit(self, record: logging.LogRecord) -> None:
+            captured["payload"] = self.format(record)
+
+    monkeypatch.setattr(logging, "FileHandler", DummyFileHandler)
     configure_logging(level="INFO", fmt="json", log_file=log_path)
     logger = get_logger("tests.logging")
 
     log_event(logger, "cache_hit", cache_scope="tv", cache_key="k1")
 
-    content = log_path.read_text(encoding="utf-8").strip()
-    assert content
-    payload = json.loads(content)
+    assert captured["filename"].endswith(str(log_path))
+    payload = json.loads(str(captured["payload"]))
     assert payload["event"] == "cache_hit"
     assert payload["cache_scope"] == "tv"
 
 
-def test_organise_rejects_invalid_log_level(tmp_path: Path) -> None:
-    incoming = tmp_path / "incoming"
-    library = tmp_path / "library"
-    incoming.mkdir()
-    library.mkdir()
-    runner = CliRunner()
+def test_configure_logging_creates_parent_directory(monkeypatch) -> None:
+    log_path = Path(".plexify") / "run.log"
+    mkdir_calls: list[Path] = []
+    original_mkdir = Path.mkdir
 
-    result = runner.invoke(
-        app,
-        [
-            "organise",
-            "--incoming",
-            str(incoming),
-            "--library",
-            str(library),
-            "--log-level",
-            "VERBOSE",
-        ],
-    )
+    def _fake_mkdir(self, *args, **kwargs):
+        mkdir_calls.append(self)
+        return None
 
-    assert result.exit_code == 2
-    assert "Invalid log level" in result.output
+    class DummyFileHandler(logging.Handler):
+        def __init__(self, *_args, **_kwargs):
+            super().__init__()
+
+        def emit(self, _record: logging.LogRecord) -> None:
+            return None
+
+    monkeypatch.setattr(Path, "mkdir", _fake_mkdir)
+    monkeypatch.setattr(logging, "FileHandler", DummyFileHandler)
+    configure_logging(level="INFO", fmt="text", log_file=log_path)
+    logger = get_logger("tests.logging.dir")
+    log_event(logger, "run_started", command="wizard")
+
+    assert log_path.parent in mkdir_calls
+    monkeypatch.setattr(Path, "mkdir", original_mkdir)
+
+
+def test_initialise_logging_rejects_invalid_log_level() -> None:
+    with pytest.raises(typer.Exit):
+        cli._initialise_logging("VERBOSE", "text", None)

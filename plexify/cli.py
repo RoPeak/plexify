@@ -350,6 +350,15 @@ def _confirm(prompt: str, default: bool, progress: Progress | None, show_default
         _safe_print("Please enter y/n.", progress)
 
 
+def _prompt_int(prompt: str, default: int, progress: Progress | None) -> int:
+    while True:
+        value = _prompt_text(prompt, str(default), progress)
+        try:
+            return int(value)
+        except ValueError:
+            _safe_print("Please enter a whole number.", progress)
+
+
 def _print_overlap_error(exc: PathOverlapError) -> None:
     issue = exc.issue
     console.print(rich_escape(issue.reason))
@@ -1056,16 +1065,33 @@ def _cache_entry_compatible(inferred_year: int | None, cached_year: int | None) 
     return _year_distance(inferred_year, cached_year) <= 2
 
 
-def _reusable_movie_cache_safe(item: InferredItem) -> bool:
-    if item.year is not None:
+def _is_ambiguous_cache_title(title: str) -> bool:
+    normalised = normalize_title_for_similarity(title)
+    tokens = [token for token in re.split(r"\s+", normalised) if token]
+    if not tokens:
+        return True
+    if len(tokens) == 1:
+        return True
+    if len(normalised) < 6:
+        return True
+    generic_titles = {"movie", "film", "show", "series", "episode", "unknown", "sample", "video", "tv"}
+    if normalised in generic_titles:
         return True
     return False
+
+
+def _reusable_cache_safe(title: str, year: int | None) -> bool:
+    if year is not None:
+        return True
+    return not _is_ambiguous_cache_title(title)
+
+
+def _reusable_movie_cache_safe(item: InferredItem) -> bool:
+    return _reusable_cache_safe(item.title, item.year)
 
 
 def _reusable_tv_cache_safe(item: InferredItem) -> bool:
-    if item.year is not None:
-        return True
-    return False
+    return _reusable_cache_safe(item.title, item.year)
 
 
 def _auto_acceptable(
@@ -2039,8 +2065,8 @@ def _process_item(
         if season is None or episode is None:
             if not interactive:
                 return None, False
-            season = int(_prompt_text("Season", str(item.season or 1), progress))
-            episode = int(_prompt_text("Episode", str(item.episode or 1), progress))
+            season = _prompt_int("Season", item.season or 1, progress)
+            episode = _prompt_int("Episode", item.episode or 1, progress)
             if not episode_title:
                 episode_title = _prompt_text("Episode title (optional)", item.episode_title or "", progress)
 

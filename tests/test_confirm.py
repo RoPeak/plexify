@@ -21,3 +21,16 @@ def test_confirm_reprompts_then_accepts_no(monkeypatch) -> None:
 
     assert cli._confirm("Proceed?", False, None) is False
     assert prompts == ["Please enter y/n."]
+
+
+def test_confirm_passes_show_default_false(monkeypatch) -> None:
+    seen: list[bool] = []
+
+    def _fake_prompt_choice(*_args, **kwargs):
+        seen.append(kwargs.get("show_default"))
+        return "y"
+
+    monkeypatch.setattr(cli, "_prompt_choice", _fake_prompt_choice)
+
+    assert cli._confirm("Proceed?", True, None, show_default=False) is True
+    assert seen == [False]

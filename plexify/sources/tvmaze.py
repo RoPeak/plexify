@@ -8,28 +8,38 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from ..logging_config import get_logger
+
 
 _available = True
 _warned = False
+_recover_at: float | None = None
+logger = get_logger(__name__)
 
 
 def _warn_unavailable(message: str) -> None:
     global _warned
     if _warned:
         return
-    print(message)
+    logger.warning(message)
     _warned = True
 
 
-def _set_unavailable(message: str) -> None:
-    global _available
+def _set_unavailable(message: str, *, cooldown: float = 60.0) -> None:
+    global _available, _recover_at
     if not _available:
         return
     _available = False
+    _recover_at = time.monotonic() + cooldown
     _warn_unavailable(message)
 
 
 def is_available() -> bool:
+    global _available, _recover_at, _warned
+    if not _available and _recover_at is not None and time.monotonic() >= _recover_at:
+        _available = True
+        _recover_at = None
+        _warned = False
     return _available
 
 
@@ -150,7 +160,7 @@ def search_shows(
     *,
     raise_on_error: bool = False,
 ) -> list[TVMazeShow]:
-    if not _available:
+    if not is_available():
         return []
     session = session or _session()
     try:
@@ -173,7 +183,7 @@ def fetch_episodes(
     session: requests.Session | None = None,
     timeout: tuple[int, int] = (5, 15),
 ) -> list[TVMazeEpisode]:
-    if not _available:
+    if not is_available():
         return []
     session = session or _session()
     try:
@@ -194,7 +204,7 @@ def fetch_show_details(
     session: requests.Session | None = None,
     timeout: tuple[int, int] = (5, 15),
 ) -> TVMazeShowDetails | None:
-    if not _available:
+    if not is_available():
         return None
     session = session or _session()
     try:

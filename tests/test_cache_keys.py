@@ -60,3 +60,10 @@ def test_tv_show_folder_cache_key_none_for_root_file() -> None:
     path = incoming / "Ep.mkv"
     key = tv_show_folder_cache_key(path, incoming)
     assert key is None
+
+
+def test_tv_show_folder_cache_key_absolute_path_without_incoming_root(tmp_path: Path) -> None:
+    path = tmp_path / "Show" / "Season 1" / "Episode.mkv"
+    key = tv_show_folder_cache_key(path, None)
+    assert key is not None
+    assert key.startswith("tvfolder|")

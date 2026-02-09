@@ -15,6 +15,7 @@ def test_musicbrainz_unavailable_message(monkeypatch, tmp_path: Path) -> None:
     library = tmp_path / "library"
     monkeypatch.setattr(musicbrainz, "_available", False)
     monkeypatch.setattr(musicbrainz, "_unavailable_reason", "offline")
+    monkeypatch.setattr(musicbrainz, "_recover_at", None)
 
     runner = CliRunner()
     result = runner.invoke(

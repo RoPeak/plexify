@@ -14,8 +14,10 @@ def test_sources_unavailable_does_not_crash(monkeypatch, tmp_path: Path) -> None
     monkeypatch.setattr(requests.Session, "get", _raise)
     wikidata._available = True
     wikidata._warned = False
+    wikidata._recover_at = None
     tvmaze._available = True
     tvmaze._warned = False
+    tvmaze._recover_at = None
 
     incoming = tmp_path / "incoming"
     library = tmp_path / "library"

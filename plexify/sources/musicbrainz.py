@@ -11,6 +11,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from .. import __version__
+from ..logging_config import get_logger
 
 
 BASE_URL = "https://musicbrainz.org/ws/2"
@@ -19,6 +20,8 @@ _warned = False
 _warned_user_agent = False
 _last_request = 0.0
 _unavailable_reason: str | None = None
+_recover_at: float | None = None
+logger = get_logger(__name__)
 
 
 def _warn_unavailable(message: str) -> None:
@@ -26,19 +29,27 @@ def _warn_unavailable(message: str) -> None:
     if _warned:
         return
     _warned = True
+    logger.warning(message)
 
 
-def _set_unavailable(message: str) -> None:
-    global _available
+def _set_unavailable(message: str, *, cooldown: float = 60.0) -> None:
+    global _available, _recover_at
     if not _available:
         return
     _available = False
+    _recover_at = time.monotonic() + cooldown
     global _unavailable_reason
     _unavailable_reason = message
     _warn_unavailable(message)
 
 
 def is_available() -> bool:
+    global _available, _recover_at, _warned, _unavailable_reason
+    if not _available and _recover_at is not None and time.monotonic() >= _recover_at:
+        _available = True
+        _recover_at = None
+        _warned = False
+        _unavailable_reason = None
     return _available
 
 
@@ -72,7 +83,7 @@ def _session() -> requests.Session:
     if not user_agent:
         global _warned_user_agent
         if not _warned_user_agent:
-            print("MusicBrainz: set PLEXIFY_USER_AGENT with contact info to avoid throttling.")
+            logger.warning("MusicBrainz: set PLEXIFY_USER_AGENT with contact info to avoid throttling.")
             _warned_user_agent = True
         user_agent = f"plexify/{__version__} (contact: set PLEXIFY_USER_AGENT)"
     session.headers.update(
@@ -117,7 +128,7 @@ def _parse_artist_credit(credit: list[dict[str, Any]] | None) -> str:
 
 
 def search_releases(artist: str, album: str, limit: int = 8, session: requests.Session | None = None) -> list[ReleaseCandidate]:
-    if not _available:
+    if not is_available():
         return []
     session = session or _session()
     query = f'artist:"{artist}" AND release:"{album}"'
@@ -183,7 +194,7 @@ def _parse_track_number(value: Any) -> int | None:
 
 
 def fetch_release_tracks(mbid: str, session: requests.Session | None = None) -> list[Track]:
-    if not _available:
+    if not is_available():
         return []
     session = session or _session()
     try:

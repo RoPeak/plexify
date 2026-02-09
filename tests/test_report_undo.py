@@ -72,3 +72,23 @@ def test_undo_blocks_paths_outside_library_root(tmp_path: Path):
     assert errors
     assert "outside library root" in errors[0]
     assert dest.exists()
+
+
+def test_undo_allows_move_source_outside_library_root_when_destination_inside(tmp_path: Path):
+    library = tmp_path / "library"
+    library.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    src = outside / "source.mkv"
+    dest = library / "Movies" / "source.mkv"
+    dest.parent.mkdir(parents=True)
+    dest.write_text("data")
+    report = tmp_path / "report.json"
+    plan = MovePlan(source=src, destination=dest, mode="apply", media_type="movie", metadata={})
+    write_report(report, [plan], mode="apply", copy_mode=False)
+
+    errors = undo_report(report, library_root=library)
+
+    assert not errors
+    assert src.exists()

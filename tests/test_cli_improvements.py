@@ -143,3 +143,66 @@ def test_tv_candidates_reuse_in_run_search_cache(monkeypatch, tmp_path: Path) ->
     assert calls["count"] == 1
     assert page_one.candidates
     assert page_two.candidates
+
+
+def test_process_item_auto_resolves_implausible_episode_number(monkeypatch, tmp_path: Path) -> None:
+    def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Friends",
+            year=1994,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 99, "name": "Friends", "year": 1994},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    def _fake_fetch_episodes(*_args, **_kwargs):
+        return [
+            tvmaze.TVMazeEpisode(season=10, number=17, name="The One With Rachel's Going Away Party"),
+            tvmaze.TVMazeEpisode(season=10, number=16, name="The One With Rachel's Sister Babysits"),
+        ]
+
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", _fake_fetch_episodes)
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Friends" / "Friends Season 10" / "234. The One With Rachel's Going Away Party.m4v"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(
+        path=path,
+        media_type="tv",
+        title="Friends",
+        year=None,
+        season=10,
+        episode=234,
+        episode_title="The One With Rachel's Going Away Party",
+    )
+    cache = Cache(library / ".plexify" / "cache.json")
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=cli.EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert plan.metadata["season"] == 10
+    assert plan.metadata["episode"] == 17

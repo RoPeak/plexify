@@ -198,7 +198,10 @@ def tv_show_folder_cache_key(path: Path, incoming_root: Path | None) -> str | No
         if TV_SEASON_FOLDER_RE.search(current.name):
             season_folder = current
             break
-        current = current.parent
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
 
     if season_folder is not None:
         show_folder = season_folder.parent

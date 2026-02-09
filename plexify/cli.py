@@ -103,6 +103,7 @@ TV_EXPLICIT_SEASON_RE = re.compile(rf"(?<![A-Za-z0-9]){TV_SEASON_TOKEN_RE}[-_. ]
 TV_EXPLICIT_SEASON_EPISODE_RE = re.compile(r"\bs\d{1,2}e\d{1,3}\b|\b\d{1,2}x\d{1,3}\b", re.IGNORECASE)
 TV_SXXEYY_CAPTURE_RE = re.compile(r"\bs(\d{1,2})e\d{1,3}\b", re.IGNORECASE)
 TV_XYY_CAPTURE_RE = re.compile(r"\b(\d{1,2})x\d{1,3}\b", re.IGNORECASE)
+MAX_PLAUSIBLE_EPISODE_NUMBER = 99
 
 
 @dataclass
@@ -429,7 +430,10 @@ def _wizard_prefs_path() -> Path:
 
 def _load_wizard_prefs() -> dict[str, dict[str, str]]:
     path = _wizard_prefs_path()
-    data = json_load(path)
+    try:
+        data = json_load(path)
+    except (OSError, ValueError, TypeError):
+        return {}
     if not isinstance(data, dict):
         return {}
     cleaned: dict[str, dict[str, str]] = {}
@@ -443,7 +447,10 @@ def _load_wizard_prefs() -> dict[str, dict[str, str]]:
 def _save_wizard_prefs(media_key: str, source: Path, library: Path) -> None:
     prefs = _load_wizard_prefs()
     prefs[media_key] = {"source": str(source), "library": str(library)}
-    json_dump(_wizard_prefs_path(), prefs)
+    try:
+        json_dump(_wizard_prefs_path(), prefs)
+    except OSError:
+        log_event(logger, "wizard_prefs_save_failed", level=30, path=_wizard_prefs_path())
 
 
 def _wizard_defaults(media_key: str) -> tuple[Path | None, Path | None]:
@@ -1070,18 +1077,9 @@ def _resolve_episode_from_title(
 ) -> tuple[int, int, str | None] | None:
     if not item.episode_title or show_id is None:
         return None
-    episodes = episode_cache.get_episodes(int(show_id), session=session)
-    if not episodes:
-        return None
-    scored: list[tuple[float, tvmaze.TVMazeEpisode]] = []
-    for ep in episodes:
-        if not ep.name:
-            continue
-        score = fuzz.WRatio(item.episode_title, ep.name) / 100.0
-        scored.append((score, ep))
+    scored = _episode_matches_from_title(item.episode_title, int(show_id), session, episode_cache)
     if not scored:
         return None
-    scored.sort(key=lambda row: row[0], reverse=True)
     top = scored[:5]
     table = Table(title="Episode matches")
     table.add_column("#")
@@ -1110,6 +1108,45 @@ def _resolve_episode_from_title(
         if choice == "k":
             return None
         _safe_print("Invalid choice.", progress)
+
+
+def _episode_matches_from_title(
+    episode_title: str,
+    show_id: int,
+    session: requests.Session,
+    episode_cache: EpisodeCache,
+) -> list[tuple[float, tvmaze.TVMazeEpisode]]:
+    episodes = episode_cache.get_episodes(int(show_id), session=session)
+    if not episodes:
+        return []
+    scored: list[tuple[float, tvmaze.TVMazeEpisode]] = []
+    for ep in episodes:
+        if not ep.name:
+            continue
+        score = fuzz.WRatio(episode_title, ep.name) / 100.0
+        scored.append((score, ep))
+    if not scored:
+        return []
+    scored.sort(key=lambda row: row[0], reverse=True)
+    return scored
+
+
+def _auto_resolve_episode_from_title(
+    item: InferredItem,
+    show_id: int | None,
+    session: requests.Session,
+    episode_cache: EpisodeCache,
+) -> tuple[int, int, str | None] | None:
+    if show_id is None or not item.episode_title:
+        return None
+    scored = _episode_matches_from_title(item.episode_title, int(show_id), session, episode_cache)
+    if not scored:
+        return None
+    top_score, top = scored[0]
+    second_score = scored[1][0] if len(scored) > 1 else 0.0
+    if top_score < 0.92 or (top_score - second_score) < 0.06:
+        return None
+    return top.season, top.number, top.name
 
 
 def _movie_candidates(
@@ -2439,6 +2476,22 @@ def _process_item(
         season = metadata.get("season") or item.season
         episode = metadata.get("episode") or item.episode
         episode_title = metadata.get("episode_title") or item.episode_title
+        if episode is not None and int(episode) > MAX_PLAUSIBLE_EPISODE_NUMBER:
+            auto_resolved = _auto_resolve_episode_from_title(item, metadata.get("id"), session_tv, episode_cache)
+            if auto_resolved is not None:
+                season, episode, resolved_title = auto_resolved
+                episode_title = resolved_title or episode_title
+                metadata["episode_title"] = episode_title
+            else:
+                log_event(
+                    logger,
+                    "implausible_episode_number",
+                    level=30,
+                    path=item.path,
+                    title=item.title,
+                    season=season,
+                    episode=episode,
+                )
         if interactive and (season is None or episode is None) and item.episode_title:
             resolved = _resolve_episode_from_title(item, metadata.get("id"), session_tv, episode_cache, progress)
             if resolved:

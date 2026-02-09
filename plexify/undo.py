@@ -24,11 +24,15 @@ def undo_report(path: Path, library_root: Path | None = None) -> list[str]:
         src = Path(op.get("source"))
         dest = Path(op.get("destination"))
         if root is not None:
-            if not src.is_absolute() or not dest.is_absolute():
-                errors.append(f"{dest}: blocked non-absolute report path")
+            if not dest.is_absolute():
+                errors.append(f"{dest}: blocked non-absolute destination path")
                 continue
-            if not _is_within_root(src, root) or not _is_within_root(dest, root):
+            if not _is_within_root(dest, root):
                 errors.append(f"{dest}: blocked path outside library root ({root})")
+                continue
+            # Move reports commonly restore into an incoming folder outside library root.
+            if not copy_mode and not src.is_absolute():
+                errors.append(f"{src}: blocked non-absolute source path")
                 continue
         try:
             if copy_mode:

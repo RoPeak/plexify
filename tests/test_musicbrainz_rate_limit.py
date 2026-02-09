@@ -39,6 +39,7 @@ def test_search_sets_unavailable_on_error(monkeypatch) -> None:
 
     musicbrainz._available = True
     musicbrainz._unavailable_reason = None
+    musicbrainz._recover_at = None
     monkeypatch.setattr(musicbrainz, "_session", lambda: _FakeSession())
     results = musicbrainz.search_releases("Artist", "Album")
     assert results == []

@@ -1,7 +1,7 @@
-import shlex
 from pathlib import Path
 
 from plexify import cli
+from plexify.command_builder import quote_cli_arg
 
 
 def test_build_command_from_config() -> None:
@@ -27,20 +27,48 @@ def test_build_command_from_config() -> None:
     )
     command = cli._build_command(config)
 
-    assert f"--incoming {shlex.quote(str(Path('C:/Media Incoming')))}" in command
-    assert f"--library {shlex.quote(str(Path('D:/Plex Library')))}" in command
+    assert f"--incoming {quote_cli_arg(str(Path('C:/Media Incoming')))}" in command
+    assert f"--library {quote_cli_arg(str(Path('D:/Plex Library')))}" in command
     assert "--mode apply" in command
     assert "--move" in command
-    assert "--extensions .mkv,.mp4" in command
+    assert f"--extensions {quote_cli_arg('.mkv,.mp4')}" in command
     assert "--min-confidence 0.85" in command
     assert "--limit 5" in command
     assert "--media-type movie" in command
     assert "--print-tree" in command
     assert "--yes" in command
     assert "--no-cache" in command
-    assert f"--cache {shlex.quote(str(Path('C:/Cache/cache.json')))}" in command
+    assert f"--cache {quote_cli_arg(str(Path('C:/Cache/cache.json')))}" in command
     assert "--clear-cache" in command
-    assert f"--report {shlex.quote(str(Path('C:/Reports/report.json')))}" in command
+    assert f"--report {quote_cli_arg(str(Path('C:/Reports/report.json')))}" in command
     assert "--on-conflict skip" in command
     assert "--prune-empty-dirs" in command
     assert "--no-interactive" in command
+
+
+def test_build_command_escapes_apostrophes_for_windows_shells() -> None:
+    config = cli.BuildCommandConfig(
+        incoming=Path("C:/Ronan's Incoming"),
+        library=Path("D:/Plex"),
+        media_type="tv",
+        mode="apply",
+        copy_mode=True,
+        extensions=cli.DEFAULT_EXTENSIONS_LIST,
+        min_confidence=cli.DEFAULT_MIN_CONFIDENCE,
+        limit=None,
+        interactive=True,
+        print_tree=False,
+        show_enrichment=False,
+        yes=False,
+        no_cache=False,
+        cache_file=None,
+        clear_cache=False,
+        report=None,
+        on_conflict="rename",
+        prune_empty_dirs=False,
+    )
+
+    command = cli._build_command(config)
+    incoming_quoted = quote_cli_arg(str(Path("C:/Ronan's Incoming")))
+
+    assert f"--incoming {incoming_quoted}" in command

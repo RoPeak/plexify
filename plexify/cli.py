@@ -1,6 +1,5 @@
 import os
 import re
-import shlex
 import sys
 import time
 import uuid
@@ -20,13 +19,14 @@ from rich.tree import Tree
 
 from .cache import Cache, NullCache
 from . import music as music_util
+from .command_builder import build_organise_command
 from .executor import execute_plans
 from .infer import InferredItem, infer_item
 from .logging_config import configure_logging, get_logger, log_event
 from .planner import plan_movie, plan_tv_show
 from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_overlapping
 from .prompting import _prompt_text
-from .report import write_report
+from .report import ReportFormatError, write_report
 from .sources import musicbrainz, tvmaze, wikidata
 from .tv_episode_cache import EpisodeCache
 from .undo import undo_report
@@ -248,6 +248,7 @@ def _switch_item_media_type(item: InferredItem, target_media_type: str) -> Infer
             year=item.year,
             season=item.season,
             episode=item.episode,
+            episode_end=item.episode_end,
             episode_title=item.episode_title,
         )
     return InferredItem(
@@ -257,6 +258,7 @@ def _switch_item_media_type(item: InferredItem, target_media_type: str) -> Infer
         year=item.year,
         season=None,
         episode=None,
+        episode_end=None,
         episode_title=None,
     )
 
@@ -401,6 +403,7 @@ def _apply_tv_folder_season_lock(item: InferredItem, cache: Cache, folder_show_k
         year=item.year,
         season=locked_season_int,
         episode=item.episode,
+        episode_end=item.episode_end,
         episode_title=item.episode_title,
     )
 
@@ -413,6 +416,7 @@ def _with_title(item: InferredItem, title: str) -> InferredItem:
         year=item.year,
         season=item.season,
         episode=item.episode,
+        episode_end=item.episode_end,
         episode_title=item.episode_title,
     )
 
@@ -1465,8 +1469,13 @@ def _file_panel(index: int, total: int, item: InferredItem, incoming_root: Path 
     ]
     if item.media_type == "tv":
         season = item.season if item.season is not None else "-"
-        episode = item.episode if item.episode is not None else "-"
-        lines.append(f"Season/Episode: {season}/{episode}")
+        if item.episode is None:
+            episode_text = "-"
+        elif item.episode_end is not None and item.episode_end > item.episode:
+            episode_text = f"{item.episode}-{item.episode_end}"
+        else:
+            episode_text = str(item.episode)
+        lines.append(f"Season/Episode: {season}/{episode_text}")
         if item.episode_title:
             lines.append(f"Episode title: {rich_escape(item.episode_title)}")
     return Panel("\n".join(lines), title=title_line, expand=False)
@@ -1867,7 +1876,7 @@ def _print_run_summary(
     report_path: Path | None,
     apply_report_path: Path | None = None,
 ) -> None:
-    failures = stats.errors + len(errors) + len(result.errors)
+    failures = len(errors) + len(result.errors)
     console.print("Summary:")
     console.print(f"Planned: {len(plans)}")
     console.print(f"Skipped: {stats.skipped}")
@@ -2073,43 +2082,27 @@ def _plan_items(
 
 
 def _build_command(config: BuildCommandConfig) -> str:
-    parts = [
-        "python -m plexify.cli organise",
-        f"--incoming {shlex.quote(str(config.incoming))}",
-        f"--library {shlex.quote(str(config.library))}",
-    ]
-    if config.mode != "dry-run":
-        parts.append(f"--mode {config.mode}")
-    if config.mode == "apply" and not config.copy_mode:
-        parts.append("--move")
-    if config.print_tree:
-        parts.append("--print-tree")
-    if config.extensions != DEFAULT_EXTENSIONS_LIST:
-        extensions = ",".join(config.extensions)
-        parts.append(f"--extensions {shlex.quote(extensions)}")
-    if config.min_confidence != DEFAULT_MIN_CONFIDENCE:
-        parts.append(f"--min-confidence {config.min_confidence}")
-    if config.limit is not None:
-        parts.append(f"--limit {config.limit}")
-    if config.media_type != "auto":
-        parts.append(f"--media-type {config.media_type}")
-    if config.yes:
-        parts.append("--yes")
-    if config.no_cache:
-        parts.append("--no-cache")
-    if config.cache_file is not None:
-        parts.append(f"--cache {shlex.quote(str(config.cache_file))}")
-    if config.report is not None:
-        parts.append(f"--report {shlex.quote(str(config.report))}")
-    if config.clear_cache:
-        parts.append("--clear-cache")
-    if config.on_conflict != "rename":
-        parts.append(f"--on-conflict {config.on_conflict}")
-    if config.prune_empty_dirs:
-        parts.append("--prune-empty-dirs")
-    if not config.interactive:
-        parts.append("--no-interactive")
-    return " ".join(parts)
+    return build_organise_command(
+        incoming=config.incoming,
+        library=config.library,
+        media_type=config.media_type,
+        mode=config.mode,
+        copy_mode=config.copy_mode,
+        default_extensions=DEFAULT_EXTENSIONS_LIST,
+        extensions=config.extensions,
+        default_min_confidence=DEFAULT_MIN_CONFIDENCE,
+        min_confidence=config.min_confidence,
+        limit=config.limit,
+        interactive=config.interactive,
+        print_tree=config.print_tree,
+        yes=config.yes,
+        no_cache=config.no_cache,
+        cache_file=config.cache_file,
+        clear_cache=config.clear_cache,
+        report=config.report,
+        on_conflict=config.on_conflict,
+        prune_empty_dirs=config.prune_empty_dirs,
+    )
 
 
 def _process_item(
@@ -2478,6 +2471,7 @@ def _process_item(
         trusted_auto = outcome == "auto" and not bool(selected.metadata.get("manual"))
         season = metadata.get("season") or item.season
         episode = metadata.get("episode") or item.episode
+        episode_end = metadata.get("episode_end") or item.episode_end
         episode_title = metadata.get("episode_title") or item.episode_title
         if episode is not None and int(episode) > MAX_PLAUSIBLE_EPISODE_NUMBER:
             auto_resolved = _auto_resolve_episode_from_title(item, metadata.get("id"), session_tv, episode_cache)
@@ -2531,6 +2525,7 @@ def _process_item(
                 "chosen_year": metadata.get("year"),
                 "season": season,
                 "episode": episode,
+                "episode_end": episode_end,
                 "episode_title": episode_title,
                 "manual": True,
                 "confirmed_by_user": confirmed_by_user,
@@ -2560,6 +2555,7 @@ def _process_item(
                 "chosen_year": selected.year,
                 "season": season,
                 "episode": episode,
+                "episode_end": episode_end,
                 "episode_title": episode_title,
                 "manual": False,
                 "confirmed_by_user": confirmed_by_user,
@@ -2593,6 +2589,7 @@ def _process_item(
             metadata.get("year") or selected.year,
             int(season),
             int(episode),
+            int(episode_end) if episode_end is not None else None,
             metadata.get("episode_title") or episode_title,
             item.path.suffix,
         )
@@ -2612,6 +2609,7 @@ def _process_item(
                 "year": metadata.get("year") or selected.year,
                 "season": int(season),
                 "episode": int(episode),
+                "episode_end": int(episode_end) if episode_end is not None else None,
                 "episode_title": metadata.get("episode_title") or episode_title,
             },
         )
@@ -2626,6 +2624,7 @@ def _process_item(
             year=metadata.get("year") or selected.year,
             season=int(season),
             episode=int(episode),
+            episode_end=int(episode_end) if episode_end is not None else None,
         )
         return plan, collision
 
@@ -3141,7 +3140,12 @@ def organise(
         else:
             copy_mode = True
     else:
-        copy_mode = copy
+        if move:
+            copy_mode = False
+        elif copy:
+            copy_mode = True
+        else:
+            copy_mode = True
 
     cache_path = cache or library / ".plexify" / "cache.json"
     report_path = report or library / ".plexify" / "reports" / f"{now_timestamp()}.json"
@@ -3690,7 +3694,11 @@ def undo(report: Path = typer.Option(None, help="Report path"), library: Path = 
             raise typer.Exit(code=2)
         library = inferred_library
 
-    errors = undo_report(report, library_root=library)
+    try:
+        errors = undo_report(report, library_root=library)
+    except ReportFormatError as exc:
+        console.print(f"Invalid report: {exc}")
+        raise typer.Exit(code=2)
     if errors:
         console.print("Undo completed with warnings:")
         for error in errors:

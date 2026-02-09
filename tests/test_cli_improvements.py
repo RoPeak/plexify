@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import requests
+import typer
 
 from plexify import cli
 from plexify.cache import Cache
@@ -206,3 +207,101 @@ def test_process_item_auto_resolves_implausible_episode_number(monkeypatch, tmp_
     assert plan is not None
     assert plan.metadata["season"] == 10
     assert plan.metadata["episode"] == 17
+
+
+def test_organise_dry_run_defaults_to_copy_mode(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    captured: dict[str, bool] = {}
+
+    def _fake_plan_items(*_args, **kwargs):
+        captured["copy_mode"] = kwargs["copy_mode"]
+        return [], [], cli.PlanStats()
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_plan_items", _fake_plan_items)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_print_run_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "execute_plans", lambda *_args, **_kwargs: cli.ExecutionResult([], [], []))
+
+    try:
+        cli.organise(
+            incoming=incoming,
+            library=library,
+            mode="dry-run",
+            move=False,
+            copy=False,
+            extensions=cli.DEFAULT_EXTENSIONS,
+            min_confidence=cli.DEFAULT_MIN_CONFIDENCE,
+            cache=None,
+            report=None,
+            yes=False,
+            limit=None,
+            print_tree=False,
+            interactive=False,
+            no_interactive=True,
+            media_type="auto",
+            no_cache=False,
+            clear_cache=False,
+            offline=False,
+            on_conflict="rename",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+            prune_empty_dirs=False,
+        )
+    except typer.Exit:
+        pass
+
+    assert captured["copy_mode"] is True
+
+
+def test_organise_dry_run_respects_move_flag(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    captured: dict[str, bool] = {}
+
+    def _fake_plan_items(*_args, **kwargs):
+        captured["copy_mode"] = kwargs["copy_mode"]
+        return [], [], cli.PlanStats()
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_plan_items", _fake_plan_items)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_print_run_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "execute_plans", lambda *_args, **_kwargs: cli.ExecutionResult([], [], []))
+
+    try:
+        cli.organise(
+            incoming=incoming,
+            library=library,
+            mode="dry-run",
+            move=True,
+            copy=False,
+            extensions=cli.DEFAULT_EXTENSIONS,
+            min_confidence=cli.DEFAULT_MIN_CONFIDENCE,
+            cache=None,
+            report=None,
+            yes=False,
+            limit=None,
+            print_tree=False,
+            interactive=False,
+            no_interactive=True,
+            media_type="auto",
+            no_cache=False,
+            clear_cache=False,
+            offline=False,
+            on_conflict="rename",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+            prune_empty_dirs=False,
+        )
+    except typer.Exit:
+        pass
+
+    assert captured["copy_mode"] is False

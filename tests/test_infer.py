@@ -273,6 +273,23 @@ def test_infer_tv_season_folder_does_not_become_title(tmp_path: Path) -> None:
     assert item.episode == 1
 
 
+def test_infer_tv_episode_range_from_leading_numbers(tmp_path: Path) -> None:
+    season_dir = tmp_path / "Smallville" / "Season 10"
+    season_dir.mkdir(parents=True)
+    first = season_dir / "20. Prophecy.m4v"
+    finale = season_dir / "21-22. Finale.m4v"
+    first.write_text("x", encoding="utf-8")
+    finale.write_text("x", encoding="utf-8")
+
+    item = infer_item(finale)
+    assert item.media_type == "tv"
+    assert item.title == "Smallville"
+    assert item.season == 10
+    assert item.episode == 21
+    assert item.episode_end == 22
+    assert item.episode_title == "Finale"
+
+
 def test_infer_tv_root_level_season_folder_uses_folder_name_as_show_title(tmp_path: Path) -> None:
     season_dir = tmp_path / "DC's Legends of Tomorrow Season 1"
     season_dir.mkdir(parents=True)

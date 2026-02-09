@@ -20,6 +20,7 @@ def plan_tv_show(
     year: int | None,
     season: int,
     episode: int,
+    episode_end: int | None,
     episode_title: str | None,
     ext: str,
 ) -> Path:
@@ -29,5 +30,8 @@ def plan_tv_show(
     season_folder = f"Season {season:02d}"
     episode_title = episode_title or f"Episode {episode:02d}"
     safe_episode = sanitise_name(episode_title)
-    filename = f"{safe_show} ({safe_year}) - s{season:02d}e{episode:02d} - {safe_episode}{ext}"
+    episode_token = f"s{season:02d}e{episode:02d}"
+    if episode_end is not None and episode_end > episode:
+        episode_token = f"{episode_token}-e{episode_end:02d}"
+    filename = f"{safe_show} ({safe_year}) - {episode_token} - {safe_episode}{ext}"
     return library / "TV Shows" / f"{safe_show} ({safe_year})" / season_folder / filename

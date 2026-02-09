@@ -241,3 +241,33 @@ def test_infer_tv_leading_episode_without_season_folder(tmp_path: Path) -> None:
     assert item.season == 1
     assert item.episode == 1
     assert item.episode_title == "Pilot"
+
+
+def test_infer_tv_series_folder_does_not_become_title(tmp_path: Path) -> None:
+    season_dir = tmp_path / "Gotham" / "Series 1"
+    season_dir.mkdir(parents=True)
+    episode_one = season_dir / "1. Pilot.mkv"
+    episode_two = season_dir / "2. Selina Kyle.mkv"
+    episode_one.write_text("x", encoding="utf-8")
+    episode_two.write_text("x", encoding="utf-8")
+
+    item = infer_item(episode_one)
+    assert item.media_type == "tv"
+    assert item.title == "Gotham"
+    assert item.season == 1
+    assert item.episode == 1
+
+
+def test_infer_tv_season_folder_does_not_become_title(tmp_path: Path) -> None:
+    season_dir = tmp_path / "Gotham" / "Season 1"
+    season_dir.mkdir(parents=True)
+    episode_one = season_dir / "1. Pilot.mkv"
+    episode_two = season_dir / "2. Selina Kyle.mkv"
+    episode_one.write_text("x", encoding="utf-8")
+    episode_two.write_text("x", encoding="utf-8")
+
+    item = infer_item(episode_one)
+    assert item.media_type == "tv"
+    assert item.title == "Gotham"
+    assert item.season == 1
+    assert item.episode == 1

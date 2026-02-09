@@ -290,7 +290,8 @@ def infer_item(path: Path) -> InferredItem:
             episode = leading_episode
             season = season or _extract_season_from_parts(path) or 1
             explicit_episode = True
-            title_override, year_override = _clean_parent_show_name(parent_name)
+            show_folder = _parent_show_name(path) or parent_name
+            title_override, year_override = _clean_parent_show_name(show_folder)
             has_tv_context = True
 
     sxxeyy = SXXEYY_RE.search(stem_for_tv)

@@ -508,6 +508,18 @@ def _prompt_int(prompt: str, default: int, progress: Progress | None) -> int:
             _safe_print("Please enter a whole number.", progress)
 
 
+def _prompt_int_or_control(prompt: str, default: int, progress: Progress | None) -> int | str:
+    while True:
+        value = _prompt_text(prompt, str(default), progress)
+        normalised = value.strip().lower()
+        if normalised in {"k", "q"}:
+            return normalised
+        try:
+            return int(value)
+        except ValueError:
+            _safe_print("Please enter a whole number.", progress)
+
+
 def _print_overlap_error(exc: PathOverlapError) -> None:
     issue = exc.issue
     console.print(rich_escape(issue.reason))
@@ -2350,8 +2362,20 @@ def _process_item(
         if season is None or episode is None:
             if not interactive:
                 return None, False
-            season = _prompt_int("Season", item.season or 1, progress)
-            episode = _prompt_int("Episode", item.episode or 1, progress)
+            season_prompt = _prompt_int_or_control("Season", item.season or 1, progress)
+            if season_prompt == "k":
+                _record_stat(stats, "skipped")
+                return None, False
+            if season_prompt == "q":
+                raise typer.Exit(code=0)
+            season = season_prompt
+            episode_prompt = _prompt_int_or_control("Episode", item.episode or 1, progress)
+            if episode_prompt == "k":
+                _record_stat(stats, "skipped")
+                return None, False
+            if episode_prompt == "q":
+                raise typer.Exit(code=0)
+            episode = episode_prompt
             if not episode_title:
                 episode_title = _prompt_text("Episode title (optional)", item.episode_title or "", progress)
 

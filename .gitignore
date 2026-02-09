@@ -33,3 +33,6 @@ env/
 # OS
 Thumbs.db
 Desktop.ini
+
+.tmp/
+plexify-run.txt

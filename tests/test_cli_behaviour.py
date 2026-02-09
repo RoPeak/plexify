@@ -491,6 +491,55 @@ def test_prompt_season_episode_reprompts_on_invalid_number(monkeypatch, tmp_path
     assert messages.count("Please enter a whole number.") == 2
 
 
+def test_prompt_season_allows_skip_with_k(monkeypatch, tmp_path: Path) -> None:
+    def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Show",
+            year=2010,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 123, "name": "Show", "year": 2010},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: "k")
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Show" / "Season X" / "Gag Reel.avi"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=None, episode=None, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is None
+
+
 def test_process_item_tv_saves_cache_once_per_item(monkeypatch, tmp_path: Path) -> None:
     class CacheSpy(Cache):
         def __init__(self, path: Path) -> None:

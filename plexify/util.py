@@ -231,6 +231,26 @@ def now_timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
+def _natural_component_key(value: str) -> tuple[tuple[int, int | str], ...]:
+    parts: list[tuple[int, int | str]] = []
+    for token in re.split(r"(\d+)", value.casefold()):
+        if not token:
+            continue
+        if token.isdigit():
+            parts.append((0, int(token)))
+        else:
+            parts.append((1, token))
+    return tuple(parts)
+
+
+def _natural_path_key(path: Path, root: Path) -> tuple[tuple[tuple[int, int | str], ...], ...]:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        rel = path
+    return tuple(_natural_component_key(part) for part in rel.parts)
+
+
 def iter_video_files(root: Path, extensions: Iterable[str]) -> list[Path]:
     exts = {ext.lower().lstrip(".") for ext in extensions}
     results: list[Path] = []
@@ -241,7 +261,7 @@ def iter_video_files(root: Path, extensions: Iterable[str]) -> list[Path]:
             suffix = Path(name).suffix.lower().lstrip(".")
             if suffix in exts:
                 results.append(Path(base) / name)
-    return results
+    return sorted(results, key=lambda path: _natural_path_key(path, root))
 
 
 def unique_path(path: Path) -> Path:

@@ -22,6 +22,32 @@ def test_tvmaze_parse_episode_results():
     assert eps[0].number == 2
 
 
+def test_tvmaze_parse_show_results_ignores_invalid_rows() -> None:
+    payload = [
+        {"show": {"id": 1, "name": "Valid", "premiered": "2020-01-01"}},
+        {"show": {"id": "x", "name": "Bad Id"}},
+        {"show": {"id": 3, "name": ""}},
+        {"show": {}},
+        {},
+    ]
+    shows = tvmaze.parse_show_results(payload)
+    assert len(shows) == 1
+    assert shows[0].id == 1
+
+
+def test_tvmaze_parse_episode_results_ignores_invalid_rows() -> None:
+    payload = [
+        {"season": 1, "number": 2, "name": "Pilot"},
+        {"season": "1", "number": 3, "name": "Bad Season"},
+        {"season": 1, "number": None, "name": "Bad Episode"},
+        {"season": 1, "number": 4, "name": ""},
+        {},
+    ]
+    episodes = tvmaze.parse_episode_results(payload)
+    assert len(episodes) == 1
+    assert episodes[0].number == 2
+
+
 def test_wikidata_parse_search_results():
     payload = _fixture("tests/fixtures/wikidata_search.json")
     results = wikidata.parse_search_results(payload)

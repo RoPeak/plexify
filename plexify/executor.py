@@ -4,7 +4,10 @@ import shutil
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .logging_config import get_logger
 from .util import ExecutionResult, MovePlan, ensure_dir, unique_path
+
+logger = get_logger(__name__)
 
 
 def execute_plans(
@@ -54,6 +57,7 @@ def execute_plans(
                 shutil.move(plan.source, destination)
             moved.append(MovePlan(plan.source, destination, plan.mode, plan.media_type, plan.metadata))
         except Exception as exc:  # noqa: BLE001
+            logger.exception("plan_execution_failed", extra={"source": plan.source, "destination": plan.destination})
             errors.append(f"{plan.source}: {exc}")
         completed += 1
         if on_progress:

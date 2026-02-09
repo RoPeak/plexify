@@ -171,7 +171,13 @@ def parse_entity(qid: str, payload: dict[str, Any]) -> WikidataFilm:
     return WikidataFilm(qid=qid, title=str(label), year=_extract_year(entity), is_film=_is_film(entity))
 
 
-def search(query: str, session: requests.Session | None = None, limit: int = 10) -> list[WikidataCandidate]:
+def search(
+    query: str,
+    session: requests.Session | None = None,
+    limit: int = 10,
+    *,
+    raise_on_error: bool = False,
+) -> list[WikidataCandidate]:
     if not _available:
         return []
     session = session or _session()
@@ -194,6 +200,8 @@ def search(query: str, session: requests.Session | None = None, limit: int = 10)
         resp.raise_for_status()
     except requests.RequestException:
         _set_unavailable("Wikidata lookups are unavailable (network error).")
+        if raise_on_error:
+            raise
         return []
     _rate_limit()
     return parse_search_results(resp.json())

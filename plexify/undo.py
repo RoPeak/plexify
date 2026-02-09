@@ -3,16 +3,33 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from .logging_config import get_logger
 from .report import read_report
 
+logger = get_logger(__name__)
 
-def undo_report(path: Path) -> list[str]:
+def _is_within_root(path: Path, root: Path) -> bool:
+    try:
+        return path.resolve(strict=False).is_relative_to(root.resolve(strict=False))
+    except Exception:
+        return False
+
+
+def undo_report(path: Path, library_root: Path | None = None) -> list[str]:
     payload = read_report(path)
     copy_mode = bool(payload.get("copy"))
     errors: list[str] = []
+    root = library_root.resolve(strict=False) if library_root is not None else None
     for op in payload.get("operations", []):
         src = Path(op.get("source"))
         dest = Path(op.get("destination"))
+        if root is not None:
+            if not src.is_absolute() or not dest.is_absolute():
+                errors.append(f"{dest}: blocked non-absolute report path")
+                continue
+            if not _is_within_root(src, root) or not _is_within_root(dest, root):
+                errors.append(f"{dest}: blocked path outside library root ({root})")
+                continue
         try:
             if copy_mode:
                 if not dest.exists():
@@ -29,5 +46,6 @@ def undo_report(path: Path) -> list[str]:
                 src.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(dest, src)
         except Exception as exc:  # noqa: BLE001
+            logger.exception("undo_operation_failed", extra={"source": src, "destination": dest})
             errors.append(f"{dest}: {exc}")
     return errors

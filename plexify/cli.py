@@ -50,7 +50,8 @@ from .util import (
 )
 
 app = typer.Typer(add_completion=True)
-console = Console()
+ASCII_UI_ENABLED = os.getenv("PLEXIFY_ASCII_UI", "").strip().lower() in {"1", "true", "yes", "on"}
+console = Console(safe_box=ASCII_UI_ENABLED)
 logger = get_logger(__name__)
 COMPLETION_ENABLED = True
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
@@ -203,6 +204,21 @@ def _parse_extensions(extensions: str) -> list[str]:
 
 def _safe_print(message: str, progress: Progress | None = None) -> None:
     _console_for(progress).print(message)
+
+
+def _tv_search_cache_key(query: str, year: int | None) -> str:
+    year_text = str(year) if year is not None else "unknown"
+    return f"{query.strip().casefold()}|{year_text}"
+
+
+def _cache_entry_confirmed_or_auto(entry: dict[str, Any] | None) -> bool:
+    if not entry:
+        return False
+    if bool(entry.get("confirmed_by_user")):
+        return True
+    if entry.get("selection_mode") == "auto" and not bool(entry.get("manual")):
+        return True
+    return False
 
 
 def _media_override_key(path: Path, incoming_root: Path | None) -> str | None:
@@ -827,6 +843,8 @@ def _tv_candidates(
     progress: Progress | None = None,
     limit: int = 5,
     offline: bool = False,
+    interactive: bool = False,
+    search_cache: dict[str, list[tvmaze.TVMazeShow]] | None = None,
 ) -> CandidatePage:
     path_key = cache_key or item.title
     reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
@@ -852,7 +870,7 @@ def _tv_candidates(
     elapsed = 0.0
     total_time = None
     if cached:
-        if not cached.get("confirmed_by_user"):
+        if not _cache_entry_confirmed_or_auto(cached):
             cached = None
         elif not cached.get("manual") and not _cache_entry_compatible(item.year, cached.get("premiered")):
             cached = None
@@ -933,48 +951,57 @@ def _tv_candidates(
 
     if raw_results is None:
         query = search_query or make_search_query(item.title) or item.title
-        log_event(
-            logger,
-            "candidate_search_started",
-            source="TVMaze",
-            query=query,
-            media_type=item.media_type,
-            path=item.path,
-        )
-        _safe_print(f"Searching TVMaze for: {rich_escape(query)}", progress)
-        total_started = time.monotonic()
-        started = total_started
-        raw_results = tvmaze.search_shows(query, session=session)
-        elapsed = time.monotonic() - started
-        total_time = time.monotonic() - total_started
-        if not raw_results:
-            retry_query = _normalize_tv_retry_query(search_query or item.title)
-            if retry_query and retry_query != query:
-                _safe_print(f"Retrying TVMaze with normalized query: {rich_escape(retry_query)}", progress)
-                started_retry = time.monotonic()
-                raw_results = tvmaze.search_shows(retry_query, session=session)
-                elapsed += time.monotonic() - started_retry
-                total_time = time.monotonic() - total_started
-        log_event(
-            logger,
-            "candidate_search_finished",
-            source="TVMaze",
-            query=query,
-            media_type=item.media_type,
-            path=item.path,
-            result_count=len(raw_results),
-            duration_ms=int(total_time * 1000),
-        )
-        if not raw_results:
-            _safe_print(f"No candidates (api={elapsed:.2f}s).", progress)
-            return CandidatePage(
-                candidates=[],
-                raw_results=raw_results,
-                next_offset=0,
-                has_more=False,
-                search_time=elapsed,
-                total_time=total_time,
+        cache_lookup_key = _tv_search_cache_key(query, item.year)
+        if search_cache is not None and cache_lookup_key in search_cache:
+            raw_results = search_cache[cache_lookup_key]
+            elapsed = 0.0
+            total_time = 0.0
+        else:
+            log_event(
+                logger,
+                "candidate_search_started",
+                source="TVMaze",
+                query=query,
+                media_type=item.media_type,
+                path=item.path,
             )
+            _safe_print(f"Searching TVMaze for: {rich_escape(query)}", progress)
+            total_started = time.monotonic()
+            started = total_started
+            raw_results = tvmaze.search_shows(query, session=session, raise_on_error=interactive)
+            elapsed = time.monotonic() - started
+            total_time = time.monotonic() - total_started
+            if not raw_results:
+                retry_query = _normalize_tv_retry_query(search_query or item.title)
+                if retry_query and retry_query != query:
+                    _safe_print(f"Retrying TVMaze with normalized query: {rich_escape(retry_query)}", progress)
+                    started_retry = time.monotonic()
+                    raw_results = tvmaze.search_shows(retry_query, session=session, raise_on_error=interactive)
+                    elapsed += time.monotonic() - started_retry
+                    total_time = time.monotonic() - total_started
+                    cache_lookup_key = _tv_search_cache_key(retry_query, item.year)
+            log_event(
+                logger,
+                "candidate_search_finished",
+                source="TVMaze",
+                query=query,
+                media_type=item.media_type,
+                path=item.path,
+                result_count=len(raw_results),
+                duration_ms=int(total_time * 1000),
+            )
+            if search_cache is not None:
+                search_cache[cache_lookup_key] = raw_results
+            if not raw_results:
+                _safe_print(f"No candidates (api={elapsed:.2f}s).", progress)
+                return CandidatePage(
+                    candidates=[],
+                    raw_results=raw_results,
+                    next_offset=0,
+                    has_more=False,
+                    search_time=elapsed,
+                    total_time=total_time,
+                )
     page = raw_results[offset : offset + limit]
     for show in page:
         results.append(_tv_candidate_from_show(item, show))
@@ -1098,6 +1125,7 @@ def _movie_candidates(
     progress: Progress | None = None,
     limit: int = 5,
     offline: bool = False,
+    interactive: bool = False,
 ) -> CandidatePage:
     path_key = cache_key or item.title
     reusable_key = movie_cache_key(item.title, item.year)
@@ -1114,7 +1142,7 @@ def _movie_candidates(
     fetch_time = 0.0
     total_time = None
     if cached and not cached.get("manual"):
-        if not cached.get("confirmed_by_user"):
+        if not _cache_entry_confirmed_or_auto(cached):
             cached = None
         elif not _cache_entry_compatible(item.year, cached.get("year")):
             cached = None
@@ -1167,7 +1195,7 @@ def _movie_candidates(
         _safe_print(f"Searching Wikidata for: {rich_escape(query)}", progress)
         total_started = time.monotonic()
         started = total_started
-        raw_results = wikidata.search(query, session=session, limit=10)
+        raw_results = wikidata.search(query, session=session, limit=10, raise_on_error=interactive)
         elapsed = time.monotonic() - started
         if not raw_results:
             total_time = time.monotonic() - total_started
@@ -1750,6 +1778,47 @@ def _prune_empty_dirs(
             break
 
 
+def _preview_group_key(plan: MovePlan) -> str:
+    if plan.media_type == "tv":
+        show = str(plan.metadata.get("show") or "").strip().casefold()
+        if show:
+            return f"tv:{show}"
+    if plan.media_type == "movie":
+        title = str(plan.metadata.get("title") or "").strip().casefold()
+        if title:
+            return f"movie:{title}"
+    return f"path:{str(plan.destination.parent).casefold()}"
+
+
+def _select_preview_plans(plans: list[MovePlan], limit: int = 5) -> list[MovePlan]:
+    if len(plans) <= limit:
+        return plans
+    selected: list[MovePlan] = []
+    seen_groups: set[str] = set()
+    for plan in plans:
+        group = _preview_group_key(plan)
+        if group in seen_groups:
+            continue
+        selected.append(plan)
+        seen_groups.add(group)
+        if len(selected) >= limit:
+            return selected
+    if len(seen_groups) <= 1:
+        return plans[:limit]
+    for plan in plans:
+        if plan in selected:
+            continue
+        selected.append(plan)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _preview_spans_multiple_groups(plans: list[MovePlan]) -> bool:
+    groups = {_preview_group_key(plan) for plan in plans}
+    return len(groups) > 1
+
+
 def _print_run_summary(
     *,
     stats: PlanStats,
@@ -1810,151 +1879,153 @@ def _plan_items(
     history: list[HistoryEntry] = []
     episode_cache = EpisodeCache()
     media_type_overrides: dict[str, str] = {}
+    tv_search_cache: dict[str, list[tvmaze.TVMazeShow]] = {}
 
     with Progress(
         TextColumn("{task.completed}/{task.total} - {task.description}"),
         disable=interactive or not sys.stdout.isatty(),
     ) as progress:
         task = progress.add_task("Planning files...", total=len(files))
-        session_tv = tvmaze.create_session()
-        session_wd = wikidata.create_session()
-        total = len(files)
-        index = 0
-        while index < len(files):
-            path = files[index]
-            progress.update(task, completed=min(index + 1, total), description=f"Planning: {rich_escape(path.name)}")
-            try:
-                item = infer_item(path)
-                item, override_key = _resolve_media_type_override(item, cache_store, incoming, media_type_overrides)
-                log_event(
-                    logger,
-                    "file_inferred",
-                    level=10,
-                    path=path,
-                    media_type=item.media_type,
-                    title=item.title,
-                    year=item.year,
-                    season=item.season,
-                    episode=item.episode,
-                )
-                if media_type_filter and item.media_type != media_type_filter:
-                    index += 1
-                    continue
-                _safe_print("", progress)
-                _console_for(progress).rule()
-                _safe_print(_file_panel(index + 1, total, item, incoming), progress)
-                cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
-                cache_snapshots: list[CacheSnapshot] = []
-                if override_key:
-                    cache_snapshots.append(CacheSnapshot("show", override_key, cache_store.get_show(override_key)))
-                if item.media_type == "tv":
-                    reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
-                    folder_show_key = tv_show_folder_cache_key(item.path, incoming)
-                    keys = [cache_key]
-                    if reusable_show_key:
-                        keys.append(reusable_show_key)
-                    if folder_show_key:
-                        keys.append(folder_show_key)
-                    if item.season is not None and item.episode is not None:
-                        keys.append(tv_episode_cache_key(item.title, item.year, item.season, item.episode))
-                    for key in keys:
-                        cache_snapshots.append(CacheSnapshot("show", key, cache_store.get_show(key)))
-                else:
-                    reusable_movie_key = movie_cache_key(item.title, item.year)
-                    for key in [cache_key, reusable_movie_key]:
-                        cache_snapshots.append(CacheSnapshot("movie", key, cache_store.get_movie(key)))
-                stats_snapshot = _snapshot_stats(stats)
-                errors_len = len(errors)
-                plan, collision = _process_item(
-                    item=item,
-                    library=library,
-                    cache=cache_store,
-                    mode=mode,
-                    copy_mode=copy_mode,
-                    interactive=interactive,
-                    auto_accept=auto_accept,
-                    min_confidence=min_confidence,
-                    session_tv=session_tv,
-                    session_wd=session_wd,
-                    episode_cache=episode_cache,
-                    progress=progress,
-                    show_cache=show_cache,
-                    stats=stats,
-                    incoming_root=incoming,
-                    planned=planned,
-                    on_conflict=on_conflict,
-                    allow_back=bool(history),
-                    offline=offline,
-                    media_type_overrides=media_type_overrides,
-                )
-                history.append(
-                    HistoryEntry(
-                        index=index,
-                        plan=plan,
-                        collision=collision,
-                        cache_snapshots=cache_snapshots,
-                        stats_snapshot=stats_snapshot,
-                        errors_len=errors_len,
+        with tvmaze.create_session() as session_tv, wikidata.create_session() as session_wd:
+            total = len(files)
+            index = 0
+            while index < len(files):
+                path = files[index]
+                progress.update(task, completed=min(index + 1, total), description=f"Planning: {rich_escape(path.name)}")
+                try:
+                    item = infer_item(path)
+                    item, override_key = _resolve_media_type_override(item, cache_store, incoming, media_type_overrides)
+                    log_event(
+                        logger,
+                        "file_inferred",
+                        level=10,
+                        path=path,
+                        media_type=item.media_type,
+                        title=item.title,
+                        year=item.year,
+                        season=item.season,
+                        episode=item.episode,
                     )
-                )
-                if plan:
-                    plans.append(plan)
-                    if collision:
-                        collisions += 1
-                index += 1
-            except BackRequested:
-                if not history:
-                    _safe_print("No previous decision to return to.", progress)
-                    continue
-                entry = history.pop()
-                if entry.plan:
-                    if plans and plans[-1] == entry.plan:
-                        plans.pop()
+                    if media_type_filter and item.media_type != media_type_filter:
+                        index += 1
+                        continue
+                    _safe_print("", progress)
+                    _console_for(progress).rule()
+                    _safe_print(_file_panel(index + 1, total, item, incoming), progress)
+                    cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
+                    cache_snapshots: list[CacheSnapshot] = []
+                    if override_key:
+                        cache_snapshots.append(CacheSnapshot("show", override_key, cache_store.get_show(override_key)))
+                    if item.media_type == "tv":
+                        reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
+                        folder_show_key = tv_show_folder_cache_key(item.path, incoming)
+                        keys = [cache_key]
+                        if reusable_show_key:
+                            keys.append(reusable_show_key)
+                        if folder_show_key:
+                            keys.append(folder_show_key)
+                        if item.season is not None and item.episode is not None:
+                            keys.append(tv_episode_cache_key(item.title, item.year, item.season, item.episode))
+                        for key in keys:
+                            cache_snapshots.append(CacheSnapshot("show", key, cache_store.get_show(key)))
                     else:
-                        try:
-                            plans.remove(entry.plan)
-                        except ValueError:
-                            pass
-                    key = str(entry.plan.destination).lower()
-                    if key in planned:
-                        if planned[key] <= 1:
-                            planned.pop(key, None)
+                        reusable_movie_key = movie_cache_key(item.title, item.year)
+                        for key in [cache_key, reusable_movie_key]:
+                            cache_snapshots.append(CacheSnapshot("movie", key, cache_store.get_movie(key)))
+                    stats_snapshot = _snapshot_stats(stats)
+                    errors_len = len(errors)
+                    plan, collision = _process_item(
+                        item=item,
+                        library=library,
+                        cache=cache_store,
+                        mode=mode,
+                        copy_mode=copy_mode,
+                        interactive=interactive,
+                        auto_accept=auto_accept,
+                        min_confidence=min_confidence,
+                        session_tv=session_tv,
+                        session_wd=session_wd,
+                        episode_cache=episode_cache,
+                        progress=progress,
+                        show_cache=show_cache,
+                        stats=stats,
+                        incoming_root=incoming,
+                        planned=planned,
+                        on_conflict=on_conflict,
+                        allow_back=bool(history),
+                        offline=offline,
+                        media_type_overrides=media_type_overrides,
+                        tv_search_cache=tv_search_cache,
+                    )
+                    history.append(
+                        HistoryEntry(
+                            index=index,
+                            plan=plan,
+                            collision=collision,
+                            cache_snapshots=cache_snapshots,
+                            stats_snapshot=stats_snapshot,
+                            errors_len=errors_len,
+                        )
+                    )
+                    if plan:
+                        plans.append(plan)
+                        if collision:
+                            collisions += 1
+                    index += 1
+                except BackRequested:
+                    if not history:
+                        _safe_print("No previous decision to return to.", progress)
+                        continue
+                    entry = history.pop()
+                    if entry.plan:
+                        if plans and plans[-1] == entry.plan:
+                            plans.pop()
                         else:
-                            planned[key] -= 1
-                if entry.collision and collisions > 0:
-                    collisions -= 1
-                for snapshot in entry.cache_snapshots:
-                    if snapshot.section == "show":
-                        if snapshot.previous is None:
-                            cache_store.delete_show(snapshot.key)
+                            try:
+                                plans.remove(entry.plan)
+                            except ValueError:
+                                pass
+                        key = str(entry.plan.destination).lower()
+                        if key in planned:
+                            if planned[key] <= 1:
+                                planned.pop(key, None)
+                            else:
+                                planned[key] -= 1
+                    if entry.collision and collisions > 0:
+                        collisions -= 1
+                    for snapshot in entry.cache_snapshots:
+                        if snapshot.section == "show":
+                            if snapshot.previous is None:
+                                cache_store.delete_show(snapshot.key)
+                            else:
+                                cache_store.set_show(snapshot.key, snapshot.previous)
                         else:
-                            cache_store.set_show(snapshot.key, snapshot.previous)
-                    else:
-                        if snapshot.previous is None:
-                            cache_store.delete_movie(snapshot.key)
-                        else:
-                            cache_store.set_movie(snapshot.key, snapshot.previous)
-                cache_store.save()
-                stats.auto_matched = entry.stats_snapshot.auto_matched
-                stats.user_confirmed = entry.stats_snapshot.user_confirmed
-                stats.manual = entry.stats_snapshot.manual
-                stats.skipped = entry.stats_snapshot.skipped
-                stats.errors = entry.stats_snapshot.errors
-                stats.cache_hits = entry.stats_snapshot.cache_hits
-                stats.elapsed = entry.stats_snapshot.elapsed
-                del errors[entry.errors_len:]
-                index = entry.index
-                back_path = files[index]
-                progress.update(
-                    task,
-                    completed=min(index + 1, total),
-                    description=f"Planning: {rich_escape(back_path.name)}",
-                )
-                _safe_print("Rewound to previous file.", progress)
-            except Exception as exc:  # noqa: BLE001
-                stats.errors += 1
-                errors.append(f"{path}: {exc}")
-                index += 1
+                            if snapshot.previous is None:
+                                cache_store.delete_movie(snapshot.key)
+                            else:
+                                cache_store.set_movie(snapshot.key, snapshot.previous)
+                    cache_store.save()
+                    stats.auto_matched = entry.stats_snapshot.auto_matched
+                    stats.user_confirmed = entry.stats_snapshot.user_confirmed
+                    stats.manual = entry.stats_snapshot.manual
+                    stats.skipped = entry.stats_snapshot.skipped
+                    stats.errors = entry.stats_snapshot.errors
+                    stats.cache_hits = entry.stats_snapshot.cache_hits
+                    stats.elapsed = entry.stats_snapshot.elapsed
+                    del errors[entry.errors_len:]
+                    index = entry.index
+                    back_path = files[index]
+                    progress.update(
+                        task,
+                        completed=min(index + 1, total),
+                        description=f"Planning: {rich_escape(back_path.name)}",
+                    )
+                    _safe_print("Rewound to previous file.", progress)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("planning_failed", extra={"path": path})
+                    stats.errors += 1
+                    errors.append(f"{path}: {exc}")
+                    index += 1
 
     stats.elapsed = time.monotonic() - started
     if collisions:
@@ -2023,6 +2094,7 @@ def _process_item(
     allow_back: bool = False,
     offline: bool = False,
     media_type_overrides: dict[str, str] | None = None,
+    tv_search_cache: dict[str, list[tvmaze.TVMazeShow]] | None = None,
 ) -> tuple[MovePlan | None, bool]:
     item, override_key = _resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
     folder_show_key = tv_show_folder_cache_key(item.path, incoming_root) if item.media_type == "tv" else None
@@ -2062,6 +2134,8 @@ def _process_item(
                 search_query=search_query,
                 progress=progress,
                 offline=offline,
+                interactive=interactive,
+                search_cache=tv_search_cache,
             ),
             interactive,
             progress,
@@ -2112,6 +2186,7 @@ def _process_item(
                         allow_back=allow_back,
                         offline=offline,
                         media_type_overrides=media_type_overrides,
+                        tv_search_cache=tv_search_cache,
                     )
                 _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
                 empty_choice = _select_candidate(
@@ -2142,6 +2217,8 @@ def _process_item(
                             search_query=search_query,
                             progress=progress,
                             offline=offline,
+                            interactive=interactive,
+                            search_cache=tv_search_cache,
                         ),
                         interactive,
                         progress,
@@ -2176,6 +2253,8 @@ def _process_item(
                                 search_query=search_query,
                                 progress=progress,
                                 offline=offline,
+                                interactive=interactive,
+                                search_cache=tv_search_cache,
                             ),
                             interactive,
                             progress,
@@ -2254,6 +2333,8 @@ def _process_item(
                         search_query=search_query,
                         progress=progress,
                         offline=offline,
+                        interactive=interactive,
+                        search_cache=tv_search_cache,
                     ),
                     interactive,
                     progress,
@@ -2286,6 +2367,8 @@ def _process_item(
                             search_query=search_query,
                             progress=progress,
                             offline=offline,
+                            interactive=interactive,
+                            search_cache=tv_search_cache,
                         ),
                         interactive,
                         progress,
@@ -2314,6 +2397,8 @@ def _process_item(
                         search_query=search_query,
                         progress=progress,
                         offline=offline,
+                        interactive=interactive,
+                        search_cache=tv_search_cache,
                     ),
                     interactive,
                     progress,
@@ -2350,6 +2435,7 @@ def _process_item(
         _maybe_fetch_episode_title(item, selected, session_tv, episode_cache, bump_confidence=False)
         metadata = selected.metadata
         confirmed_by_user = outcome in {"confirmed", "manual"}
+        trusted_auto = outcome == "auto" and not bool(selected.metadata.get("manual"))
         season = metadata.get("season") or item.season
         episode = metadata.get("episode") or item.episode
         episode_title = metadata.get("episode_title") or item.episode_title
@@ -2392,6 +2478,7 @@ def _process_item(
                 "episode_title": episode_title,
                 "manual": True,
                 "confirmed_by_user": confirmed_by_user,
+                "selection_mode": outcome,
                 "created_at": now_timestamp(),
                 "source": "Manual",
             }
@@ -2404,6 +2491,7 @@ def _process_item(
                 "season": season,
                 "manual": True,
                 "confirmed_by_user": confirmed_by_user,
+                "selection_mode": outcome,
                 "created_at": now_timestamp(),
                 "source": "Manual",
             }
@@ -2419,6 +2507,7 @@ def _process_item(
                 "episode_title": episode_title,
                 "manual": False,
                 "confirmed_by_user": confirmed_by_user,
+                "selection_mode": outcome,
                 "created_at": now_timestamp(),
                 "source": selected.source,
             }
@@ -2430,13 +2519,14 @@ def _process_item(
                 "chosen_year": selected.year,
                 "manual": False,
                 "confirmed_by_user": confirmed_by_user,
+                "selection_mode": outcome,
                 "created_at": now_timestamp(),
                 "source": selected.source,
             }
         cache.set_show(cache_key, entry)
         if reusable_show_key:
             cache.set_show(reusable_show_key, show_entry)
-        if folder_show_key and confirmed_by_user:
+        if folder_show_key and (confirmed_by_user or trusted_auto):
             cache.set_show(folder_show_key, show_entry)
         if reusable_episode_key:
             cache.set_show(reusable_episode_key, entry)
@@ -2499,6 +2589,7 @@ def _process_item(
             search_query=search_query,
             progress=progress,
             offline=offline,
+            interactive=interactive,
         ),
         interactive,
         progress,
@@ -2551,6 +2642,7 @@ def _process_item(
                     allow_back=allow_back,
                     offline=offline,
                     media_type_overrides=media_type_overrides,
+                    tv_search_cache=tv_search_cache,
                 )
             _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
             empty_choice = _select_candidate(
@@ -2580,6 +2672,7 @@ def _process_item(
                         search_query=search_query,
                         progress=progress,
                         offline=offline,
+                        interactive=interactive,
                     ),
                     interactive,
                     progress,
@@ -2613,6 +2706,7 @@ def _process_item(
                             search_query=search_query,
                             progress=progress,
                             offline=offline,
+                            interactive=interactive,
                         ),
                         interactive,
                         progress,
@@ -2647,6 +2741,7 @@ def _process_item(
                             search_query=search_query,
                             progress=progress,
                             offline=offline,
+                            interactive=interactive,
                         ),
                         interactive,
                         progress,
@@ -2724,6 +2819,7 @@ def _process_item(
                     search_query=search_query,
                     progress=progress,
                     offline=offline,
+                    interactive=interactive,
                 ),
                 interactive,
                 progress,
@@ -2757,6 +2853,7 @@ def _process_item(
                         search_query=search_query,
                         progress=progress,
                         offline=offline,
+                        interactive=interactive,
                     ),
                     interactive,
                     progress,
@@ -2782,6 +2879,7 @@ def _process_item(
                     search_query=search_query,
                     progress=progress,
                     offline=offline,
+                    interactive=interactive,
                 ),
                 interactive,
                 progress,
@@ -2814,6 +2912,7 @@ def _process_item(
                         search_query=search_query,
                         progress=progress,
                         offline=offline,
+                        interactive=interactive,
                     ),
                     interactive,
                     progress,
@@ -2857,6 +2956,7 @@ def _process_item(
             "chosen_year": metadata.get("year"),
             "manual": True,
             "confirmed_by_user": confirmed_by_user,
+            "selection_mode": outcome,
             "created_at": now_timestamp(),
             "source": "Manual",
         }
@@ -2869,6 +2969,7 @@ def _process_item(
             "chosen_year": selected.year,
             "manual": False,
             "confirmed_by_user": confirmed_by_user,
+            "selection_mode": outcome,
             "created_at": now_timestamp(),
             "source": selected.source,
         }
@@ -3020,9 +3121,12 @@ def organise(
         console.print(f"Planned items: {len(plans)}")
         console.print(f"Skipped: {stats.skipped}")
         console.print(f"Errors: {stats.errors + len(errors)}")
-        preview = plans[:5]
+        preview = _select_preview_plans(plans, limit=5)
         if preview:
-            console.print("Preview:")
+            if _preview_spans_multiple_groups(preview):
+                console.print("Preview (sampled across shows/titles):")
+            else:
+                console.print("Preview:")
             for plan in preview:
                 console.print(f"FROM: {format_path(plan.source)}")
                 console.print(f"TO:   {format_path(plan.destination)}")
@@ -3227,7 +3331,10 @@ def music(
         console.print("Library path must be a directory.")
         raise typer.Exit(code=2)
     if not library.exists():
-        if _confirm("Library folder does not exist. Create it? [Y/n]", True, None, show_default=False):
+        if not sys.stdin.isatty():
+            library.mkdir(parents=True, exist_ok=True)
+            console.print(f"Library folder created: {format_path(library)}")
+        elif _confirm("Library folder does not exist. Create it? [Y/n]", True, None, show_default=False):
             library.mkdir(parents=True, exist_ok=True)
         else:
             console.print("Cancelled. No changes were made.")
@@ -3494,6 +3601,17 @@ def main(ctx: typer.Context) -> None:
         wizard(log_level="WARNING", log_format="text", log_file=None)
 
 
+def _infer_library_root_from_report(report: Path) -> Path | None:
+    report_resolved = report.resolve(strict=False)
+    parent = report_resolved.parent
+    if parent.name != "reports":
+        return None
+    plexify_dir = parent.parent
+    if plexify_dir.name != ".plexify":
+        return None
+    return plexify_dir.parent
+
+
 @app.command()
 def undo(report: Path = typer.Option(None, help="Report path"), library: Path = typer.Option(None, help="Library root")) -> None:
     if report is None:
@@ -3509,8 +3627,14 @@ def undo(report: Path = typer.Option(None, help="Report path"), library: Path = 
             console.print("No reports found.")
             raise typer.Exit(code=2)
         report = reports[0]
+    elif library is None:
+        inferred_library = _infer_library_root_from_report(report)
+        if inferred_library is None:
+            console.print("Provide --library when using --report outside '.plexify/reports'.")
+            raise typer.Exit(code=2)
+        library = inferred_library
 
-    errors = undo_report(report)
+    errors = undo_report(report, library_root=library)
     if errors:
         console.print("Undo completed with warnings:")
         for error in errors:

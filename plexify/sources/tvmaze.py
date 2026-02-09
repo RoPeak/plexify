@@ -75,10 +75,14 @@ def parse_show_results(payload: list[dict[str, Any]]) -> list[TVMazeShow]:
         show = item.get("show") or {}
         if not show:
             continue
+        show_id = show.get("id")
+        name = show.get("name")
+        if not isinstance(show_id, int) or not isinstance(name, str) or not name.strip():
+            continue
         results.append(
             TVMazeShow(
-                id=int(show.get("id")),
-                name=str(show.get("name")),
+                id=show_id,
+                name=name,
                 premiered=show.get("premiered"),
             )
         )
@@ -90,11 +94,16 @@ def parse_episode_results(payload: list[dict[str, Any]]) -> list[TVMazeEpisode]:
     for item in payload:
         if not item:
             continue
+        season = item.get("season")
+        number = item.get("number")
+        name = item.get("name")
+        if not isinstance(season, int) or not isinstance(number, int) or not isinstance(name, str) or not name.strip():
+            continue
         results.append(
             TVMazeEpisode(
-                season=int(item.get("season")),
-                number=int(item.get("number")),
-                name=str(item.get("name")),
+                season=season,
+                number=number,
+                name=name,
             )
         )
     return results
@@ -135,7 +144,12 @@ def _parse_creator(payload: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def search_shows(query: str, session: requests.Session | None = None) -> list[TVMazeShow]:
+def search_shows(
+    query: str,
+    session: requests.Session | None = None,
+    *,
+    raise_on_error: bool = False,
+) -> list[TVMazeShow]:
     if not _available:
         return []
     session = session or _session()
@@ -147,6 +161,8 @@ def search_shows(query: str, session: requests.Session | None = None) -> list[TV
         resp.raise_for_status()
     except requests.RequestException:
         _set_unavailable("TVMaze lookups are unavailable (network error).")
+        if raise_on_error:
+            raise
         return []
     _rate_limit()
     return parse_show_results(resp.json())

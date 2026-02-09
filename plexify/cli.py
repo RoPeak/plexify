@@ -854,10 +854,11 @@ def _tv_candidates(
     search_cache: dict[str, list[tvmaze.TVMazeShow]] | None = None,
 ) -> CandidatePage:
     path_key = cache_key or item.title
-    reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
+    reusable_safe = _reusable_tv_cache_safe(item)
+    reusable_show_key = tv_show_cache_key(item.title, item.year) if reusable_safe else None
     reusable_episode_key = None
     folder_show_key = tv_show_folder_cache_key(item.path, incoming_root)
-    if item.season is not None and item.episode is not None:
+    if reusable_safe and item.season is not None and item.episode is not None:
         reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
     cached = None
     cached_key = None
@@ -1954,14 +1955,15 @@ def _plan_items(
                     if override_key:
                         cache_snapshots.append(CacheSnapshot("show", override_key, cache_store.get_show(override_key)))
                     if item.media_type == "tv":
-                        reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
+                        reusable_safe = _reusable_tv_cache_safe(item)
+                        reusable_show_key = tv_show_cache_key(item.title, item.year) if reusable_safe else None
                         folder_show_key = tv_show_folder_cache_key(item.path, incoming)
                         keys = [cache_key]
                         if reusable_show_key:
                             keys.append(reusable_show_key)
                         if folder_show_key:
                             keys.append(folder_show_key)
-                        if item.season is not None and item.episode is not None:
+                        if reusable_safe and item.season is not None and item.episode is not None:
                             keys.append(tv_episode_cache_key(item.title, item.year, item.season, item.episode))
                         for key in keys:
                             cache_snapshots.append(CacheSnapshot("show", key, cache_store.get_show(key)))
@@ -2146,9 +2148,10 @@ def _process_item(
     reusable_show_key = None
     reusable_episode_key = None
     if item.media_type == "tv":
-        if _reusable_tv_cache_safe(item):
+        reusable_safe = _reusable_tv_cache_safe(item)
+        if reusable_safe:
             reusable_show_key = tv_show_cache_key(item.title, item.year)
-        if item.season is not None and item.episode is not None:
+        if reusable_safe and item.season is not None and item.episode is not None:
             reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
     else:
         reusable_movie_key = movie_cache_key(item.title, item.year)

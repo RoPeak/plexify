@@ -48,11 +48,22 @@ class InferredItem:
     episode_title: Optional[str] = None
 
 
+def _is_generic_tv_folder_name(name: str) -> bool:
+    normalized = re.sub(r"[_\s]+", " ", name.strip().lower())
+    return normalized in GENERIC_TV_FOLDERS
+
+
 def _parent_show_name(path: Path) -> Optional[str]:
-    parts = [p.name for p in path.parents]
-    for idx, name in enumerate(parts):
-        if SEASON_RE.search(name):
-            return parts[idx + 1] if idx + 1 < len(parts) else None
+    for parent in path.parents:
+        if not SEASON_RE.search(parent.name):
+            continue
+        stripped = _strip_season_tokens(parent.name)
+        if stripped and stripped != parent.name:
+            return stripped
+        show_parent = parent.parent
+        if show_parent != parent and show_parent.name and not _is_generic_tv_folder_name(show_parent.name):
+            return show_parent.name
+        return None
     return None
 
 
@@ -283,7 +294,7 @@ def infer_item(path: Path) -> InferredItem:
         if (
             leading_episode is not None
             and parent_name
-            and parent_name.lower() not in GENERIC_TV_FOLDERS
+            and not _is_generic_tv_folder_name(parent_name)
             and _parent_has_multiple_videos(path)
         ):
             media_type = "tv"
@@ -350,7 +361,7 @@ def infer_item(path: Path) -> InferredItem:
         show_name = _parent_show_name(path)
         if show_name is None:
             parent_name = path.parent.name
-            if parent_name and parent_name.strip().lower() not in GENERIC_TV_FOLDERS:
+            if parent_name and not _is_generic_tv_folder_name(parent_name):
                 show_name = parent_name
         title = title_override or show_name or title
         if season is not None:

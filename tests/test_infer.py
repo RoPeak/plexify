@@ -271,3 +271,18 @@ def test_infer_tv_season_folder_does_not_become_title(tmp_path: Path) -> None:
     assert item.title == "Gotham"
     assert item.season == 1
     assert item.episode == 1
+
+
+def test_infer_tv_root_level_season_folder_uses_folder_name_as_show_title(tmp_path: Path) -> None:
+    season_dir = tmp_path / "DC's Legends of Tomorrow Season 1"
+    season_dir.mkdir(parents=True)
+    episode_one = season_dir / "1. Pilot, Part 1.mkv"
+    episode_two = season_dir / "2. Pilot, Part 2.mkv"
+    episode_one.write_text("x", encoding="utf-8")
+    episode_two.write_text("x", encoding="utf-8")
+
+    item = infer_item(episode_one)
+    assert item.media_type == "tv"
+    assert item.title == "DC's Legends of Tomorrow"
+    assert item.season == 1
+    assert item.episode == 1

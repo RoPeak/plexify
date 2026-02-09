@@ -735,6 +735,42 @@ def test_tv_cache_precedence_episode_over_reusable_folder_and_file(monkeypatch, 
     assert candidate.metadata.get("episode") == 99
 
 
+def test_tv_episode_cache_not_reused_for_ambiguous_title(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: [])
+
+    incoming = tmp_path / "incoming"
+    path = incoming / "Supergirl Season 1" / "11. Strange Visitor From Another Planet.m4v"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+
+    # Simulates prior bad inference creating an ambiguous title in cache keys.
+    item = InferredItem(path=path, media_type="tv", title="Incoming", year=None, season=1, episode=11, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+
+    episode_key = cli.tv_episode_cache_key(item.title, item.year, item.season, item.episode)
+    cache.set_show(
+        episode_key,
+        {
+            "id": 4,
+            "name": "DC's Legends of Tomorrow",
+            "premiered": 2016,
+            "manual": False,
+            "confirmed_by_user": True,
+        },
+    )
+
+    page = cli._tv_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        incoming_root=incoming,
+        cache_key=cli.build_cache_key(path, incoming, "tv", item.year),
+    )
+
+    assert page.cache_hit is False
+
+
 def test_tv_cache_precedence_reusable_over_folder_and_file(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
 

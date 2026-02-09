@@ -825,6 +825,145 @@ def test_tv_folder_cache_hit_supports_manual_entries(monkeypatch, tmp_path: Path
     assert candidate.metadata["name"] == "Manual Show"
 
 
+def test_tv_folder_manual_cache_hit_carries_season(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
+
+    incoming = tmp_path / "incoming"
+    show_folder = incoming / "Manual Show" / "Seaon 5"
+    show_folder.mkdir(parents=True)
+    path = show_folder / "10. Episode.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="tv", title="Manual Show", year=None, season=1, episode=10, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+    cache.set_show(
+        folder_key,
+        {
+            "id": None,
+            "name": "Manual Show",
+            "premiered": None,
+            "chosen_year": None,
+            "season": 5,
+            "manual": True,
+            "confirmed_by_user": True,
+        },
+    )
+
+    page = cli._tv_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        incoming_root=incoming,
+        cache_key=cli.build_cache_key(path, incoming, "tv", None),
+    )
+
+    assert page.cache_hit is True
+    candidate = page.candidates[0]
+    assert candidate.metadata["manual"] is True
+    assert candidate.metadata.get("season") == 5
+
+
+def test_tv_search_retries_with_normalized_query(monkeypatch, tmp_path: Path) -> None:
+    queries: list[str] = []
+
+    def _fake_search(query: str, *_args, **_kwargs):
+        queries.append(query)
+        if len(queries) == 1:
+            return []
+        return [tvmaze.TVMazeShow(id=1, name="The Big Bang Theory", premiered=2007)]
+
+    monkeypatch.setattr(cli.tvmaze, "search_shows", _fake_search)
+
+    item = InferredItem(
+        path=Path("Show/Seaon 5/1. Episode.mkv"),
+        media_type="tv",
+        title="The Big Bang Theory Seaon 5",
+        year=None,
+        season=1,
+        episode=1,
+        episode_title=None,
+    )
+    page = cli._tv_candidates(
+        item,
+        session=requests.Session(),
+        cache=Cache(tmp_path / "cache.json"),
+        show_cache=False,
+        search_query="The Big Bang Theory Seaon 5 cast",
+    )
+
+    assert len(queries) == 2
+    assert queries[0] == "The Big Bang Theory Seaon 5 cast"
+    assert queries[1] == "the big bang theory cast"
+    assert page.candidates
+    assert page.candidates[0].title == "The Big Bang Theory"
+
+
+def test_process_item_uses_folder_manual_season_lock(monkeypatch, tmp_path: Path) -> None:
+    def _fake_tv_candidates(item: InferredItem, *_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Manual Show",
+            year=2010,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 123, "name": "Manual Show", "year": 2010, "episode": item.episode},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    show_folder = incoming / "Manual Show" / "Seaon 5"
+    show_folder.mkdir(parents=True)
+    library.mkdir()
+    path = show_folder / "10. Episode.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="tv", title="Manual Show", year=None, season=1, episode=10, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+    cache.set_show(
+        folder_key,
+        {
+            "id": None,
+            "name": "Manual Show",
+            "premiered": None,
+            "chosen_year": None,
+            "season": 5,
+            "manual": True,
+            "confirmed_by_user": True,
+        },
+    )
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert plan.metadata["season"] == 5
+
+
 def test_tv_folder_cache_written_on_confirmed_selection(monkeypatch, tmp_path: Path) -> None:
     def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
         candidate = cli.Candidate(
@@ -1129,3 +1268,212 @@ def test_tv_long_path_collision_rename_stays_stable(monkeypatch, tmp_path: Path)
     assert plan is not None
     assert plan.destination != long_destination
     assert "(2)" in plan.destination.stem
+
+
+def test_no_movie_candidates_can_switch_to_tv_search(monkeypatch) -> None:
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        return cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
+
+    def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Arrested Development",
+            year=2003,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 123, "name": "Arrested Development", "year": 2003},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    confirms = iter([True, True])
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: next(confirms))
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+
+    incoming = Path("plexify")
+    library = Path("tests")
+    path = incoming / "Arrested Development" / "1. Pilot.mkv"
+
+    item = InferredItem(path=path, media_type="movie", title="1 Pilot", year=None, season=1, episode=1, episode_title="Pilot")
+    cache = cli.NullCache()
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert plan.media_type == "tv"
+    assert "TV Shows" in str(plan.destination)
+
+
+def test_no_tv_candidates_can_switch_to_movie_search(monkeypatch) -> None:
+    def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        return cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
+
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Example Film",
+            year=2001,
+            source="Wikidata",
+            confidence=1.0,
+            metadata={"qid": "Q1", "title": "Example Film", "year": 2001},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    confirms = iter([True, True])
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: next(confirms))
+
+    incoming = Path("plexify")
+    library = Path("tests")
+    path = incoming / "Show.S01E01.mkv"
+
+    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=1, episode=1, episode_title=None)
+    cache = cli.NullCache()
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert plan.media_type == "movie"
+    assert "Movies" in str(plan.destination)
+
+
+def test_movie_to_tv_switch_persists_for_same_folder(monkeypatch, tmp_path: Path) -> None:
+    movie_calls = {"count": 0}
+    confirm_prompts: list[str] = []
+
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        movie_calls["count"] += 1
+        return cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
+
+    def _fake_tv_candidates(item: InferredItem, *_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Arrested Development",
+            year=2003,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 123, "name": "Arrested Development", "year": 2003, "season": item.season, "episode": item.episode},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    def _fake_confirm(prompt: str, *_args, **_kwargs) -> bool:
+        confirm_prompts.append(prompt)
+        return "Switch to TV search?" in prompt
+
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli, "_confirm", _fake_confirm)
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    show_dir = incoming / "Arrested Development"
+    show_dir.mkdir(parents=True)
+    library.mkdir()
+    first_path = show_dir / "1. Pilot.mkv"
+    second_path = show_dir / "2. Top Banana.mkv"
+    first_path.write_text("x", encoding="utf-8")
+    second_path.write_text("x", encoding="utf-8")
+
+    cache = Cache(tmp_path / "cache.json")
+    overrides: dict[str, str] = {}
+    first = InferredItem(
+        path=first_path,
+        media_type="movie",
+        title="1 Pilot",
+        year=None,
+        season=1,
+        episode=1,
+        episode_title="Pilot",
+    )
+    second = InferredItem(
+        path=second_path,
+        media_type="movie",
+        title="2 Top Banana",
+        year=None,
+        season=1,
+        episode=2,
+        episode_title="Top Banana",
+    )
+
+    plan_one, _ = cli._process_item(
+        item=first,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+        media_type_overrides=overrides,
+    )
+    assert plan_one is not None
+    assert plan_one.media_type == "tv"
+
+    plan_two, _ = cli._process_item(
+        item=second,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+        media_type_overrides=overrides,
+    )
+    assert plan_two is not None
+    assert plan_two.media_type == "tv"
+    assert movie_calls["count"] == 1
+    assert sum("Switch to TV search?" in prompt for prompt in confirm_prompts) == 1

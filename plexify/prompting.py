@@ -5,6 +5,8 @@ from rich.prompt import Prompt
 
 
 def _pause_progress(progress: Progress | None) -> bool:
+    if progress is not None and getattr(progress, "disable", False):
+        return False
     if progress is not None and getattr(progress, "live", None):
         progress.stop()
         return True

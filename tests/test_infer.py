@@ -181,6 +181,15 @@ def test_infer_tv_prefers_deepest_season_folder() -> None:
     assert item.episode == 3
 
 
+def test_infer_tv_typoed_season_folder_token() -> None:
+    path = Path("The Big Bang Theory/The Big Bang Theory Seaon 5/1. The Skank Reflex Analysis.m4v")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.title == "The Big Bang Theory"
+    assert item.season == 5
+    assert item.episode == 1
+
+
 @pytest.mark.parametrize(
     ("path", "expected_media_type", "expected_title", "expected_season", "expected_episode"),
     [
@@ -216,3 +225,19 @@ def test_infer_anime_style_numbering_in_season_folder(tmp_path: Path) -> None:
     assert item.title == "Anime Show"
     assert item.season == 1
     assert item.episode == 12
+
+
+def test_infer_tv_leading_episode_without_season_folder(tmp_path: Path) -> None:
+    show_dir = tmp_path / "Arrested Development"
+    show_dir.mkdir(parents=True)
+    episode_one = show_dir / "1. Pilot.mkv"
+    episode_two = show_dir / "2. Top Banana.mkv"
+    episode_one.write_text("x", encoding="utf-8")
+    episode_two.write_text("x", encoding="utf-8")
+
+    item = infer_item(episode_one)
+    assert item.media_type == "tv"
+    assert item.title == "Arrested Development"
+    assert item.season == 1
+    assert item.episode == 1
+    assert item.episode_title == "Pilot"

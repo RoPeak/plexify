@@ -81,7 +81,11 @@ WINDOWS_RESERVED = {
     "LPT9",
 }
 TV_SEASON_FOLDER_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:season|series)[-_. ]*(\d{1,2})(?![A-Za-z0-9])",
+    r"(?<![A-Za-z0-9])(?:season|series|seaon|seson|seasn)[-_. ]*(\d{1,2})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+TV_SEASON_TOKEN_WITH_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:season|series|seaon|seson|seasn)[-_. ]*\d{1,2}(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 
@@ -105,6 +109,7 @@ def make_search_query(value: str) -> str:
     if not value:
         return ""
     lowered = value.lower()
+    lowered = TV_SEASON_TOKEN_WITH_NUMBER_RE.sub(" ", lowered)
     lowered = lowered.replace("&", " and ")
     lowered = re.sub(r"[\u2013\u2014\u2212]+", "-", lowered)
     lowered = re.sub(r"[\"'`\u2019\u201c\u201d]", "", lowered)

@@ -108,6 +108,20 @@ JSON logs are line-delimited and include event metadata, for example:
 {"timestamp":"2026-02-08T12:00:00+00:00","level":"INFO","logger":"plexify.plexify.cli","message":"run_started","event":"run_started","command":"organise"}
 ```
 
+Offline mode:
+
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --offline
+python -m plexify.cli music --source "D:\Rips" --library "D:\Media" --offline
+```
+
+Offline behaviour:
+
+- No network lookups are performed.
+- For video, cache hits are still used.
+- For video with no cache hit: interactive mode still allows manual entry; non-interactive mode skips.
+- For music, `--offline` disables MusicBrainz verification for that run.
+
 Cache reuse:
 
 - Movie cache keys are based on normalised title + year (e.g., `Superman II` caches separately from `Superman`).

@@ -48,6 +48,13 @@ def test_tv_show_folder_cache_key_nested_under_season_folder() -> None:
     assert key == "tvfolder|show"
 
 
+def test_tv_show_folder_cache_key_handles_typoed_season_folder() -> None:
+    incoming = Path("incoming")
+    path = incoming / "Show" / "Seaon 2" / "Ep.mkv"
+    key = tv_show_folder_cache_key(path, incoming)
+    assert key == "tvfolder|show"
+
+
 def test_tv_show_folder_cache_key_none_for_root_file() -> None:
     incoming = Path("incoming")
     path = incoming / "Ep.mkv"

@@ -16,3 +16,7 @@ def test_normalize_title_handles_roman_numeral_suffix() -> None:
 
 def test_make_search_query_preserves_roman_numerals() -> None:
     assert make_search_query("Superman II") == "superman ii"
+
+
+def test_make_search_query_strips_typoed_season_token() -> None:
+    assert make_search_query("The Big Bang Theory Seaon 5") == "the big bang theory"

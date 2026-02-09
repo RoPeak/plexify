@@ -52,6 +52,6 @@ def test_default_callback_invokes_wizard_with_parsed_defaults(monkeypatch) -> No
     monkeypatch.setattr("plexify.cli.wizard", _fake_wizard)
     result = runner.invoke(app, [])
     assert result.exit_code == 0
-    assert called["log_level"] == "INFO"
+    assert called["log_level"] == "WARNING"
     assert called["log_format"] == "text"
     assert called["log_file"] is None

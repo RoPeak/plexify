@@ -97,6 +97,11 @@ WIZARD_LOG_FORMAT_CHOICES = {
 }
 LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR"}
 LOG_FORMATS = {"text", "json"}
+TV_SEASON_TOKEN_RE = r"(?:season|series|seaon|seson|seasn)"
+TV_EXPLICIT_SEASON_RE = re.compile(rf"(?<![A-Za-z0-9]){TV_SEASON_TOKEN_RE}[-_. ]*(\d{{1,2}})(?![A-Za-z0-9])", re.IGNORECASE)
+TV_EXPLICIT_SEASON_EPISODE_RE = re.compile(r"\bs\d{1,2}e\d{1,3}\b|\b\d{1,2}x\d{1,3}\b", re.IGNORECASE)
+TV_SXXEYY_CAPTURE_RE = re.compile(r"\bs(\d{1,2})e\d{1,3}\b", re.IGNORECASE)
+TV_XYY_CAPTURE_RE = re.compile(r"\b(\d{1,2})x\d{1,3}\b", re.IGNORECASE)
 
 
 @dataclass
@@ -200,6 +205,92 @@ def _safe_print(message: str, progress: Progress | None = None) -> None:
     _console_for(progress).print(message)
 
 
+def _media_override_key(path: Path, incoming_root: Path | None) -> str | None:
+    rel = path
+    if incoming_root is not None:
+        try:
+            rel = path.relative_to(incoming_root)
+        except ValueError:
+            rel = Path(path.name)
+    parent = rel.parent
+    if str(parent) in {"", "."}:
+        return None
+    return f"mediatype|{parent.as_posix().lower()}"
+
+
+def _switch_item_media_type(item: InferredItem, target_media_type: str) -> InferredItem:
+    if target_media_type == item.media_type:
+        return item
+    if target_media_type == "tv":
+        fallback_title = item.path.parent.name.strip() if item.path.parent.name else ""
+        switched_title = fallback_title or item.title
+        return InferredItem(
+            path=item.path,
+            media_type="tv",
+            title=switched_title,
+            year=item.year,
+            season=item.season,
+            episode=item.episode,
+            episode_title=item.episode_title,
+        )
+    return InferredItem(
+        path=item.path,
+        media_type="movie",
+        title=item.title,
+        year=item.year,
+        season=None,
+        episode=None,
+        episode_title=None,
+    )
+
+
+def _resolve_media_type_override(
+    item: InferredItem,
+    cache: Cache,
+    incoming_root: Path | None,
+    media_type_overrides: dict[str, str] | None,
+) -> tuple[InferredItem, str | None]:
+    override_key = _media_override_key(item.path, incoming_root)
+    if override_key is None:
+        return item, None
+    override_media_type = None
+    if media_type_overrides is not None:
+        override_media_type = media_type_overrides.get(override_key)
+    if override_media_type is None:
+        cached = cache.get_show(override_key)
+        if cached and cached.get("confirmed_by_user"):
+            cached_media_type = str(cached.get("media_type") or "").lower()
+            if cached_media_type in {"movie", "tv"}:
+                override_media_type = cached_media_type
+                if media_type_overrides is not None:
+                    media_type_overrides[override_key] = cached_media_type
+    if override_media_type in {"movie", "tv"} and override_media_type != item.media_type:
+        return _switch_item_media_type(item, override_media_type), override_key
+    return item, override_key
+
+
+def _persist_media_type_override(
+    cache: Cache,
+    override_key: str | None,
+    media_type: str,
+    media_type_overrides: dict[str, str] | None,
+) -> None:
+    if override_key is None:
+        return
+    if media_type_overrides is not None:
+        media_type_overrides[override_key] = media_type
+    cache.set_show(
+        override_key,
+        {
+            "media_type": media_type,
+            "confirmed_by_user": True,
+            "created_at": now_timestamp(),
+            "source": "MediaTypeOverride",
+        },
+    )
+    cache.save()
+
+
 def _initialise_logging(log_level: str, log_format: str, log_file: Path | None) -> None:
     level = log_level.upper()
     if level not in LOG_LEVELS:
@@ -244,6 +335,57 @@ def _build_search_query(title: str, hint: str | None) -> str:
         if hint_text:
             parts.append(hint_text)
     return " ".join(part for part in parts if part)
+
+
+def _normalize_tv_retry_query(value: str) -> str:
+    cleaned = TV_EXPLICIT_SEASON_RE.sub(" ", value or "")
+    return make_search_query(cleaned) or cleaned.strip()
+
+
+def _extract_explicit_season_from_path(path: Path) -> int | None:
+    sxxeyy = TV_SXXEYY_CAPTURE_RE.search(path.stem)
+    if sxxeyy:
+        return int(sxxeyy.group(1))
+    xyy = TV_XYY_CAPTURE_RE.search(path.stem)
+    if xyy:
+        return int(xyy.group(1))
+    token_match = TV_EXPLICIT_SEASON_RE.search(path.stem)
+    if token_match:
+        return int(token_match.group(1))
+    for parent in path.parents:
+        parent_match = TV_EXPLICIT_SEASON_RE.search(parent.name)
+        if parent_match:
+            return int(parent_match.group(1))
+    return None
+
+
+def _apply_tv_folder_season_lock(item: InferredItem, cache: Cache, folder_show_key: str | None) -> InferredItem:
+    if folder_show_key is None or item.media_type != "tv":
+        return item
+    cached = cache.get_show(folder_show_key)
+    if not cached or not cached.get("confirmed_by_user") or not cached.get("manual"):
+        return item
+    locked_season = cached.get("season")
+    if locked_season is None:
+        return item
+    try:
+        locked_season_int = int(locked_season)
+    except (TypeError, ValueError):
+        return item
+    explicit_season = _extract_explicit_season_from_path(item.path)
+    if explicit_season is not None and explicit_season != locked_season_int:
+        return item
+    if item.season not in {None, 1, locked_season_int}:
+        return item
+    return InferredItem(
+        path=item.path,
+        media_type=item.media_type,
+        title=item.title,
+        year=item.year,
+        season=locked_season_int,
+        episode=item.episode,
+        episode_title=item.episode_title,
+    )
 
 
 def _with_title(item: InferredItem, title: str) -> InferredItem:
@@ -741,6 +883,8 @@ def _tv_candidates(
                 "year": cached.get("chosen_year") or cached.get("premiered"),
                 "manual": True,
             }
+            if cached_key == folder_show_key and cached.get("season") is not None:
+                metadata["season"] = cached.get("season")
             if cached_key not in {reusable_show_key, folder_show_key}:
                 if "season" in cached:
                     metadata["season"] = cached.get("season")
@@ -791,6 +935,14 @@ def _tv_candidates(
         raw_results = tvmaze.search_shows(query, session=session)
         elapsed = time.monotonic() - started
         total_time = time.monotonic() - total_started
+        if not raw_results:
+            retry_query = _normalize_tv_retry_query(search_query or item.title)
+            if retry_query and retry_query != query:
+                _safe_print(f"Retrying TVMaze with normalized query: {rich_escape(retry_query)}", progress)
+                started_retry = time.monotonic()
+                raw_results = tvmaze.search_shows(retry_query, session=session)
+                elapsed += time.monotonic() - started_retry
+                total_time = time.monotonic() - total_started
         log_event(
             logger,
             "candidate_search_finished",
@@ -1645,10 +1797,11 @@ def _plan_items(
     collisions = 0
     history: list[HistoryEntry] = []
     episode_cache = EpisodeCache()
+    media_type_overrides: dict[str, str] = {}
 
     with Progress(
         TextColumn("{task.completed}/{task.total} - {task.description}"),
-        disable=not sys.stdout.isatty(),
+        disable=interactive or not sys.stdout.isatty(),
     ) as progress:
         task = progress.add_task("Planning files...", total=len(files))
         session_tv = tvmaze.create_session()
@@ -1660,6 +1813,7 @@ def _plan_items(
             progress.update(task, completed=min(index + 1, total), description=f"Planning: {rich_escape(path.name)}")
             try:
                 item = infer_item(path)
+                item, override_key = _resolve_media_type_override(item, cache_store, incoming, media_type_overrides)
                 log_event(
                     logger,
                     "file_inferred",
@@ -1679,6 +1833,8 @@ def _plan_items(
                 _safe_print(_file_panel(index + 1, total, item, incoming), progress)
                 cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
                 cache_snapshots: list[CacheSnapshot] = []
+                if override_key:
+                    cache_snapshots.append(CacheSnapshot("show", override_key, cache_store.get_show(override_key)))
                 if item.media_type == "tv":
                     reusable_show_key = tv_show_cache_key(item.title, item.year) if _reusable_tv_cache_safe(item) else None
                     folder_show_key = tv_show_folder_cache_key(item.path, incoming)
@@ -1717,6 +1873,7 @@ def _plan_items(
                     on_conflict=on_conflict,
                     allow_back=bool(history),
                     offline=offline,
+                    media_type_overrides=media_type_overrides,
                 )
                 history.append(
                     HistoryEntry(
@@ -1853,30 +2010,25 @@ def _process_item(
     on_conflict: str = "rename",
     allow_back: bool = False,
     offline: bool = False,
+    media_type_overrides: dict[str, str] | None = None,
 ) -> tuple[MovePlan | None, bool]:
+    item, override_key = _resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
+    folder_show_key = tv_show_folder_cache_key(item.path, incoming_root) if item.media_type == "tv" else None
+    item = _apply_tv_folder_season_lock(item, cache, folder_show_key)
     cache_key = build_cache_key(item.path, incoming_root, item.media_type, item.year)
     if item.media_type == "movie" and interactive:
         if re.search(r"\b(series|episode)\b", item.path.stem, re.IGNORECASE):
             if _confirm("This looks like TV. Treat as TV? [Y/n]", True, progress, show_default=False):
-                item = InferredItem(
-                    path=item.path,
-                    media_type="tv",
-                    title=item.title,
-                    year=item.year,
-                    season=item.season,
-                    episode=item.episode,
-                    episode_title=item.episode_title,
-                )
+                item = _switch_item_media_type(item, "tv")
+                _persist_media_type_override(cache, override_key, "tv", media_type_overrides)
     reusable_movie_key = None
     reusable_show_key = None
     reusable_episode_key = None
-    folder_show_key = None
     if item.media_type == "tv":
         if _reusable_tv_cache_safe(item):
             reusable_show_key = tv_show_cache_key(item.title, item.year)
         if item.season is not None and item.episode is not None:
             reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
-        folder_show_key = tv_show_folder_cache_key(item.path, incoming_root)
     else:
         reusable_movie_key = movie_cache_key(item.title, item.year)
     collision = False
@@ -1925,6 +2077,30 @@ def _process_item(
                         )
                     _record_stat(stats, "skipped")
                     return None, False
+                if _confirm("No TV candidates. Switch to movie search? [y/N]", False, progress, show_default=False):
+                    _persist_media_type_override(cache, override_key, "movie", media_type_overrides)
+                    return _process_item(
+                        item=_switch_item_media_type(item, "movie"),
+                        library=library,
+                        cache=cache,
+                        mode=mode,
+                        copy_mode=copy_mode,
+                        interactive=interactive,
+                        auto_accept=auto_accept,
+                        min_confidence=min_confidence,
+                        session_tv=session_tv,
+                        session_wd=session_wd,
+                        episode_cache=episode_cache,
+                        progress=progress,
+                        show_cache=show_cache,
+                        stats=stats,
+                        incoming_root=incoming_root,
+                        planned=planned,
+                        on_conflict=on_conflict,
+                        allow_back=allow_back,
+                        offline=offline,
+                        media_type_overrides=media_type_overrides,
+                    )
                 _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
                 empty_choice = _select_candidate(
                     "tv",
@@ -2201,6 +2377,7 @@ def _process_item(
                 "premiered": None,
                 "chosen_title": metadata["name"],
                 "chosen_year": metadata.get("year"),
+                "season": season,
                 "manual": True,
                 "confirmed_by_user": confirmed_by_user,
                 "created_at": now_timestamp(),
@@ -2327,6 +2504,30 @@ def _process_item(
                     )
                 _record_stat(stats, "skipped")
                 return None, False
+            if _confirm("No movie candidates. Switch to TV search? [y/N]", False, progress, show_default=False):
+                _persist_media_type_override(cache, override_key, "tv", media_type_overrides)
+                return _process_item(
+                    item=_switch_item_media_type(item, "tv"),
+                    library=library,
+                    cache=cache,
+                    mode=mode,
+                    copy_mode=copy_mode,
+                    interactive=interactive,
+                    auto_accept=auto_accept,
+                    min_confidence=min_confidence,
+                    session_tv=session_tv,
+                    session_wd=session_wd,
+                    episode_cache=episode_cache,
+                    progress=progress,
+                    show_cache=show_cache,
+                    stats=stats,
+                    incoming_root=incoming_root,
+                    planned=planned,
+                    on_conflict=on_conflict,
+                    allow_back=allow_back,
+                    offline=offline,
+                    media_type_overrides=media_type_overrides,
+                )
             _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
             empty_choice = _select_candidate(
                 "movie",
@@ -2704,7 +2905,7 @@ def organise(
     clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running", is_flag=True),
     offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run", is_flag=True),
     on_conflict: str = typer.Option("rename", "--on-conflict", help="On destination conflict: rename/skip/overwrite"),
-    log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
+    log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
     prune_empty_dirs: bool = typer.Option(
@@ -2928,7 +3129,7 @@ def music(
         False, "--cleanup-empty-dirs", help="Remove empty folders after move", is_flag=True
     ),
     verbose_plan: bool = typer.Option(False, "--verbose-plan", help="Print per-track plan output", is_flag=True),
-    log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
+    log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
 ) -> None:
@@ -3266,7 +3467,7 @@ def music(
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
-        wizard(log_level="INFO", log_format="text", log_file=None)
+        wizard(log_level="WARNING", log_format="text", log_file=None)
 
 
 @app.command()
@@ -3297,7 +3498,7 @@ def undo(report: Path = typer.Option(None, help="Report path"), library: Path = 
 
 @app.command()
 def wizard(
-    log_level: str = typer.Option("INFO", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
+    log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
 ) -> None:
@@ -3585,6 +3786,7 @@ def _wizard_video(
         media_type=media_type,
         no_cache=not use_cache,
         clear_cache=clear_cache,
+        offline=False,
         on_conflict="rename",
         log_level=log_level,
         log_format=log_format,
@@ -3663,6 +3865,7 @@ def _wizard_music(
         keep_art=keep_art,
         keep_cue=keep_cue,
         keep_log=keep_log,
+        offline=False,
         cleanup_empty_dirs=cleanup_empty_dirs,
         verbose_plan=verbose_plan,
         log_level=log_level,

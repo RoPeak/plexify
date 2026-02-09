@@ -9,15 +9,16 @@ from guessit import guessit
 
 from .util import NOISE_TOKENS, normalize_title_for_similarity
 
-SEASON_RE = re.compile(r"(?<![A-Za-z0-9])(?:season|series)[-_. ]*(\d{1,2})(?![A-Za-z0-9])", re.IGNORECASE)
+SEASON_TOKEN_RE = r"(?:season|series|seaon|seson|seasn)"
+SEASON_RE = re.compile(rf"(?<![A-Za-z0-9]){SEASON_TOKEN_RE}[-_. ]*(\d{{1,2}})(?![A-Za-z0-9])", re.IGNORECASE)
 SXXEYY_RE = re.compile(r"\bs(\d{1,2})e(\d{1,3})\b", re.IGNORECASE)
 XYY_RE = re.compile(r"\b(\d{1,2})x(\d{1,3})\b", re.IGNORECASE)
 SEASON_EP_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:season|series)[-_. ]*(\d{1,2})[-_. ]+(?:episode|ep)?[-_. ]*(\d{1,3})(?![A-Za-z0-9])",
+    rf"(?<![A-Za-z0-9]){SEASON_TOKEN_RE}[-_. ]*(\d{{1,2}})[-_. ]+(?:episode|ep)?[-_. ]*(\d{{1,3}})(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
 EPISODE_RE = re.compile(r"(?<![A-Za-z0-9])(?:episode|ep)[-_. ]*(\d{1,3})(?![A-Za-z0-9])", re.IGNORECASE)
-TV_HINT_RE = re.compile(r"\b(?:series|season|episode|ep)\b", re.IGNORECASE)
+TV_HINT_RE = re.compile(r"\b(?:series|season|seaon|seson|seasn|episode|ep)\b", re.IGNORECASE)
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 YEAR_RANGE_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*[-–]\s*(19\d{2}|20\d{2})(?!\d)")
 LEADING_EPISODE_RE = re.compile(r"^\s*(\d{1,3})\s*[-_. ]+\s*(.+?)\s*$")
@@ -110,7 +111,7 @@ def _clean_parent_show_name(name: str) -> tuple[str, Optional[int]]:
 
 
 def _strip_season_tokens(value: str) -> str:
-    cleaned = re.sub(r"(?i)(?:season|series)[\s._-]*\d{1,2}", "", value)
+    cleaned = re.sub(rf"(?i){SEASON_TOKEN_RE}[\s._-]*\d{{1,2}}", "", value)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned or value
 
@@ -264,6 +265,7 @@ def infer_item(path: Path) -> InferredItem:
     title_override = None
     year_override = None
     guess_title = guess.get("title")
+    stem_for_tv = YEAR_RANGE_RE.sub("", path.stem)
 
     if path.stem.isdigit() and 1 <= len(path.stem) <= 3 and _parent_has_multiple_videos(path):
         media_type = "tv"
@@ -275,7 +277,22 @@ def infer_item(path: Path) -> InferredItem:
         if title_override:
             has_tv_context = True
 
-    stem_for_tv = YEAR_RANGE_RE.sub("", path.stem)
+    if episode is None:
+        leading_episode = infer_tv_episode_from_stem(stem_for_tv)
+        parent_name = path.parent.name.strip()
+        if (
+            leading_episode is not None
+            and parent_name
+            and parent_name.lower() not in GENERIC_TV_FOLDERS
+            and _parent_has_multiple_videos(path)
+        ):
+            media_type = "tv"
+            episode = leading_episode
+            season = season or _extract_season_from_parts(path) or 1
+            explicit_episode = True
+            title_override, year_override = _clean_parent_show_name(parent_name)
+            has_tv_context = True
+
     sxxeyy = SXXEYY_RE.search(stem_for_tv)
     if sxxeyy:
         season = int(sxxeyy.group(1))

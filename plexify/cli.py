@@ -26,6 +26,7 @@ from .logging_config import configure_logging, get_logger, log_event
 from .planner import plan_movie, plan_tv_show
 from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_overlapping
 from .prompting import _prompt_text
+from . import prompting_ui
 from .report import ReportFormatError, write_report
 from .services import movie_matcher, music_matcher, tv_matcher
 from .sources import musicbrainz, tvmaze, wikidata
@@ -344,21 +345,14 @@ def _prompt_line(
     has_more: bool,
     allow_back: bool,
 ) -> str:
-    parts: list[str] = []
-    if has_candidates:
-        parts.append("Enter=accept #1")
-        parts.append("1-9=choose")
-    if allow_search:
-        parts.append("s=search")
-    if allow_manual:
-        parts.append("m=manual")
-    parts.append("k=skip")
-    parts.append("q=quit")
-    if allow_back:
-        parts.append("b=back")
-    if has_more:
-        parts.append("n=next page")
-    return " | ".join(parts) if parts else PROMPT_BASE
+    return prompting_ui.prompt_line(
+        has_candidates=has_candidates,
+        allow_search=allow_search,
+        allow_manual=allow_manual,
+        has_more=has_more,
+        allow_back=allow_back,
+        prompt_base=PROMPT_BASE,
+    )
 
 
 def _build_search_query(title: str, hint: str | None) -> str:
@@ -624,16 +618,6 @@ def _search_lost_sequel_marker(title: str, search_query: str) -> bool:
     return movie_matcher.search_lost_sequel_marker(title, search_query)
 
 
-def _format_value(value: str | None) -> str:
-    return value if value else "-"
-
-
-def _format_names(names: list[str] | None, limit: int = 3) -> str:
-    if not names:
-        return "-"
-    return ", ".join(names[:limit])
-
-
 def _maybe_enrich_candidates(
     media_type: str,
     candidates: list[Candidate],
@@ -695,40 +679,12 @@ def _print_candidates(
     *,
     item: InferredItem | None = None,
 ) -> None:
-    table = Table(title="Candidates")
-    table.add_column("#")
-    table.add_column("Title")
-    table.add_column("Year")
-    show_people = False
-    show_tv_fields = media_type == "tv" and item is not None
-    if show_tv_fields:
-        table.add_column("S/E")
-        table.add_column("Episode title")
-    if media_type == "movie":
-        show_people = any(
-            (cand.enrichment or {}).get("director") or (cand.enrichment or {}).get("cast") for cand in candidates
-        )
-        if show_people:
-            table.add_column("Director")
-            table.add_column("Cast")
-    table.add_column("Source")
-    table.add_column("Confidence")
-    for idx, cand in enumerate(candidates, start=1):
-        year_text = str(cand.year) if cand.year else "Unknown"
-        row = [str(idx), rich_escape(cand.title), year_text]
-        if show_tv_fields:
-            season = item.season if item.season is not None else "-"
-            episode = item.episode if item.episode is not None else "-"
-            row.append(f"{season}/{episode}")
-            episode_title = cand.metadata.get("episode_title") or item.episode_title
-            row.append(rich_escape(episode_title) if episode_title else "-")
-        if media_type == "movie" and show_people:
-            enrichment = cand.enrichment or {}
-            row.append(_format_value(enrichment.get("director")))
-            row.append(_format_names(enrichment.get("cast")))
-        row.extend([cand.source, f"{cand.confidence:.2f}"])
-        table.add_row(*row)
-    _console_for(progress).print(table)
+    prompting_ui.print_candidates(
+        console=_console_for(progress),
+        media_type=media_type,
+        candidates=candidates,
+        item=item,
+    )
 
 
 def _select_candidate(
@@ -742,53 +698,26 @@ def _select_candidate(
     allow_back: bool,
     item: InferredItem | None = None,
 ) -> Candidate | None | str:
-    printed_table = False
-    while True:
-        if candidates and not printed_table:
-            _print_candidates(media_type, candidates, progress, item=item)
-            printed_table = True
-        _safe_print(
-            _prompt_line(
-                has_candidates=bool(candidates),
-                allow_search=allow_search,
-                allow_manual=allow_manual,
-                has_more=has_more,
-                allow_back=allow_back,
-            ),
-            progress,
-        )
-        default_choice = "1" if candidates else ""
-        choice = _prompt_choice("Select", default_choice, progress, show_default=False)
-        if choice == "":
-            if candidates:
-                return candidates[0]
-            _safe_print("No candidates available to accept.", progress)
-            continue
-        if choice.isdigit():
-            idx = int(choice) - 1
-            if 0 <= idx < len(candidates):
-                return candidates[idx]
-            _safe_print("Invalid selection.", progress)
-            continue
-        if choice == "n":
-            if not has_more:
-                _safe_print(NO_MORE_RESULTS_MESSAGE, progress)
-                continue
-            return "n"
-        if choice == "b":
-            if not allow_back:
-                _safe_print("No previous decision to return to.", progress)
-                continue
-            return "b"
-        if choice == "s" and allow_search:
-            return "s"
-        if choice == "m" and allow_manual:
-            return "m"
-        if choice in {"k", "q"}:
-            return choice
-        if allow_search:
-            return f"search:{choice}"
-        _safe_print("Invalid choice.", progress)
+    return prompting_ui.select_candidate(
+        media_type=media_type,
+        candidates=candidates,
+        has_more=has_more,
+        allow_search=allow_search,
+        allow_manual=allow_manual,
+        allow_back=allow_back,
+        item=item,
+        no_more_results_message=NO_MORE_RESULTS_MESSAGE,
+        prompt_choice=lambda prompt, default: _prompt_choice(prompt, default, progress, show_default=False),
+        safe_print=lambda message: _safe_print(message, progress),
+        print_candidates_fn=lambda mt, cands, current_item: _print_candidates(mt, cands, progress, item=current_item),
+        prompt_line_fn=lambda has_cands, can_search, can_manual, more, can_back: _prompt_line(
+            has_candidates=has_cands,
+            allow_search=can_search,
+            allow_manual=can_manual,
+            has_more=more,
+            allow_back=can_back,
+        ),
+    )
 
 
 def _tv_candidates(
@@ -1417,64 +1346,15 @@ def _resolve_destination(
 
 
 def _file_panel(index: int, total: int, item: InferredItem, incoming_root: Path | None) -> Panel:
-    title_line = f"File {index}/{total} - {item.media_type.upper()} - {rich_escape(item.path.name)}"
-    year_text = str(item.year) if item.year else "Unknown"
-    rel_path = item.path
-    if incoming_root is not None:
-        try:
-            rel_path = item.path.relative_to(incoming_root)
-        except ValueError:
-            rel_path = item.path
-    lines = [
-        f"Path: {format_path(rel_path)}",
-        f"Detected: Title={rich_escape(item.title)}, Year={year_text}",
-    ]
-    if item.media_type == "tv":
-        season = item.season if item.season is not None else "-"
-        if item.episode is None:
-            episode_text = "-"
-        elif item.episode_end is not None and item.episode_end > item.episode:
-            episode_text = f"{item.episode}-{item.episode_end}"
-        else:
-            episode_text = str(item.episode)
-        lines.append(f"Season/Episode: {season}/{episode_text}")
-        if item.episode_title:
-            lines.append(f"Episode title: {rich_escape(item.episode_title)}")
-    return Panel("\n".join(lines), title=title_line, expand=False)
+    return prompting_ui.file_panel(index, total, item, incoming_root)
 
 
 def _album_panel(index: int, total: int, album: music_util.AlbumGroup) -> Panel:
-    title_line = f"Album {index}/{total} - {rich_escape(album.source.name)}"
-    lines = [
-        f"Detected: Artist={rich_escape(album.artist)}, Album={rich_escape(album.album)}",
-        f"Tracks: {len(album.tracks)}",
-    ]
-    return Panel("\n".join(lines), title=title_line, expand=False)
+    return prompting_ui.album_panel(index, total, album)
 
 
 def _print_music_candidates(candidates: list[musicbrainz.ReleaseCandidate]) -> None:
-    table = Table(title="MusicBrainz releases")
-    table.add_column("#")
-    table.add_column("Artist")
-    table.add_column("Album")
-    table.add_column("Tracks")
-    table.add_column("Year")
-    table.add_column("Country")
-    table.add_column("Confidence")
-    for idx, cand in enumerate(candidates, start=1):
-        track_count = str(cand.track_count) if cand.track_count is not None else "-"
-        year_text = str(cand.year) if cand.year else "-"
-        country = cand.country or "-"
-        table.add_row(
-            str(idx),
-            rich_escape(cand.artist),
-            rich_escape(cand.title),
-            track_count,
-            year_text,
-            country,
-            f"{cand.score:.2f}",
-        )
-    console.print(table)
+    prompting_ui.print_music_candidates(console=console, candidates=candidates)
 
 
 def _rank_music_candidates(
@@ -1487,29 +1367,12 @@ def _rank_music_candidates(
 def _select_music_candidate(
     candidates: list[musicbrainz.ReleaseCandidate],
 ) -> musicbrainz.ReleaseCandidate | None | str:
-    printed = False
-    while True:
-        if candidates and not printed:
-            _print_music_candidates(candidates)
-            printed = True
-        _safe_print("Enter=accept #1 | 1-9=choose | s=skip verification | q=quit", None)
-        default_choice = "1" if candidates else ""
-        choice = _prompt_choice("Select", default_choice, None, show_default=False)
-        if choice == "":
-            if candidates:
-                return candidates[0]
-            return "s"
-        if choice.isdigit():
-            idx = int(choice) - 1
-            if 0 <= idx < len(candidates):
-                return candidates[idx]
-            _safe_print("Invalid selection.", None)
-            continue
-        if choice == "s":
-            return "s"
-        if choice == "q":
-            return "q"
-        _safe_print("Invalid choice.", None)
+    return prompting_ui.select_music_candidate(
+        candidates=candidates,
+        prompt_choice=lambda prompt, default: _prompt_choice(prompt, default, None, show_default=False),
+        safe_print=lambda message: _safe_print(message, None),
+        print_music_candidates_fn=_print_music_candidates,
+    )
 
 
 def _music_tracks_from_filenames(tracks: list[music_util.TrackInfo]) -> list[MusicPlannedTrack]:

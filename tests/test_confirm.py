@@ -34,3 +34,15 @@ def test_confirm_passes_show_default_false(monkeypatch) -> None:
 
     assert cli._confirm("Proceed?", True, None, show_default=False) is True
     assert seen == [False]
+
+
+def test_confirm_reprompts_on_empty_choice_then_accepts(monkeypatch) -> None:
+    answers = iter(["", "y", "", "n"])
+    prompts: list[str] = []
+
+    monkeypatch.setattr(cli, "_prompt_choice", lambda *_args, **_kwargs: next(answers))
+    monkeypatch.setattr(cli, "_safe_print", lambda message, _progress=None: prompts.append(message))
+
+    assert cli._confirm("Proceed?", True, None) is True
+    assert cli._confirm("Proceed?", False, None) is False
+    assert prompts == ["Please enter y/n.", "Please enter y/n."]

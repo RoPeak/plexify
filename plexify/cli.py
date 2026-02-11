@@ -59,6 +59,8 @@ DEFAULT_EXTENSIONS_LIST = [ext.strip() for ext in DEFAULT_EXTENSIONS.split(",") 
 DEFAULT_MUSIC_EXTENSIONS = "flac,mp3,m4a"
 DEFAULT_MIN_CONFIDENCE = 0.90
 AUTO_ACCEPT_GAP = 0.08
+REUSABLE_PROMOTION_MIN_CONFIDENCE = 0.95
+REUSABLE_PROMOTION_MIN_GAP = 0.10
 PROMPT_BASE = "s=search | m=manual | k=skip | q=quit"
 NO_MORE_RESULTS_MESSAGE = "No more results. Try 's' to refine or 'm' to enter manually."
 WIZARD_MEDIA_CHOICES = {
@@ -215,11 +217,89 @@ def _tv_search_cache_key(query: str, year: int | None) -> str:
 def _cache_entry_confirmed_or_auto(entry: dict[str, Any] | None) -> bool:
     if not entry:
         return False
+    if bool(entry.get("ambiguous")):
+        return False
     if bool(entry.get("confirmed_by_user")):
         return True
     if entry.get("selection_mode") == "auto" and not bool(entry.get("manual")):
         return True
     return False
+
+
+def _reusable_match_from_entry(media_type: str, entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not entry:
+        return None
+    if media_type == "movie":
+        qid = entry.get("qid")
+        if not qid:
+            return None
+        return {"id": str(qid), "title": entry.get("title"), "year": entry.get("year")}
+    show_id = entry.get("id")
+    if not show_id:
+        return None
+    return {"id": str(show_id), "title": entry.get("name"), "year": entry.get("premiered")}
+
+
+def _reusable_matches_conflict(
+    media_type: str,
+    existing_entry: dict[str, Any] | None,
+    new_entry: dict[str, Any],
+) -> bool:
+    new_match = _reusable_match_from_entry(media_type, new_entry)
+    if new_match is None:
+        return False
+    if existing_entry and bool(existing_entry.get("ambiguous")):
+        matches = existing_entry.get("matches")
+        if not isinstance(matches, list):
+            return False
+        for match in matches:
+            if isinstance(match, dict) and str(match.get("id")) == str(new_match["id"]):
+                return False
+        return True
+    existing_match = _reusable_match_from_entry(media_type, existing_entry)
+    if existing_match is None:
+        return False
+    return str(existing_match["id"]) != str(new_match["id"])
+
+
+def _promote_reusable_with_conflict_tracking(
+    media_type: str,
+    *,
+    cache: Cache,
+    key: str,
+    entry: dict[str, Any],
+) -> None:
+    existing = cache.get_movie(key) if media_type == "movie" else cache.get_show(key)
+    if not _reusable_matches_conflict(media_type, existing, entry):
+        if media_type == "movie":
+            cache.set_movie(key, entry)
+        else:
+            cache.set_show(key, entry)
+        return
+
+    new_match = _reusable_match_from_entry(media_type, entry)
+    matches: list[dict[str, Any]] = []
+    if existing and bool(existing.get("ambiguous")) and isinstance(existing.get("matches"), list):
+        for row in existing["matches"]:
+            if isinstance(row, dict) and row.get("id") is not None:
+                matches.append({"id": str(row.get("id")), "title": row.get("title"), "year": row.get("year")})
+    else:
+        existing_match = _reusable_match_from_entry(media_type, existing)
+        if existing_match is not None:
+            matches.append(existing_match)
+    if new_match is not None and all(str(row.get("id")) != str(new_match["id"]) for row in matches):
+        matches.append(new_match)
+
+    conflict_entry = {
+        "ambiguous": True,
+        "matches": matches,
+        "selection_mode": "ambiguous",
+        "created_at": now_timestamp(),
+    }
+    if media_type == "movie":
+        cache.set_movie(key, conflict_entry)
+    else:
+        cache.set_show(key, conflict_entry)
 
 
 def _media_override_key(path: Path, incoming_root: Path | None) -> str | None:
@@ -866,26 +946,29 @@ def _tv_candidates(
         reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
     cached = None
     cached_key = None
+    candidate_keys: list[str] = []
     if reusable_episode_key:
-        cached = cache.get_show(reusable_episode_key)
-        cached_key = reusable_episode_key if cached else None
-    if cached is None and reusable_show_key:
-        cached = cache.get_show(reusable_show_key)
-        cached_key = reusable_show_key if cached else None
-    if cached is None and folder_show_key:
-        cached = cache.get_show(folder_show_key)
-        cached_key = folder_show_key if cached else None
-    if cached is None:
-        cached = cache.get_show(path_key)
-        cached_key = path_key if cached else None
+        candidate_keys.append(reusable_episode_key)
+    if reusable_show_key:
+        candidate_keys.append(reusable_show_key)
+    if folder_show_key:
+        candidate_keys.append(folder_show_key)
+    candidate_keys.append(path_key)
+
+    for key in candidate_keys:
+        possible = cache.get_show(key)
+        if not possible:
+            continue
+        if not _cache_entry_confirmed_or_auto(possible):
+            continue
+        if not possible.get("manual") and not _cache_entry_compatible(item.year, possible.get("premiered")):
+            continue
+        cached = possible
+        cached_key = key
+        break
     results: list[Candidate] = []
     elapsed = 0.0
     total_time = None
-    if cached:
-        if not _cache_entry_confirmed_or_auto(cached):
-            cached = None
-        elif not cached.get("manual") and not _cache_entry_compatible(item.year, cached.get("premiered")):
-            cached = None
     if cached:
         log_event(
             logger,
@@ -1173,21 +1256,27 @@ def _movie_candidates(
     reusable_key = movie_cache_key(item.title, item.year)
     cached = None
     cached_key = None
+    candidate_keys: list[str] = []
     if _reusable_movie_cache_safe(item):
-        cached = cache.get_movie(reusable_key)
-        cached_key = reusable_key if cached else None
-    if cached is None:
-        cached = cache.get_movie(path_key)
-        cached_key = path_key if cached else None
+        candidate_keys.append(reusable_key)
+    candidate_keys.append(path_key)
+    for key in candidate_keys:
+        possible = cache.get_movie(key)
+        if not possible:
+            continue
+        if bool(possible.get("manual")):
+            continue
+        if not _cache_entry_confirmed_or_auto(possible):
+            continue
+        if not _cache_entry_compatible(item.year, possible.get("year")):
+            continue
+        cached = possible
+        cached_key = key
+        break
     results: list[Candidate] = []
     elapsed = 0.0
     fetch_time = 0.0
     total_time = None
-    if cached and not cached.get("manual"):
-        if not _cache_entry_confirmed_or_auto(cached):
-            cached = None
-        elif not _cache_entry_compatible(item.year, cached.get("year")):
-            cached = None
     if cached and not cached.get("manual"):
         log_event(
             logger,
@@ -1407,6 +1496,23 @@ def _reusable_movie_cache_safe(item: InferredItem) -> bool:
 
 def _reusable_tv_cache_safe(item: InferredItem) -> bool:
     return _reusable_cache_safe(item.title, item.year)
+
+
+def _should_promote_to_reusable(
+    *,
+    selection_mode: str | None,
+    selected: Candidate,
+    candidates: list[Candidate],
+) -> bool:
+    if selection_mode != "auto":
+        return False
+    if bool(selected.metadata.get("manual")):
+        return False
+    if selected.confidence < REUSABLE_PROMOTION_MIN_CONFIDENCE:
+        return False
+    if len(candidates) <= 1:
+        return True
+    return (candidates[0].confidence - candidates[1].confidence) >= REUSABLE_PROMOTION_MIN_GAP
 
 
 def _auto_acceptable(
@@ -2469,6 +2575,7 @@ def _process_item(
         metadata = selected.metadata
         confirmed_by_user = outcome in {"confirmed", "manual"}
         trusted_auto = outcome == "auto" and not bool(selected.metadata.get("manual"))
+        promote_reusable = _should_promote_to_reusable(selection_mode=outcome, selected=selected, candidates=candidates)
         season = metadata.get("season") or item.season
         episode = metadata.get("episode") or item.episode
         episode_end = metadata.get("episode_end") or item.episode_end
@@ -2576,11 +2683,11 @@ def _process_item(
                 "source": selected.source,
             }
         cache.set_show(cache_key, entry)
-        if reusable_show_key:
-            cache.set_show(reusable_show_key, show_entry)
+        if reusable_show_key and promote_reusable:
+            _promote_reusable_with_conflict_tracking("tv", cache=cache, key=reusable_show_key, entry=show_entry)
         if folder_show_key and (confirmed_by_user or trusted_auto):
             cache.set_show(folder_show_key, show_entry)
-        if reusable_episode_key:
+        if reusable_episode_key and promote_reusable:
             cache.set_show(reusable_episode_key, entry)
         cache.save()
         destination = plan_tv_show(
@@ -3002,6 +3109,7 @@ def _process_item(
     _print_choice(selected, progress)
     metadata = selected.metadata
     confirmed_by_user = outcome in {"confirmed", "manual"}
+    promote_reusable = _should_promote_to_reusable(selection_mode=outcome, selected=selected, candidates=candidates)
     if metadata.get("manual"):
         entry = {
             "qid": None,
@@ -3029,8 +3137,8 @@ def _process_item(
             "source": selected.source,
         }
     cache.set_movie(cache_key, entry)
-    if reusable_movie_key and _reusable_movie_cache_safe(item):
-        cache.set_movie(reusable_movie_key, entry)
+    if reusable_movie_key and _reusable_movie_cache_safe(item) and promote_reusable:
+        _promote_reusable_with_conflict_tracking("movie", cache=cache, key=reusable_movie_key, entry=entry)
     cache.save()
 
     year = metadata.get("year") or selected.year

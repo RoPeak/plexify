@@ -384,6 +384,194 @@ def test_reusable_movie_cache_enabled_without_year_for_unambiguous_title(monkeyp
     assert page.cache_hit is True
 
 
+def test_manual_movie_selection_does_not_promote_reusable_cache(monkeypatch, tmp_path: Path) -> None:
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Movie",
+            year=2001,
+            source="Wikidata",
+            confidence=1.0,
+            metadata={"qid": "Q1", "title": "Movie", "year": 2001},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Movie.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="movie", title="Movie", year=2001, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+    manual = cli.Candidate(
+        title="Movie",
+        year=2001,
+        source="Manual",
+        confidence=1.0,
+        metadata={"qid": None, "title": "Movie", "year": 2001, "manual": True},
+        enrichment=None,
+    )
+
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "_select_candidate", lambda *_args, **_kwargs: "m")
+    monkeypatch.setattr(cli, "_prompt_manual_movie", lambda *_args, **_kwargs: (manual, ""))
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=False,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert cache.get_movie(movie_cache_key(item.title, item.year)) is None
+
+
+def test_auto_movie_selection_does_not_promote_reusable_cache_when_gap_is_tight(monkeypatch, tmp_path: Path) -> None:
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        primary = cli.Candidate(
+            title="Movie",
+            year=2001,
+            source="Wikidata",
+            confidence=0.97,
+            metadata={"qid": "Q1", "title": "Movie", "year": 2001},
+            enrichment=None,
+        )
+        secondary = cli.Candidate(
+            title="Movie (Alt)",
+            year=2002,
+            source="Wikidata",
+            confidence=0.93,
+            metadata={"qid": "Q2", "title": "Movie (Alt)", "year": 2002},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[primary, secondary], raw_results=None, next_offset=0, has_more=False)
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Movie.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="movie", title="Movie", year=2001, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    cache_key = cli.build_cache_key(path, incoming, "movie", item.year)
+    assert cache.get_movie(cache_key) is not None
+    assert cache.get_movie(movie_cache_key(item.title, item.year)) is None
+
+
+def test_conflicting_reusable_movie_matches_mark_query_key_ambiguous(monkeypatch, tmp_path: Path) -> None:
+    def _fake_movie_candidates(item: InferredItem, *_args, **_kwargs) -> cli.CandidatePage:
+        qid = "Q1" if item.path.parent.name == "A" else "Q2"
+        candidate = cli.Candidate(
+            title="The Office",
+            year=2005,
+            source="Wikidata",
+            confidence=0.99,
+            metadata={"qid": qid, "title": "The Office", "year": 2005},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path_a = incoming / "A" / "The.Office.S01E01.mkv"
+    path_b = incoming / "B" / "The.Office.S01E01.mkv"
+    path_a.parent.mkdir(parents=True)
+    path_b.parent.mkdir(parents=True)
+    path_a.write_text("x", encoding="utf-8")
+    path_b.write_text("x", encoding="utf-8")
+
+    cache = Cache(library / ".plexify" / "cache.json")
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+
+    for path in [path_a, path_b]:
+        item = InferredItem(path=path, media_type="movie", title="The Office", year=2005, episode_title=None)
+        plan, _collision = cli._process_item(
+            item=item,
+            library=library,
+            cache=cache,
+            mode="dry-run",
+            copy_mode=True,
+            interactive=False,
+            auto_accept=True,
+            min_confidence=0.55,
+            session_tv=requests.Session(),
+            session_wd=requests.Session(),
+            episode_cache=EpisodeCache(),
+            progress=None,
+            show_cache=False,
+            incoming_root=incoming,
+            planned={},
+            on_conflict="rename",
+        )
+        assert plan is not None
+
+    reusable_key = movie_cache_key("The Office", 2005)
+    reusable = cache.get_movie(reusable_key)
+    assert reusable is not None
+    assert reusable.get("ambiguous") is True
+    assert len(reusable.get("matches", [])) == 2
+
+    monkeypatch.setattr(cli.wikidata, "search", lambda *_args, **_kwargs: [])
+    fresh_item = InferredItem(
+        path=incoming / "C" / "The.Office.S01E01.mkv",
+        media_type="movie",
+        title="The Office",
+        year=2005,
+        episode_title=None,
+    )
+    page = cli._movie_candidates(
+        fresh_item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        cache_key="movie|path|c/the.office.s01e01.mkv|the office s01e01|2005",
+    )
+    assert page.cache_hit is False
+
+
 def test_reusable_tv_cache_not_written_without_year(monkeypatch, tmp_path: Path) -> None:
     def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
         candidate = cli.Candidate(
@@ -733,6 +921,92 @@ def test_tv_cache_precedence_episode_over_reusable_folder_and_file(monkeypatch, 
     assert candidate.metadata["name"] == "Episode Show"
     assert candidate.metadata.get("season") == 9
     assert candidate.metadata.get("episode") == 99
+
+
+def test_tv_ambiguous_reusable_key_falls_back_to_folder_cache(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
+
+    incoming = tmp_path / "incoming"
+    path = incoming / "Show" / "Season 1" / "Show.S01E02.mkv"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(path=path, media_type="tv", title="Show", year=2005, season=1, episode=2, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+
+    reusable_show_key = cli.tv_show_cache_key(item.title, item.year)
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+    cache.set_show(
+        reusable_show_key,
+        {
+            "ambiguous": True,
+            "matches": [{"id": "10", "title": "Show (US)", "year": 2005}, {"id": "20", "title": "Show (UK)", "year": 2001}],
+        },
+    )
+    cache.set_show(folder_key, _tv_cache_entry(id_value=2, name="Folder Show", premiered=2005))
+
+    page = cli._tv_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        incoming_root=incoming,
+        cache_key=cli.build_cache_key(path, incoming, "tv", item.year),
+    )
+
+    assert page.cache_hit is True
+    assert page.candidates[0].metadata["name"] == "Folder Show"
+
+
+def test_tv_reusable_show_cache_does_not_override_inferred_episode_in_plan(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    path = incoming / "Show" / "Season 1" / "Show.S01E02.mkv"
+    path.parent.mkdir(parents=True)
+    library.mkdir()
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="tv", title="Show", year=2005, season=1, episode=2, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+    cache.set_show(
+        cli.tv_show_cache_key(item.title, item.year),
+        {
+            "id": 123,
+            "name": "Show",
+            "premiered": 2005,
+            "season": 9,
+            "episode": 99,
+            "episode_title": "Wrong",
+            "manual": False,
+            "confirmed_by_user": True,
+        },
+    )
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert plan.metadata["season"] == 1
+    assert plan.metadata["episode"] == 2
 
 
 def test_tv_episode_cache_not_reused_for_ambiguous_title(monkeypatch, tmp_path: Path) -> None:

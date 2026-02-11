@@ -60,10 +60,13 @@ from .util import (
 )
 
 app = typer.Typer(add_completion=True)
+cache_app = typer.Typer(help="Cache maintenance commands")
+app.add_typer(cache_app, name="cache")
 ASCII_UI_ENABLED = os.getenv("PLEXIFY_ASCII_UI", "").strip().lower() in {"1", "true", "yes", "on"}
 console = Console(safe_box=ASCII_UI_ENABLED)
 logger = get_logger(__name__)
 COMPLETION_ENABLED = True
+QUIET_OUTPUT = False
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
 DEFAULT_EXTENSIONS_LIST = [ext.strip() for ext in DEFAULT_EXTENSIONS.split(",") if ext.strip()]
 DEFAULT_MUSIC_EXTENSIONS = "flac,mp3,m4a"
@@ -71,6 +74,7 @@ DEFAULT_MIN_CONFIDENCE = 0.90
 AUTO_ACCEPT_GAP = 0.08
 REUSABLE_PROMOTION_MIN_CONFIDENCE = 0.95
 REUSABLE_PROMOTION_MIN_GAP = 0.10
+DEFAULT_PRUNE_IGNORE = "Thumbs.db,desktop.ini,.DS_Store"
 PROMPT_BASE = "s=search | m=manual | k=skip | q=quit"
 NO_MORE_RESULTS_MESSAGE = "No more results. Try 's' to refine or 'm' to enter manually."
 WIZARD_MEDIA_CHOICES = {
@@ -188,6 +192,8 @@ class BuildCommandConfig:
     report: Path | None
     on_conflict: str
     prune_empty_dirs: bool
+    quiet: bool
+    prune_ignore: str | None
 
 
 @dataclass(frozen=True)
@@ -216,7 +222,15 @@ def _parse_extensions(extensions: str) -> list[str]:
 
 
 def _safe_print(message: str, progress: Progress | None = None) -> None:
+    if QUIET_OUTPUT:
+        return
     _console_for(progress).print(message)
+
+
+def _parse_prune_ignore(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {token.strip().lower() for token in value.split(",") if token.strip()}
 
 
 def _tv_search_cache_key(query: str, year: int | None) -> str:
@@ -1616,12 +1630,45 @@ def _dir_empty_after_removals(path: Path, removed_files: set[Path], removed_dirs
     return True
 
 
+def _prune_ignorable_files(
+    path: Path,
+    removed_files: set[Path],
+    ignored_files: set[str],
+    *,
+    dry_run: bool,
+) -> None:
+    if not ignored_files:
+        return
+    try:
+        entries = list(path.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        if entry in removed_files:
+            continue
+        if entry.name.casefold() not in ignored_files:
+            continue
+        if dry_run:
+            console.print(f"Would remove ignored file: {format_path(entry)}")
+            removed_files.add(entry)
+            continue
+        try:
+            entry.unlink()
+            removed_files.add(entry)
+        except OSError:
+            continue
+
+
 def _prune_empty_dirs(
     plans: list[MovePlan],
     incoming_root: Path,
     *,
     dry_run: bool,
+    ignored_files: set[str] | None = None,
 ) -> None:
+    ignored = ignored_files if ignored_files is not None else _parse_prune_ignore(DEFAULT_PRUNE_IGNORE)
     removed_files = {plan.source for plan in plans}
     removed_dirs: set[Path] = set()
     for plan in plans:
@@ -1630,6 +1677,18 @@ def _prune_empty_dirs(
             if current in removed_dirs:
                 current = current.parent
                 continue
+            if _dir_empty_after_removals(current, removed_files, removed_dirs):
+                if dry_run:
+                    console.print(f"Would remove empty folder: {format_path(current)}")
+                else:
+                    try:
+                        current.rmdir()
+                    except OSError:
+                        break
+                removed_dirs.add(current)
+                current = current.parent
+                continue
+            _prune_ignorable_files(current, removed_files, ignored, dry_run=dry_run)
             if _dir_empty_after_removals(current, removed_files, removed_dirs):
                 if dry_run:
                     console.print(f"Would remove empty folder: {format_path(current)}")
@@ -1775,9 +1834,10 @@ def _plan_items(
                     if media_type_filter and item.media_type != media_type_filter:
                         index += 1
                         continue
-                    _safe_print("", progress)
-                    _console_for(progress).rule()
-                    _safe_print(_file_panel(index + 1, total, item, incoming), progress)
+                    if not QUIET_OUTPUT:
+                        _safe_print("", progress)
+                        _console_for(progress).rule()
+                        _safe_print(_file_panel(index + 1, total, item, incoming), progress)
                     cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
                     cache_snapshots: list[CacheSnapshot] = []
                     if override_key:
@@ -1921,6 +1981,8 @@ def _build_command(config: BuildCommandConfig) -> str:
         report=config.report,
         on_conflict=config.on_conflict,
         prune_empty_dirs=config.prune_empty_dirs,
+        quiet=config.quiet,
+        prune_ignore=config.prune_ignore,
     )
 
 
@@ -2905,12 +2967,18 @@ def organise(
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes", is_flag=True),
     clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running", is_flag=True),
     offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run", is_flag=True),
+    quiet: bool = typer.Option(False, "--quiet", "--batch", help="Reduce per-file output; show errors and summary", is_flag=True),
     on_conflict: str = typer.Option("rename", "--on-conflict", help="On destination conflict: rename/skip/overwrite"),
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
     prune_empty_dirs: bool = typer.Option(
         False, "--prune-empty-dirs", help="Remove empty folders after move", is_flag=True
+    ),
+    prune_ignore: str = typer.Option(
+        DEFAULT_PRUNE_IGNORE,
+        "--prune-ignore",
+        help="Comma-separated ignorable filenames for prune-empty-dirs",
     ),
 ) -> None:
     _initialise_logging(log_level, log_format, log_file)
@@ -2948,6 +3016,10 @@ def organise(
         raise typer.Exit(code=2)
 
     interactive_mode = True if interactive else not no_interactive
+    if not isinstance(quiet, bool):
+        quiet = False
+    if not isinstance(prune_ignore, str):
+        prune_ignore = DEFAULT_PRUNE_IGNORE
     if mode == "dry-run":
         console.print("DRY-RUN: no files will be moved/copied.")
     if offline:
@@ -2968,29 +3040,36 @@ def organise(
         else:
             copy_mode = True
 
+    ignored_prune_files = _parse_prune_ignore(prune_ignore)
     cache_path = cache or library / ".plexify" / "cache.json"
     report_path = report or library / ".plexify" / "reports" / f"{now_timestamp()}.json"
     if clear_cache:
         cache_path.unlink(missing_ok=True)
 
     media_type_filter = None if media_type == "auto" else media_type
-    plans, errors, stats = _plan_items(
-        incoming=incoming,
-        library=library,
-        mode=mode,
-        copy_mode=copy_mode,
-        interactive=interactive_mode,
-        auto_accept=yes,
-        min_confidence=min_confidence,
-        extensions=extensions,
-        cache_path=cache_path,
-        limit=limit,
-        show_cache=interactive_mode or print_tree,
-        media_type_filter=media_type_filter,
-        use_cache=not no_cache,
-        on_conflict=on_conflict,
-        offline=offline,
-    )
+    global QUIET_OUTPUT
+    previous_quiet_output = QUIET_OUTPUT
+    QUIET_OUTPUT = quiet and not interactive_mode
+    try:
+        plans, errors, stats = _plan_items(
+            incoming=incoming,
+            library=library,
+            mode=mode,
+            copy_mode=copy_mode,
+            interactive=interactive_mode,
+            auto_accept=yes,
+            min_confidence=min_confidence,
+            extensions=extensions,
+            cache_path=cache_path,
+            limit=limit,
+            show_cache=interactive_mode or print_tree,
+            media_type_filter=media_type_filter,
+            use_cache=not no_cache,
+            on_conflict=on_conflict,
+            offline=offline,
+        )
+    finally:
+        QUIET_OUTPUT = previous_quiet_output
 
     if print_tree and plans:
         tree = _build_tree([plan.destination for plan in plans])
@@ -3034,9 +3113,9 @@ def organise(
 
     if prune_empty_dirs and not copy_mode and plans:
         if apply_mode:
-            _prune_empty_dirs(result.moved, incoming, dry_run=False)
+            _prune_empty_dirs(result.moved, incoming, dry_run=False, ignored_files=ignored_prune_files)
         else:
-            _prune_empty_dirs(plans, incoming, dry_run=True)
+            _prune_empty_dirs(plans, incoming, dry_run=True, ignored_files=ignored_prune_files)
 
     write_report(report_path, result.moved if apply_mode else plans, mode, copy_mode)
     _print_run_summary(
@@ -3060,7 +3139,7 @@ def organise(
                 else:
                     result = _apply_with_progress(plans, copy_mode=copy_mode, on_conflict=on_conflict)
                     if prune_empty_dirs:
-                        _prune_empty_dirs(result.moved, incoming, dry_run=False)
+                        _prune_empty_dirs(result.moved, incoming, dry_run=False, ignored_files=ignored_prune_files)
                     apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
                     write_report(apply_report_path, result.moved, "apply", copy_mode)
             else:
@@ -3088,6 +3167,8 @@ def organise(
             report=None,
             on_conflict=on_conflict,
             prune_empty_dirs=prune_empty_dirs,
+            quiet=quiet,
+            prune_ignore=prune_ignore,
         )
         console.print("Apply command:")
         console.print(_build_command(apply_config))
@@ -3485,6 +3566,93 @@ def music(
     raise typer.Exit(code=0)
 
 
+def _resolve_cache_path_from_options(cache: Path | None, library: Path | None) -> Path:
+    if cache is not None:
+        return cache
+    if library is not None:
+        return library / ".plexify" / "cache.json"
+    console.print("Provide --cache or --library.")
+    raise typer.Exit(code=2)
+
+
+@cache_app.command("stats")
+def cache_stats(
+    cache: Path = typer.Option(None, "--cache", help="Cache path"),
+    library: Path = typer.Option(None, "--library", help="Library root (uses .plexify/cache.json)"),
+) -> None:
+    cache_path = _resolve_cache_path_from_options(cache, library)
+    store = Cache(cache_path)
+    shows = store.data.get("shows", {})
+    movies = store.data.get("movies", {})
+    enrichment = store.data.get("enrichment", {})
+    ambiguous_shows = sum(1 for entry in shows.values() if isinstance(entry, dict) and entry.get("ambiguous"))
+    ambiguous_movies = sum(1 for entry in movies.values() if isinstance(entry, dict) and entry.get("ambiguous"))
+    console.print(f"Cache path: {format_path(cache_path)}")
+    console.print(f"Shows: {len(shows)}")
+    console.print(f"Movies: {len(movies)}")
+    console.print(f"Enrichment: {len(enrichment)}")
+    console.print(f"Ambiguous shows: {ambiguous_shows}")
+    console.print(f"Ambiguous movies: {ambiguous_movies}")
+    raise typer.Exit(code=0)
+
+
+@cache_app.command("prune")
+def cache_prune(
+    cache: Path = typer.Option(None, "--cache", help="Cache path"),
+    library: Path = typer.Option(None, "--library", help="Library root (uses .plexify/cache.json)"),
+) -> None:
+    cache_path = _resolve_cache_path_from_options(cache, library)
+    store = Cache(cache_path)
+    shows = dict(store.data.get("shows", {}))
+    movies = dict(store.data.get("movies", {}))
+    removed_shows = 0
+    removed_movies = 0
+    for key, entry in list(shows.items()):
+        if not isinstance(entry, dict) or not cache_entry_confirmed_or_auto(entry):
+            store.delete_show(key)
+            removed_shows += 1
+    for key, entry in list(movies.items()):
+        if not isinstance(entry, dict) or not cache_entry_confirmed_or_auto(entry):
+            store.delete_movie(key)
+            removed_movies += 1
+    if removed_shows or removed_movies:
+        store.save()
+    console.print(f"Pruned shows: {removed_shows}")
+    console.print(f"Pruned movies: {removed_movies}")
+    console.print(f"Cache path: {format_path(cache_path)}")
+    raise typer.Exit(code=0)
+
+
+@cache_app.command("delete")
+def cache_delete(
+    query: str = typer.Argument(..., help="Substring to match cache keys"),
+    cache: Path = typer.Option(None, "--cache", help="Cache path"),
+    library: Path = typer.Option(None, "--library", help="Library root (uses .plexify/cache.json)"),
+) -> None:
+    cache_path = _resolve_cache_path_from_options(cache, library)
+    store = Cache(cache_path)
+    needle = query.strip().casefold()
+    if not needle:
+        console.print("Query cannot be empty.")
+        raise typer.Exit(code=2)
+    removed_shows = 0
+    removed_movies = 0
+    for key in list(store.data.get("shows", {}).keys()):
+        if needle in key.casefold():
+            store.delete_show(key)
+            removed_shows += 1
+    for key in list(store.data.get("movies", {}).keys()):
+        if needle in key.casefold():
+            store.delete_movie(key)
+            removed_movies += 1
+    if removed_shows or removed_movies:
+        store.save()
+    console.print(f"Deleted shows: {removed_shows}")
+    console.print(f"Deleted movies: {removed_movies}")
+    console.print(f"Cache path: {format_path(cache_path)}")
+    raise typer.Exit(code=0)
+
+
 @app.callback(invoke_without_command=True)
 def main(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
@@ -3805,6 +3973,8 @@ def _wizard_video(
         report=None,
         on_conflict="rename",
         prune_empty_dirs=prune_empty_dirs,
+        quiet=False,
+        prune_ignore=DEFAULT_PRUNE_IGNORE,
     )
     command = _build_command(command_config)
     console.print("Running:")
@@ -3834,6 +4004,8 @@ def _wizard_video(
         log_format=log_format,
         log_file=log_file,
         prune_empty_dirs=prune_empty_dirs,
+        prune_ignore=DEFAULT_PRUNE_IGNORE,
+        quiet=False,
     )
 
 

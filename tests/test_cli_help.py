@@ -9,6 +9,7 @@ def test_cli_help():
     assert result.exit_code == 0
     assert "organise" in result.output
     assert "music" in result.output
+    assert "cache" in result.output
 
 
 def test_organise_help():
@@ -19,6 +20,17 @@ def test_organise_help():
     assert "--log-format" in result.output
     assert "--log-file" in result.output
     assert "--offline" in result.output
+    assert "--quiet" in result.output
+    assert "--prune-ignore" in result.output
+
+
+def test_cache_help():
+    runner = CliRunner()
+    result = runner.invoke(app, ["cache", "--help"])
+    assert result.exit_code == 0
+    assert "stats" in result.output
+    assert "prune" in result.output
+    assert "delete" in result.output
 
 
 def test_wizard_help():

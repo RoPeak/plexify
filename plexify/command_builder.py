@@ -33,6 +33,8 @@ def build_organise_command(
     report: Path | None,
     on_conflict: str,
     prune_empty_dirs: bool,
+    quiet: bool,
+    prune_ignore: str | None,
 ) -> str:
     parts = [
         "python -m plexify.cli organise",
@@ -67,6 +69,10 @@ def build_organise_command(
         parts.append(f"--on-conflict {on_conflict}")
     if prune_empty_dirs:
         parts.append("--prune-empty-dirs")
+    if prune_ignore and prune_ignore != "Thumbs.db,desktop.ini,.DS_Store":
+        parts.append(f"--prune-ignore {quote_cli_arg(prune_ignore)}")
+    if quiet:
+        parts.append("--quiet")
     if not interactive:
         parts.append("--no-interactive")
     return " ".join(parts)

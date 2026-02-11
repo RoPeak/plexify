@@ -24,6 +24,8 @@ def test_build_command_from_config() -> None:
         report=Path("C:/Reports/report.json"),
         on_conflict="skip",
         prune_empty_dirs=True,
+        quiet=True,
+        prune_ignore="Thumbs.db,desktop.ini",
     )
     command = cli._build_command(config)
 
@@ -43,6 +45,8 @@ def test_build_command_from_config() -> None:
     assert f"--report {quote_cli_arg(str(Path('C:/Reports/report.json')))}" in command
     assert "--on-conflict skip" in command
     assert "--prune-empty-dirs" in command
+    assert "--quiet" in command
+    assert f"--prune-ignore {quote_cli_arg('Thumbs.db,desktop.ini')}" in command
     assert "--no-interactive" in command
 
 
@@ -66,6 +70,8 @@ def test_build_command_escapes_apostrophes_for_windows_shells() -> None:
         report=None,
         on_conflict="rename",
         prune_empty_dirs=False,
+        quiet=False,
+        prune_ignore=cli.DEFAULT_PRUNE_IGNORE,
     )
 
     command = cli._build_command(config)

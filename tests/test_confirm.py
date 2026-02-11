@@ -46,3 +46,15 @@ def test_confirm_reprompts_on_empty_choice_then_accepts(monkeypatch) -> None:
     assert cli._confirm("Proceed?", True, None) is True
     assert cli._confirm("Proceed?", False, None) is False
     assert prompts == ["Please enter y/n.", "Please enter y/n."]
+
+
+def test_confirm_overwrite_apply_requires_exact_token(monkeypatch) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: "overwrite")
+    monkeypatch.setattr(cli.console, "print", lambda message, *_args, **_kwargs: prompts.append(str(message)))
+
+    assert cli._confirm_overwrite_apply([], copy_mode=True) is False
+    assert any("overwrite mode" in line.lower() for line in prompts)
+
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: "OVERWRITE")
+    assert cli._confirm_overwrite_apply([], copy_mode=False) is True

@@ -1836,3 +1836,189 @@ def test_movie_to_tv_switch_persists_for_same_folder(monkeypatch, tmp_path: Path
     assert plan_two.media_type == "tv"
     assert movie_calls["count"] == 1
     assert sum("Switch to TV search?" in prompt for prompt in confirm_prompts) == 1
+
+
+def test_organise_apply_overwrite_requires_extra_token(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    src = incoming / "Movie.mkv"
+    src.write_text("x", encoding="utf-8")
+    plan = cli.MovePlan(
+        source=src,
+        destination=library / "Movies" / "Movie (2000)" / "Movie (2000).mkv",
+        mode="apply",
+        media_type="movie",
+        metadata={"title": "Movie", "year": 2000},
+    )
+    called = {"apply": 0}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_plan_items", lambda *_args, **_kwargs: ([plan], [], cli.PlanStats()))
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_print_run_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cli, "_confirm_overwrite_apply", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        cli,
+        "_apply_with_progress",
+        lambda *_args, **_kwargs: called.__setitem__("apply", called["apply"] + 1) or cli.ExecutionResult([], [], []),
+    )
+
+    try:
+        cli.organise(
+            incoming=incoming,
+            library=library,
+            mode="apply",
+            move=False,
+            copy=True,
+            extensions=cli.DEFAULT_EXTENSIONS,
+            min_confidence=cli.DEFAULT_MIN_CONFIDENCE,
+            cache=None,
+            report=None,
+            yes=False,
+            limit=None,
+            print_tree=False,
+            interactive=True,
+            no_interactive=False,
+            media_type="auto",
+            no_cache=False,
+            clear_cache=False,
+            offline=False,
+            on_conflict="overwrite",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+            prune_empty_dirs=False,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert called["apply"] == 0
+
+
+def test_organise_apply_overwrite_token_allows_apply(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    src = incoming / "Movie.mkv"
+    src.write_text("x", encoding="utf-8")
+    plan = cli.MovePlan(
+        source=src,
+        destination=library / "Movies" / "Movie (2000)" / "Movie (2000).mkv",
+        mode="apply",
+        media_type="movie",
+        metadata={"title": "Movie", "year": 2000},
+    )
+    called = {"apply": 0}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_plan_items", lambda *_args, **_kwargs: ([plan], [], cli.PlanStats()))
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_print_run_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cli, "_confirm_overwrite_apply", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        cli,
+        "_apply_with_progress",
+        lambda *_args, **_kwargs: called.__setitem__("apply", called["apply"] + 1)
+        or cli.ExecutionResult([plan], [], []),
+    )
+
+    try:
+        cli.organise(
+            incoming=incoming,
+            library=library,
+            mode="apply",
+            move=False,
+            copy=True,
+            extensions=cli.DEFAULT_EXTENSIONS,
+            min_confidence=cli.DEFAULT_MIN_CONFIDENCE,
+            cache=None,
+            report=None,
+            yes=False,
+            limit=None,
+            print_tree=False,
+            interactive=True,
+            no_interactive=False,
+            media_type="auto",
+            no_cache=False,
+            clear_cache=False,
+            offline=False,
+            on_conflict="overwrite",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+            prune_empty_dirs=False,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert called["apply"] == 1
+
+
+def test_organise_apply_rename_does_not_prompt_overwrite_token(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    src = incoming / "Movie.mkv"
+    src.write_text("x", encoding="utf-8")
+    plan = cli.MovePlan(
+        source=src,
+        destination=library / "Movies" / "Movie (2000)" / "Movie (2000).mkv",
+        mode="apply",
+        media_type="movie",
+        metadata={"title": "Movie", "year": 2000},
+    )
+    called = {"apply": 0}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_plan_items", lambda *_args, **_kwargs: ([plan], [], cli.PlanStats()))
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_print_run_summary", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        cli,
+        "_confirm_overwrite_apply",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_apply_with_progress",
+        lambda *_args, **_kwargs: called.__setitem__("apply", called["apply"] + 1)
+        or cli.ExecutionResult([plan], [], []),
+    )
+
+    try:
+        cli.organise(
+            incoming=incoming,
+            library=library,
+            mode="apply",
+            move=False,
+            copy=True,
+            extensions=cli.DEFAULT_EXTENSIONS,
+            min_confidence=cli.DEFAULT_MIN_CONFIDENCE,
+            cache=None,
+            report=None,
+            yes=False,
+            limit=None,
+            print_tree=False,
+            interactive=True,
+            no_interactive=False,
+            media_type="auto",
+            no_cache=False,
+            clear_cache=False,
+            offline=False,
+            on_conflict="rename",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+            prune_empty_dirs=False,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert called["apply"] == 1

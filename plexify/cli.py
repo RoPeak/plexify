@@ -582,6 +582,14 @@ def _confirm_move(progress: Progress | None) -> bool:
     return phrase.strip().lower() == "move"
 
 
+def _confirm_overwrite_apply(plans: list[MovePlan], copy_mode: bool) -> bool:
+    operation = "copy" if copy_mode else "move"
+    console.print("Warning: overwrite mode will replace existing destination files.")
+    console.print(f"Apply mode: {operation} | Planned items: {len(plans)} | Conflict policy: overwrite")
+    phrase = _prompt_text("To proceed, type OVERWRITE", "", None, show_default=False)
+    return phrase.strip() == "OVERWRITE"
+
+
 def _compact_text(value: str) -> str:
     return movie_matcher.compact_text(value)
 
@@ -3012,6 +3020,13 @@ def organise(
             if not _confirm("Apply this plan now? [y/N]", False, None, show_default=False):
                 console.print("Cancelled. No changes were made.")
                 raise typer.Exit(code=0)
+    if apply_mode and plans and on_conflict == "overwrite":
+        if not interactive_mode and not sys.stdin.isatty():
+            console.print("Overwrite mode requires an interactive confirmation token (OVERWRITE).")
+            raise typer.Exit(code=2)
+        if not _confirm_overwrite_apply(plans, copy_mode):
+            console.print("Cancelled. No changes were made.")
+            raise typer.Exit(code=0)
     if apply_mode and plans:
         result = _apply_with_progress(plans, copy_mode=copy_mode, on_conflict=on_conflict)
     else:
@@ -3036,7 +3051,9 @@ def organise(
     apply_report_path = None
     if not apply_mode and interactive_mode and plans:
         if _confirm("Apply these changes now? [y/N]", False, None, show_default=False):
-            if not copy_mode:
+            if on_conflict == "overwrite" and not _confirm_overwrite_apply(plans, copy_mode):
+                console.print("Cancelled. No changes were made.")
+            elif not copy_mode:
                 console.print("Warning: move will remove the original files from the incoming folder.")
                 if not _confirm_move(None):
                     console.print("Cancelled. No changes were made.")

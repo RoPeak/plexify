@@ -30,6 +30,22 @@ def test_infer_tv_leading_zero_episode_number_with_separator() -> None:
     assert item.episode == 2
 
 
+def test_infer_tv_leading_zero_episode_special_in_season_zero_folder(tmp_path: Path) -> None:
+    season_dir = tmp_path / "Show" / "Season 0"
+    season_dir.mkdir(parents=True)
+    first = season_dir / "0 - Pilot.mkv"
+    second = season_dir / "1 - Episode One.mkv"
+    first.write_text("x", encoding="utf-8")
+    second.write_text("x", encoding="utf-8")
+
+    item = infer_item(first)
+    assert item.media_type == "tv"
+    assert item.title == "Show"
+    assert item.season == 0
+    assert item.episode == 0
+    assert item.episode_title == "Pilot"
+
+
 def test_infer_tv_sxxeyy_still_wins() -> None:
     path = Path("Sherlock/Season 1/S01E02 - The Blind Banker.mkv")
     item = infer_item(path)
@@ -288,6 +304,35 @@ def test_infer_tv_episode_range_from_leading_numbers(tmp_path: Path) -> None:
     assert item.episode == 21
     assert item.episode_end == 22
     assert item.episode_title == "Finale"
+
+
+def test_infer_tv_episode_range_from_chained_sxxeyy_token() -> None:
+    path = Path("Show/Season 1/Show.S01E01E02.mkv")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.title == "Show"
+    assert item.season == 1
+    assert item.episode == 1
+    assert item.episode_end == 2
+
+
+def test_infer_tv_episode_range_from_chained_xyy_token() -> None:
+    path = Path("Show/Season 1/Show.1x01x02.mkv")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.title == "Show"
+    assert item.season == 1
+    assert item.episode == 1
+    assert item.episode_end == 2
+
+
+def test_infer_tv_specials_multi_episode_from_chained_sxxeyy_token() -> None:
+    path = Path("Show/Specials/Show.S00E01E02.mkv")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.season == 0
+    assert item.episode == 1
+    assert item.episode_end == 2
 
 
 def test_infer_tv_root_level_season_folder_uses_folder_name_as_show_title(tmp_path: Path) -> None:

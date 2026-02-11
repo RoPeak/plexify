@@ -13,8 +13,10 @@ SEASON_TOKEN_RE = r"(?:season|series|seaon|seson|seasn)"
 SEASON_RE = re.compile(rf"(?<![A-Za-z0-9]){SEASON_TOKEN_RE}[-_. ]*(\d{{1,2}})(?![A-Za-z0-9])", re.IGNORECASE)
 SXXEYY_RE = re.compile(r"\bs(\d{1,2})e(\d{1,3})\b", re.IGNORECASE)
 SXXEYY_RANGE_RE = re.compile(r"\bs(\d{1,2})e(\d{1,3})\s*[-_. ]+\s*e?(\d{1,3})\b", re.IGNORECASE)
+SXXEYY_CHAIN_RE = re.compile(r"\bs(\d{1,2})e(\d{1,3})(?:[-_. ]*e\d{1,3})+\b", re.IGNORECASE)
 XYY_RE = re.compile(r"\b(\d{1,2})x(\d{1,3})\b", re.IGNORECASE)
 XYY_RANGE_RE = re.compile(r"\b(\d{1,2})x(\d{1,3})\s*[-_. ]+\s*(\d{1,3})\b", re.IGNORECASE)
+XYY_CHAIN_RE = re.compile(r"\b(\d{1,2})x(\d{1,3})(?:[-_. ]*x\d{1,3})+\b", re.IGNORECASE)
 SEASON_EP_RE = re.compile(
     rf"(?<![A-Za-z0-9]){SEASON_TOKEN_RE}[-_. ]*(\d{{1,2}})[-_. ]+(?:episode|ep)?[-_. ]*(\d{{1,3}})(?![A-Za-z0-9])",
     re.IGNORECASE,
@@ -142,6 +144,10 @@ def _starts_with_number(value: str) -> bool:
     return bool(re.match(r"^\s*\d+", value))
 
 
+def _prefer_known_int(value: Optional[int], fallback: Optional[int]) -> Optional[int]:
+    return value if value is not None else fallback
+
+
 def _clean_title_from_stem(stem: str) -> str:
     tokens = re.split(r"[.\s_\-]+", stem)
     cleaned: list[str] = []
@@ -205,6 +211,46 @@ def infer_tv_episode_range_from_stem(stem: str) -> tuple[int, int] | None:
     if end - start > 10:
         return None
     return start, end
+
+
+def _infer_sxxeyy_chain_from_stem(stem: str) -> tuple[int, int, int] | None:
+    match = SXXEYY_CHAIN_RE.search(stem)
+    if not match:
+        return None
+    token = match.group(0)
+    season_match = re.match(r"s(\d{1,2})", token, re.IGNORECASE)
+    if not season_match:
+        return None
+    episodes = [int(value) for value in re.findall(r"e(\d{1,3})", token, re.IGNORECASE)]
+    if len(episodes) < 2:
+        return None
+    start = episodes[0]
+    end = episodes[-1]
+    if end <= start:
+        return None
+    if end - start > 10:
+        return None
+    return int(season_match.group(1)), start, end
+
+
+def _infer_xyy_chain_from_stem(stem: str) -> tuple[int, int, int] | None:
+    match = XYY_CHAIN_RE.search(stem)
+    if not match:
+        return None
+    token = match.group(0)
+    season_match = re.match(r"(\d{1,2})x", token, re.IGNORECASE)
+    if not season_match:
+        return None
+    episodes = [int(value) for value in re.findall(r"x(\d{1,3})", token, re.IGNORECASE)]
+    if len(episodes) < 2:
+        return None
+    start = episodes[0]
+    end = episodes[-1]
+    if end <= start:
+        return None
+    if end - start > 10:
+        return None
+    return int(season_match.group(1)), start, end
 
 
 def infer_movie_title_from_stem(stem: str, guess_title: Optional[str]) -> Optional[str]:
@@ -302,7 +348,8 @@ def infer_item(path: Path) -> InferredItem:
     if path.stem.isdigit() and 1 <= len(path.stem) <= 3 and _parent_has_multiple_videos(path):
         media_type = "tv"
         episode = int(path.stem)
-        season = season or _extract_season_from_parts(path) or 1
+        season = _prefer_known_int(season, _extract_season_from_parts(path))
+        season = _prefer_known_int(season, 1)
         explicit_episode = True
         show_folder = _parent_show_name(path) or path.parent.name
         title_override, year_override = _clean_parent_show_name(show_folder)
@@ -320,7 +367,8 @@ def infer_item(path: Path) -> InferredItem:
         ):
             media_type = "tv"
             episode, episode_end = leading_episode_range
-            season = season or _extract_season_from_parts(path) or 1
+            season = _prefer_known_int(season, _extract_season_from_parts(path))
+            season = _prefer_known_int(season, 1)
             explicit_episode = True
             show_folder = _parent_show_name(path) or parent_name
             title_override, year_override = _clean_parent_show_name(show_folder)
@@ -337,7 +385,8 @@ def infer_item(path: Path) -> InferredItem:
         ):
             media_type = "tv"
             episode = leading_episode
-            season = season or _extract_season_from_parts(path) or 1
+            season = _prefer_known_int(season, _extract_season_from_parts(path))
+            season = _prefer_known_int(season, 1)
             explicit_episode = True
             show_folder = _parent_show_name(path) or parent_name
             title_override, year_override = _clean_parent_show_name(show_folder)
@@ -345,6 +394,8 @@ def infer_item(path: Path) -> InferredItem:
 
     sxxeyy_range = SXXEYY_RANGE_RE.search(stem_for_tv)
     xyy_range = XYY_RANGE_RE.search(stem_for_tv)
+    sxxeyy_chain = _infer_sxxeyy_chain_from_stem(stem_for_tv)
+    xyy_chain = _infer_xyy_chain_from_stem(stem_for_tv)
     sxxeyy = SXXEYY_RE.search(stem_for_tv)
     if sxxeyy_range:
         season = int(sxxeyy_range.group(1))
@@ -356,6 +407,14 @@ def infer_item(path: Path) -> InferredItem:
         season = int(xyy_range.group(1))
         episode = int(xyy_range.group(2))
         episode_end = int(xyy_range.group(3))
+        explicit_episode = True
+        media_type = "tv"
+    elif sxxeyy_chain:
+        season, episode, episode_end = sxxeyy_chain
+        explicit_episode = True
+        media_type = "tv"
+    elif xyy_chain:
+        season, episode, episode_end = xyy_chain
         explicit_episode = True
         media_type = "tv"
     elif sxxeyy:
@@ -371,13 +430,13 @@ def infer_item(path: Path) -> InferredItem:
             explicit_episode = explicit_episode or explicit_pair
             media_type = "tv"
 
-    season = season or _extract_season_from_parts(path)
+    season = _prefer_known_int(season, _extract_season_from_parts(path))
     if season is not None:
         media_type = "tv"
 
     episode_from_name, explicit_from_name = _extract_episode_from_name(stem_for_tv)
     explicit_episode = explicit_episode or explicit_from_name
-    episode = episode or episode_from_name
+    episode = _prefer_known_int(episode, episode_from_name)
     if episode is not None and (has_tv_context or has_tv_hint or season is not None or explicit_episode):
         media_type = "tv"
 
@@ -386,8 +445,8 @@ def infer_item(path: Path) -> InferredItem:
         guessed_episode = guess.get("episode")
         if has_tv_context or has_tv_hint or season is not None or guessed_season is not None or explicit_episode:
             media_type = "tv"
-            season = season or guessed_season
-            episode = episode or guessed_episode
+            season = _prefer_known_int(season, guessed_season)
+            episode = _prefer_known_int(episode, guessed_episode)
 
     if episode is None and (media_type == "tv" or has_tv_context or has_tv_hint or season is not None):
         episode_candidate = infer_tv_episode_from_stem(stem_for_tv)

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plexify"
+version = "0.1.0"
+description = "CLI tool to organize movie, TV, and music files for Plex-friendly layouts."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "typer==0.12.3",
+  "click==8.1.7",
+  "rich==13.7.1",
+  "requests==2.32.3",
+  "guessit==3.8.0",
+  "rapidfuzz==3.9.6",
+  "prompt_toolkit==3.0.47",
+]
+
+[project.scripts]
+plexify = "plexify.cli:app"
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.2.2",
+]
+
+[tool.setuptools.packages.find]
+include = ["plexify*"]

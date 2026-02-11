@@ -17,6 +17,13 @@ From the repository root:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+python -m pip install -e .
+```
+
+After editable install, you can run the console script directly:
+
+```powershell
+plexify --help
 ```
 
 ## Quick start

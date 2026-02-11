@@ -3,7 +3,7 @@ import re
 import sys
 import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -27,10 +27,20 @@ from .planner import plan_movie, plan_tv_show
 from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_overlapping
 from .prompting import _prompt_text
 from .report import ReportFormatError, write_report
+from .services import movie_matcher, music_matcher, tv_matcher
 from .sources import musicbrainz, tvmaze, wikidata
 from .tv_episode_cache import EpisodeCache
 from .undo import undo_report
 from .ui import format_path, rich_escape
+from .cache_policy import (
+    cache_entry_compatible,
+    cache_entry_confirmed_or_auto,
+    is_ambiguous_cache_title as cache_is_ambiguous_title,
+    promote_reusable_with_conflict_tracking,
+    reusable_cache_safe,
+    should_promote_to_reusable,
+    year_distance,
+)
 from .util import (
     ExecutionResult,
     MovePlan,
@@ -40,7 +50,6 @@ from .util import (
     json_load,
     make_search_query,
     movie_cache_key,
-    normalize_title_for_similarity,
     now_timestamp,
     tv_episode_cache_key,
     tv_show_folder_cache_key,
@@ -215,51 +224,7 @@ def _tv_search_cache_key(query: str, year: int | None) -> str:
 
 
 def _cache_entry_confirmed_or_auto(entry: dict[str, Any] | None) -> bool:
-    if not entry:
-        return False
-    if bool(entry.get("ambiguous")):
-        return False
-    if bool(entry.get("confirmed_by_user")):
-        return True
-    if entry.get("selection_mode") == "auto" and not bool(entry.get("manual")):
-        return True
-    return False
-
-
-def _reusable_match_from_entry(media_type: str, entry: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not entry:
-        return None
-    if media_type == "movie":
-        qid = entry.get("qid")
-        if not qid:
-            return None
-        return {"id": str(qid), "title": entry.get("title"), "year": entry.get("year")}
-    show_id = entry.get("id")
-    if not show_id:
-        return None
-    return {"id": str(show_id), "title": entry.get("name"), "year": entry.get("premiered")}
-
-
-def _reusable_matches_conflict(
-    media_type: str,
-    existing_entry: dict[str, Any] | None,
-    new_entry: dict[str, Any],
-) -> bool:
-    new_match = _reusable_match_from_entry(media_type, new_entry)
-    if new_match is None:
-        return False
-    if existing_entry and bool(existing_entry.get("ambiguous")):
-        matches = existing_entry.get("matches")
-        if not isinstance(matches, list):
-            return False
-        for match in matches:
-            if isinstance(match, dict) and str(match.get("id")) == str(new_match["id"]):
-                return False
-        return True
-    existing_match = _reusable_match_from_entry(media_type, existing_entry)
-    if existing_match is None:
-        return False
-    return str(existing_match["id"]) != str(new_match["id"])
+    return cache_entry_confirmed_or_auto(entry)
 
 
 def _promote_reusable_with_conflict_tracking(
@@ -269,37 +234,7 @@ def _promote_reusable_with_conflict_tracking(
     key: str,
     entry: dict[str, Any],
 ) -> None:
-    existing = cache.get_movie(key) if media_type == "movie" else cache.get_show(key)
-    if not _reusable_matches_conflict(media_type, existing, entry):
-        if media_type == "movie":
-            cache.set_movie(key, entry)
-        else:
-            cache.set_show(key, entry)
-        return
-
-    new_match = _reusable_match_from_entry(media_type, entry)
-    matches: list[dict[str, Any]] = []
-    if existing and bool(existing.get("ambiguous")) and isinstance(existing.get("matches"), list):
-        for row in existing["matches"]:
-            if isinstance(row, dict) and row.get("id") is not None:
-                matches.append({"id": str(row.get("id")), "title": row.get("title"), "year": row.get("year")})
-    else:
-        existing_match = _reusable_match_from_entry(media_type, existing)
-        if existing_match is not None:
-            matches.append(existing_match)
-    if new_match is not None and all(str(row.get("id")) != str(new_match["id"]) for row in matches):
-        matches.append(new_match)
-
-    conflict_entry = {
-        "ambiguous": True,
-        "matches": matches,
-        "selection_mode": "ambiguous",
-        "created_at": now_timestamp(),
-    }
-    if media_type == "movie":
-        cache.set_movie(key, conflict_entry)
-    else:
-        cache.set_show(key, conflict_entry)
+    promote_reusable_with_conflict_tracking(media_type, cache=cache, key=key, entry=entry)
 
 
 def _media_override_key(path: Path, incoming_root: Path | None) -> str | None:
@@ -437,8 +372,7 @@ def _build_search_query(title: str, hint: str | None) -> str:
 
 
 def _normalize_tv_retry_query(value: str) -> str:
-    cleaned = TV_EXPLICIT_SEASON_RE.sub(" ", value or "")
-    return make_search_query(cleaned) or cleaned.strip()
+    return tv_matcher.normalize_tv_retry_query(value, TV_EXPLICIT_SEASON_RE)
 
 
 def _extract_explicit_season_from_path(path: Path) -> int | None:
@@ -655,102 +589,39 @@ def _confirm_move(progress: Progress | None) -> bool:
 
 
 def _compact_text(value: str) -> str:
-    return re.sub(r"\s+", "", value)
+    return movie_matcher.compact_text(value)
 
 
 def _compact_sequel_form(value: str) -> str | None:
-    tokens = value.split()
-    if len(tokens) < 2:
-        return None
-    if len(tokens[0]) == 1 and tokens[-1].isdigit():
-        return f"{tokens[0]}{tokens[-1]}"
-    return None
+    return movie_matcher.compact_sequel_form(value)
 
 
 def _title_similarity(title_guess: str, title_actual: str) -> float:
-    norm_left = normalize_title_for_similarity(title_guess) or title_guess.lower()
-    norm_right = normalize_title_for_similarity(title_actual) or title_actual.lower()
-    search_left = make_search_query(title_guess) or title_guess.lower()
-    search_right = make_search_query(title_actual) or title_actual.lower()
-    forms_left = {norm_left, _compact_text(norm_left), search_left, _compact_text(search_left)}
-    forms_right = {norm_right, _compact_text(norm_right), search_right, _compact_text(search_right)}
-    compact_left = _compact_sequel_form(norm_left)
-    compact_right = _compact_sequel_form(norm_right)
-    if compact_left:
-        forms_left.add(compact_left)
-    if compact_right:
-        forms_right.add(compact_right)
-    best = 0.0
-    for left in forms_left:
-        for right in forms_right:
-            score = max(
-                fuzz.WRatio(left, right),
-                fuzz.partial_ratio(left, right),
-            ) / 100.0
-            if score > best:
-                best = score
-    return best
+    return movie_matcher.title_similarity(title_guess, title_actual)
 
 
 def _year_adjustment(target_year: int | None, candidate_year: int | None) -> float:
-    if not target_year or not candidate_year:
-        return 0.0
-    diff = abs(target_year - candidate_year)
-    if diff == 0:
-        return 0.20
-    if diff == 1:
-        return 0.08
-    if diff == 2:
-        return 0.04
-    return -min(0.30, 0.03 * diff)
+    return movie_matcher.year_adjustment(target_year, candidate_year)
 
 
 def _confidence_score(title_guess: str, title_actual: str, year_guess: int | None, year_actual: int | None) -> float:
-    base = _title_similarity(title_guess, title_actual)
-    adjusted = base + _year_adjustment(year_guess, year_actual)
-    return max(0.0, min(1.0, adjusted))
+    return movie_matcher.confidence_score(title_guess, title_actual, year_guess, year_actual)
 
 
 def _tv_confidence_score(title_guess: str, title_actual: str, year_guess: int | None, year_actual: int | None) -> float:
-    base = _title_similarity(title_guess, title_actual)
-    if not year_guess or not year_actual:
-        return max(0.0, min(1.0, base))
-    diff = abs(year_guess - year_actual)
-    if diff == 0:
-        adjustment = 0.35
-    elif diff <= 1:
-        adjustment = 0.18
-    elif diff <= 2:
-        adjustment = 0.10
-    elif diff <= 5:
-        adjustment = -0.08 * diff
-    elif diff <= 10:
-        adjustment = -0.35
-    else:
-        adjustment = -0.6
-    return max(0.0, min(1.0, base + adjustment))
+    return tv_matcher.tv_confidence_score(title_guess, title_actual, year_guess, year_actual)
 
 
 def _year_distance(target_year: int | None, candidate_year: int | None) -> int:
-    if not target_year or not candidate_year:
-        return 999
-    return abs(target_year - candidate_year)
+    return year_distance(target_year, candidate_year)
 
 
 def _has_sequel_marker(title: str) -> bool:
-    tokens = re.split(r"[.\s_\-:/\\]+", title.strip())
-    if not tokens:
-        return False
-    last = tokens[-1].lower()
-    if last in {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii", "xiii", "xiv", "xv"}:
-        return True
-    return bool(re.fullmatch(r"\d+", last))
+    return movie_matcher.has_sequel_marker(title)
 
 
 def _search_lost_sequel_marker(title: str, search_query: str) -> bool:
-    if not _has_sequel_marker(title):
-        return False
-    return not _has_sequel_marker(search_query)
+    return movie_matcher.search_lost_sequel_marker(title, search_query)
 
 
 def _format_value(value: str | None) -> str:
@@ -1464,30 +1335,15 @@ def _snapshot_stats(stats: PlanStats) -> PlanStats:
 
 
 def _cache_entry_compatible(inferred_year: int | None, cached_year: int | None) -> bool:
-    if inferred_year is None or cached_year is None:
-        return True
-    return _year_distance(inferred_year, cached_year) <= 2
+    return cache_entry_compatible(inferred_year, cached_year)
 
 
 def _is_ambiguous_cache_title(title: str) -> bool:
-    normalised = normalize_title_for_similarity(title)
-    tokens = [token for token in re.split(r"\s+", normalised) if token]
-    if not tokens:
-        return True
-    if len(tokens) == 1:
-        return True
-    if len(normalised) < 6:
-        return True
-    generic_titles = {"movie", "film", "show", "series", "episode", "unknown", "sample", "video", "tv"}
-    if normalised in generic_titles:
-        return True
-    return False
+    return cache_is_ambiguous_title(title)
 
 
 def _reusable_cache_safe(title: str, year: int | None) -> bool:
-    if year is not None:
-        return True
-    return not _is_ambiguous_cache_title(title)
+    return reusable_cache_safe(title, year)
 
 
 def _reusable_movie_cache_safe(item: InferredItem) -> bool:
@@ -1504,15 +1360,16 @@ def _should_promote_to_reusable(
     selected: Candidate,
     candidates: list[Candidate],
 ) -> bool:
-    if selection_mode != "auto":
-        return False
-    if bool(selected.metadata.get("manual")):
-        return False
-    if selected.confidence < REUSABLE_PROMOTION_MIN_CONFIDENCE:
-        return False
-    if len(candidates) <= 1:
-        return True
-    return (candidates[0].confidence - candidates[1].confidence) >= REUSABLE_PROMOTION_MIN_GAP
+    top_gap = candidates[0].confidence - candidates[1].confidence if len(candidates) > 1 else 0.0
+    return should_promote_to_reusable(
+        selection_mode=selection_mode,
+        manual=bool(selected.metadata.get("manual")),
+        confidence=selected.confidence,
+        candidates_count=len(candidates),
+        top_gap=top_gap,
+        min_confidence=REUSABLE_PROMOTION_MIN_CONFIDENCE,
+        min_gap=REUSABLE_PROMOTION_MIN_GAP,
+    )
 
 
 def _auto_acceptable(
@@ -1525,18 +1382,17 @@ def _auto_acceptable(
 ) -> bool:
     if not candidates:
         return False
-    if candidates[0].confidence < min_confidence:
-        return False
-    if _search_lost_sequel_marker(title, search_query):
-        return False
-    if len(candidates) == 1:
-        return True
-    gap = candidates[0].confidence - candidates[1].confidence
-    if gap >= AUTO_ACCEPT_GAP:
-        return True
-    if _year_distance(target_year, candidates[0].year) <= 2:
-        return True
-    return False
+    second_conf = candidates[1].confidence if len(candidates) > 1 else None
+    return movie_matcher.auto_acceptable(
+        top_confidence=candidates[0].confidence,
+        second_confidence=second_conf,
+        top_year=candidates[0].year,
+        min_confidence=min_confidence,
+        title=title,
+        search_query=search_query,
+        target_year=target_year,
+        min_gap=AUTO_ACCEPT_GAP,
+    )
 
 
 def _resolve_destination(
@@ -1625,21 +1481,7 @@ def _rank_music_candidates(
     candidates: list[musicbrainz.ReleaseCandidate],
     track_count: int,
 ) -> list[musicbrainz.ReleaseCandidate]:
-    ranked: list[musicbrainz.ReleaseCandidate] = []
-    for cand in candidates:
-        bonus = 0.0
-        if cand.track_count is not None:
-            diff = abs(cand.track_count - track_count)
-            if diff == 0:
-                bonus = 0.20
-            elif diff == 1:
-                bonus = 0.10
-            elif diff >= 5:
-                bonus = -0.05
-        adjusted = min(1.0, max(0.0, cand.score + bonus))
-        ranked.append(replace(cand, score=adjusted))
-    ranked.sort(key=lambda candidate: candidate.score, reverse=True)
-    return ranked
+    return music_matcher.rank_music_candidates(candidates, track_count)
 
 
 def _select_music_candidate(

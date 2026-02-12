@@ -66,6 +66,7 @@ class ReleaseCandidate:
     country: str | None
     score: float
     track_count: int | None
+    raw_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +175,7 @@ def search_releases(artist: str, album: str, limit: int = 8, session: requests.S
                 country=str(country) if country else None,
                 score=score,
                 track_count=track_count_val,
+                raw_score=score,
             )
         )
     return results

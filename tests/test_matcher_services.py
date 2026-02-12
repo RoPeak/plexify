@@ -47,3 +47,24 @@ def test_rank_music_candidates_prefers_track_count_match() -> None:
     ranked = rank_music_candidates(candidates, track_count=10)
     assert ranked[0].mbid == "1"
     assert ranked[0].score > ranked[1].score
+
+
+def test_rank_music_candidates_penalises_unwanted_sequel_titles() -> None:
+    candidates = [
+        ReleaseCandidate("1", "Curtain Call", "Eminem", 2005, "US", 0.80, 17),
+        ReleaseCandidate("2", "Curtain Call 2", "Eminem", 2022, "US", 0.80, 17),
+    ]
+    ranked = rank_music_candidates(candidates, track_count=17, requested_title="Curtain Call")
+    assert ranked[0].mbid == "1"
+    assert ranked[0].score > ranked[1].score
+
+
+def test_rank_music_candidates_avoids_uniform_one_scores() -> None:
+    candidates = [
+        ReleaseCandidate("1", "Tapestry", "Carole King", 1971, "US", 0.99, 12, raw_score=0.99),
+        ReleaseCandidate("2", "Tapestry", "Carole King", 1999, "US", 0.98, 14, raw_score=0.98),
+        ReleaseCandidate("3", "Tapestry 2", "Carole King", 2002, "US", 0.97, 12, raw_score=0.97),
+    ]
+    ranked = rank_music_candidates(candidates, track_count=12, requested_title="Tapestry")
+    assert ranked[0].score < 1.0
+    assert len({round(candidate.score, 3) for candidate in ranked}) > 1

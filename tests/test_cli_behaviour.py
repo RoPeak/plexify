@@ -9,7 +9,7 @@ from plexify.cache import Cache
 from plexify.tv_episode_cache import EpisodeCache
 from plexify.util import movie_cache_key, tv_show_folder_cache_key
 from plexify.infer import InferredItem
-from plexify.sources import tvmaze
+from plexify.sources import musicbrainz, tvmaze
 
 
 def _tv_cache_entry(
@@ -2022,3 +2022,236 @@ def test_organise_apply_rename_does_not_prompt_overwrite_token(monkeypatch, tmp_
         assert exc.exit_code == 0
 
     assert called["apply"] == 1
+
+
+def test_music_mismatch_reprompts_and_filename_fallback_restores_album(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album = source / "Eminem - Curtain Call"
+    album.mkdir(parents=True)
+    library.mkdir()
+    (album / "01 - Eminem - Intro.flac").write_text("x", encoding="utf-8")
+
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="mb1",
+        title="Curtain Call 2",
+        artist="Eminem",
+        year=2022,
+        country="US",
+        score=0.95,
+        track_count=2,
+    )
+    mb_tracks = [
+        musicbrainz.Track(number=1, title="Intro", disc=1),
+        musicbrainz.Track(number=2, title="Track Two", disc=1),
+    ]
+
+    prompt_answers = iter(["2", "f"])
+    prompt_calls: list[str] = []
+    captured: dict[str, list[cli.MovePlan]] = {}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(cli.musicbrainz, "search_releases", lambda *_args, **_kwargs: [candidate])
+    monkeypatch.setattr(cli.musicbrainz, "fetch_release_tracks", lambda *_args, **_kwargs: mb_tracks)
+    monkeypatch.setattr(cli, "_select_music_candidate", lambda *_args, **_kwargs: candidate)
+
+    def _fake_prompt_choice(prompt: str, *_args, **_kwargs) -> str:
+        prompt_calls.append(prompt)
+        return next(prompt_answers)
+
+    monkeypatch.setattr(cli, "_prompt_choice", _fake_prompt_choice)
+
+    def _fake_execute(plans, **_kwargs):
+        captured["plans"] = list(plans)
+        return cli.ExecutionResult(moved=[], skipped=[], errors=[])
+
+    monkeypatch.setattr(cli, "execute_plans", _fake_execute)
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            verbose_plan=False,
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    planned = captured["plans"]
+    assert planned
+    assert any("Music\\Eminem\\Curtain Call\\" in str(plan.destination) for plan in planned)
+    assert not any("Curtain Call 2" in str(plan.destination) for plan in planned)
+    assert len(prompt_calls) == 2
+
+
+def test_music_uses_single_session_and_caches_release_tracklists(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_one = source / "Artist - Album One"
+    album_two = source / "Artist - Album Two"
+    album_one.mkdir(parents=True)
+    album_two.mkdir(parents=True)
+    library.mkdir()
+    (album_one / "01 - Artist - Track One.flac").write_text("x", encoding="utf-8")
+    (album_two / "01 - Artist - Track Two.flac").write_text("x", encoding="utf-8")
+
+    class _Session:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    session = _Session()
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="shared-mbid",
+        title="Album",
+        artist="Artist",
+        year=2000,
+        country="US",
+        score=0.95,
+        track_count=1,
+    )
+    search_sessions: list[object] = []
+    fetch_sessions: list[object] = []
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: session)
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "search_releases",
+        lambda *_args, **kwargs: search_sessions.append(kwargs.get("session")) or [candidate],
+    )
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda *_args, **kwargs: fetch_sessions.append(kwargs.get("session"))
+        or [musicbrainz.Track(number=1, title="Track", disc=1)],
+    )
+    monkeypatch.setattr(cli, "_select_music_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(
+        cli,
+        "execute_plans",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=[], skipped=list(plans), errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            verbose_plan=False,
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert len(search_sessions) == 2
+    assert len(fetch_sessions) == 1
+    assert all(call is session for call in search_sessions)
+    assert all(call is session for call in fetch_sessions)
+    assert session.closed is True
+
+
+def test_music_auto_maps_multidisc_without_disc_numbers(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album = source / "Artist - Album"
+    album.mkdir(parents=True)
+    library.mkdir()
+    (album / "01 - Artist - Intro.flac").write_text("x", encoding="utf-8")
+    (album / "02 - Artist - Finale.flac").write_text("x", encoding="utf-8")
+
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="mb-multi",
+        title="Album Deluxe",
+        artist="Artist",
+        year=2000,
+        country="US",
+        score=0.95,
+        track_count=2,
+    )
+    mb_tracks = [
+        musicbrainz.Track(number=1, title="Intro (MB)", disc=1),
+        musicbrainz.Track(number=1, title="Finale (MB)", disc=2),
+    ]
+    captured: dict[str, list[cli.MovePlan]] = {}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(cli.musicbrainz, "search_releases", lambda *_args, **_kwargs: [candidate])
+    monkeypatch.setattr(cli.musicbrainz, "fetch_release_tracks", lambda *_args, **_kwargs: mb_tracks)
+    monkeypatch.setattr(cli, "_select_music_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(
+        cli,
+        "_confirm",
+        lambda prompt, *_args, **_kwargs: (_ for _ in ()).throw(AssertionError(f"Unexpected confirm: {prompt}")),
+    )
+
+    def _fake_execute(plans, **_kwargs):
+        captured["plans"] = list(plans)
+        return cli.ExecutionResult(moved=[], skipped=[], errors=[])
+
+    monkeypatch.setattr(cli, "execute_plans", _fake_execute)
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    planned = captured["plans"]
+    assert planned
+    destinations = [str(plan.destination) for plan in planned]
+    assert any("Music\\Artist\\Album Deluxe\\101 - Intro (MB).flac" in destination for destination in destinations)
+    assert any("Music\\Artist\\Album Deluxe\\201 - Finale (MB).flac" in destination for destination in destinations)

@@ -179,11 +179,13 @@ def print_music_candidates(*, console: Any, candidates: list[Any]) -> None:
     table.add_column("Tracks")
     table.add_column("Year")
     table.add_column("Country")
-    table.add_column("Confidence")
+    table.add_column("MB Score")
+    table.add_column("Rank Score")
     for idx, cand in enumerate(candidates, start=1):
         track_count = str(cand.track_count) if cand.track_count is not None else "-"
         year_text = str(cand.year) if cand.year else "-"
         country = cand.country or "-"
+        mb_score = cand.raw_score if getattr(cand, "raw_score", None) is not None else cand.score
         table.add_row(
             str(idx),
             rich_escape(cand.artist),
@@ -191,7 +193,8 @@ def print_music_candidates(*, console: Any, candidates: list[Any]) -> None:
             track_count,
             year_text,
             country,
-            f"{cand.score:.2f}",
+            f"{mb_score:.3f}",
+            f"{cand.score:.3f}",
         )
     console.print(table)
 

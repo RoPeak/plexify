@@ -3,6 +3,7 @@ import re
 import sys
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -96,6 +97,15 @@ WIZARD_MODE_CHOICES = {
     "apply": "apply",
 }
 WIZARD_COPY_CHOICES = {"copy": "copy", "c": "copy", "move": "move", "m": "move"}
+WIZARD_MUSIC_PLAN_OUTPUT_CHOICES = {
+    "summary": "summary",
+    "s": "summary",
+    "preview": "preview",
+    "p": "preview",
+    "full": "full",
+    "f": "full",
+    "verbose": "full",
+}
 WIZARD_ORGANISE_CHOICES = {
     "v": "video",
     "video": "video",
@@ -120,6 +130,7 @@ TV_EXPLICIT_SEASON_EPISODE_RE = re.compile(r"\bs\d{1,2}e\d{1,3}\b|\b\d{1,2}x\d{1
 TV_SXXEYY_CAPTURE_RE = re.compile(r"\bs(\d{1,2})e\d{1,3}\b", re.IGNORECASE)
 TV_XYY_CAPTURE_RE = re.compile(r"\b(\d{1,2})x\d{1,3}\b", re.IGNORECASE)
 MAX_PLAUSIBLE_EPISODE_NUMBER = 99
+MUSIC_FEAT_SUFFIX_RE = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", re.IGNORECASE)
 
 
 @dataclass
@@ -480,10 +491,20 @@ def _save_wizard_prefs(media_key: str, source: Path, library: Path) -> None:
 
 
 def _wizard_defaults(media_key: str) -> tuple[Path | None, Path | None]:
+    def _sanitize(path: Path | None) -> Path | None:
+        if path is None:
+            return None
+        try:
+            if path.expanduser().resolve(strict=False) == Path.cwd().resolve(strict=False):
+                return None
+        except (OSError, RuntimeError):
+            pass
+        return path
+
     prefs = _load_wizard_prefs()
     section = prefs.get(media_key, {})
-    source = Path(section["source"]) if "source" in section else None
-    library = Path(section["library"]) if "library" in section else None
+    source = _sanitize(Path(section["source"])) if "source" in section else None
+    library = _sanitize(Path(section["library"])) if "library" in section else None
     return source, library
 
 
@@ -546,6 +567,19 @@ def _confirm(prompt: str, default: bool, progress: Progress | None, show_default
         if choice in {"n", "no"}:
             return False
         _safe_print("Please enter y/n.", progress)
+
+
+def _prompt_music_track_mismatch_choice(progress: Progress | None = None) -> str:
+    while True:
+        choice = _prompt_choice(
+            "r=re-pick release | f=filename titles | o=order",
+            "r",
+            progress,
+            show_default=False,
+        )
+        if choice in {"r", "f", "o"}:
+            return choice
+        _safe_print("Enter one of: r, f, o.", progress)
 
 
 def _prompt_int(prompt: str, default: int, progress: Progress | None) -> int:
@@ -1382,8 +1416,9 @@ def _print_music_candidates(candidates: list[musicbrainz.ReleaseCandidate]) -> N
 def _rank_music_candidates(
     candidates: list[musicbrainz.ReleaseCandidate],
     track_count: int,
+    requested_title: str,
 ) -> list[musicbrainz.ReleaseCandidate]:
-    return music_matcher.rank_music_candidates(candidates, track_count)
+    return music_matcher.rank_music_candidates(candidates, track_count, requested_title)
 
 
 def _select_music_candidate(
@@ -1519,13 +1554,39 @@ def _map_musicbrainz_by_order(
     return mapped
 
 
+def _primary_artist_name(value: str) -> str:
+    cleaned = MUSIC_FEAT_SUFFIX_RE.sub("", value or "")
+    return " ".join(cleaned.split()).strip()
+
+
+def _normalise_artist_key(value: str | None) -> str:
+    return _primary_artist_name(value or "").casefold()
+
+
+def _dominant_track_artist_ratio(album: music_util.AlbumGroup) -> float:
+    counts: Counter[str] = Counter()
+    total = 0
+    for track in album.tracks:
+        key = _normalise_artist_key(track.track_artist)
+        if not key:
+            continue
+        total += 1
+        counts[key] += 1
+    if not total or not counts:
+        return 0.0
+    return counts.most_common(1)[0][1] / total
+
+
 def _should_use_various_artists(album: music_util.AlbumGroup, candidate_artist: str | None) -> bool:
-    if candidate_artist and candidate_artist.strip().lower() == "various artists":
+    candidate_key = _normalise_artist_key(candidate_artist)
+    if candidate_key in {"various artists", "va", "various"}:
         return True
-    if album.artist.strip().lower() in {"various artists", "va"}:
+    album_key = _normalise_artist_key(album.artist)
+    if album_key in {"various artists", "va", "various"}:
         return True
-    unique_artists = {track.track_artist.strip().lower() for track in album.tracks if track.track_artist.strip()}
-    return len(unique_artists) > 1
+    if candidate_key or album_key:
+        return False
+    return _dominant_track_artist_ratio(album) < 0.8
 
 
 def _print_music_album_summary(
@@ -1544,6 +1605,18 @@ def _print_music_album_summary(
         console.print(f"CUE files: {cue_count}")
     if log_count:
         console.print(f"LOG files: {log_count}")
+
+
+def _print_music_track_previews(track_plans: list[MovePlan], *, limit: int) -> None:
+    if limit <= 0 or not track_plans:
+        return
+    shown = min(limit, len(track_plans))
+    console.print(f"Track preview ({shown}/{len(track_plans)}):")
+    for plan in track_plans[:shown]:
+        console.print(f"- {rich_escape(plan.source.name)} -> {rich_escape(plan.destination.name)}")
+    remaining = len(track_plans) - shown
+    if remaining > 0:
+        console.print(f"... +{remaining} more track(s)")
 
 
 def _print_plan(plan: MovePlan, progress: Progress | None = None) -> None:
@@ -1659,6 +1732,35 @@ def _prune_ignorable_files(
             removed_files.add(entry)
         except OSError:
             continue
+
+
+def _remove_skipped_music_sidecars(
+    albums: list[music_util.AlbumGroup],
+    *,
+    keep_cue: bool,
+    keep_log: bool,
+) -> tuple[int, list[str]]:
+    removed = 0
+    warnings: list[str] = []
+    targets: list[Path] = []
+    seen: set[Path] = set()
+    for album in albums:
+        if not keep_cue:
+            targets.extend(album.cues)
+        if not keep_log:
+            targets.extend(album.logs)
+    for sidecar in targets:
+        if sidecar in seen:
+            continue
+        seen.add(sidecar)
+        if not sidecar.exists() or not sidecar.is_file():
+            continue
+        try:
+            sidecar.unlink()
+            removed += 1
+        except OSError as exc:
+            warnings.append(f"Could not remove sidecar {sidecar}: {exc}")
+    return removed, warnings
 
 
 def _prune_empty_dirs(
@@ -3228,11 +3330,21 @@ def music(
         False, "--cleanup-empty-dirs", help="Remove empty folders after move", is_flag=True
     ),
     verbose_plan: bool = typer.Option(False, "--verbose-plan", help="Print per-track plan output", is_flag=True),
+    plan_preview_tracks: int = typer.Option(
+        0,
+        "--plan-preview-tracks",
+        min=0,
+        help="Preview first N planned tracks per album (ignored with --verbose-plan)",
+    ),
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
 ) -> None:
     _initialise_logging(log_level, log_format, log_file)
+    if not isinstance(plan_preview_tracks, int):
+        plan_preview_tracks = 0
+    elif plan_preview_tracks < 0:
+        plan_preview_tracks = 0
     run_id = uuid.uuid4().hex
     log_event(
         logger,
@@ -3337,171 +3449,206 @@ def music(
         console.print(f"MusicBrainz disabled: {reason}")
         mb_disabled_reported = True
 
+    mb_session: requests.Session | None = musicbrainz.create_session() if verify else None
+    release_track_cache: dict[str, list[musicbrainz.Track]] = {}
     planned: dict[str, int] = {}
     plans: list[MovePlan] = []
-    for idx, album in enumerate(albums, start=1):
-        console.print(_album_panel(idx, len(albums), album))
-        album_artist = album.artist
-        album_title = album.album
-        planned_tracks = _music_tracks_from_filenames(album.tracks)
+    try:
+        for idx, album in enumerate(albums, start=1):
+            console.print(_album_panel(idx, len(albums), album))
+            orig_album_artist = album.artist
+            orig_album_title = album.album
+            album_artist = orig_album_artist
+            album_title = orig_album_title
+            planned_tracks = _music_tracks_from_filenames(album.tracks)
 
-        if verify:
-            if not musicbrainz.is_available():
-                if not mb_disabled_reported:
-                    reason = musicbrainz.unavailable_reason() or "offline"
-                    console.print(f"MusicBrainz disabled: {reason}")
-                    mb_disabled_reported = True
-                console.print("Skipped MusicBrainz (offline).")
-            else:
-                candidates = musicbrainz.search_releases(album_artist, album_title, limit=8)
+            if verify:
                 if not musicbrainz.is_available():
                     if not mb_disabled_reported:
                         reason = musicbrainz.unavailable_reason() or "offline"
                         console.print(f"MusicBrainz disabled: {reason}")
                         mb_disabled_reported = True
                     console.print("Skipped MusicBrainz (offline).")
-                elif not candidates:
-                    console.print("No MusicBrainz matches found. Using filename metadata.")
                 else:
-                    candidates = _rank_music_candidates(candidates, len(album.tracks))
-                    while True:
-                        selection = _select_music_candidate(candidates)
-                        if selection == "q":
-                            raise typer.Exit(code=0)
-                        if selection == "s":
-                            console.print("Skipping MusicBrainz verification for this album.")
-                            break
-                        if not isinstance(selection, musicbrainz.ReleaseCandidate):
-                            break
-                        album_artist = selection.artist
-                        album_title = selection.title
-                        mb_tracks = musicbrainz.fetch_release_tracks(selection.mbid)
-                        if not mb_tracks:
-                            if not musicbrainz.is_available():
-                                if not mb_disabled_reported:
-                                    reason = musicbrainz.unavailable_reason() or "offline"
-                                    console.print(f"MusicBrainz disabled: {reason}")
-                                    mb_disabled_reported = True
-                                console.print("Skipped MusicBrainz (offline).")
-                            else:
-                                console.print("No tracklist found. Using filename metadata.")
-                            break
-
-                        if len(mb_tracks) != len(album.tracks):
-                            console.print(
-                                f"Track count mismatch: files={len(album.tracks)} release={len(mb_tracks)}."
-                            )
-                            choice = _prompt_choice(
-                                "r=re-pick release | f=filename titles | o=order",
-                                "r",
-                                None,
-                                show_default=False,
-                            )
-                            if choice == "r":
-                                continue
-                            if choice == "o":
-                                mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                console.print("Using MusicBrainz titles by track order.")
-                                planned_tracks = mapped
+                    candidates = musicbrainz.search_releases(
+                        album_artist,
+                        album_title,
+                        limit=8,
+                        session=mb_session,
+                    )
+                    if not musicbrainz.is_available():
+                        if not mb_disabled_reported:
+                            reason = musicbrainz.unavailable_reason() or "offline"
+                            console.print(f"MusicBrainz disabled: {reason}")
+                            mb_disabled_reported = True
+                        console.print("Skipped MusicBrainz (offline).")
+                    elif not candidates:
+                        console.print("No MusicBrainz matches found. Using filename metadata.")
+                    else:
+                        candidates = _rank_music_candidates(candidates, len(album.tracks), orig_album_title)
+                        while True:
+                            selection = _select_music_candidate(candidates)
+                            if selection == "q":
+                                raise typer.Exit(code=0)
+                            if selection == "s":
+                                console.print("Skipping MusicBrainz verification for this album.")
                                 break
-                            console.print("Using filename metadata.")
+                            if not isinstance(selection, musicbrainz.ReleaseCandidate):
+                                break
+                            selected_album_artist = selection.artist
+                            selected_album_title = selection.title
+                            if selection.mbid in release_track_cache:
+                                mb_tracks = release_track_cache[selection.mbid]
+                            else:
+                                mb_tracks = musicbrainz.fetch_release_tracks(selection.mbid, session=mb_session)
+                                release_track_cache[selection.mbid] = mb_tracks
+                            if not mb_tracks:
+                                if not musicbrainz.is_available():
+                                    if not mb_disabled_reported:
+                                        reason = musicbrainz.unavailable_reason() or "offline"
+                                        console.print(f"MusicBrainz disabled: {reason}")
+                                        mb_disabled_reported = True
+                                    console.print("Skipped MusicBrainz (offline).")
+                                else:
+                                    console.print("No tracklist found. Using filename metadata.")
+                                break
+
+                            if len(mb_tracks) != len(album.tracks):
+                                console.print(
+                                    f"Track count mismatch: files={len(album.tracks)} release={len(mb_tracks)}."
+                                )
+                                choice = _prompt_music_track_mismatch_choice(None)
+                                if choice == "r":
+                                    continue
+                                if choice == "o":
+                                    mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
+                                    console.print("Using MusicBrainz titles by track order.")
+                                    planned_tracks = mapped
+                                    album_artist = selected_album_artist
+                                    album_title = selected_album_title
+                                    break
+                                console.print("Using filename metadata.")
+                                album_artist = orig_album_artist
+                                album_title = orig_album_title
+                                break
+
+                            mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
+                            if reason:
+                                if reason == "Multi-disc release without disc numbers in filenames":
+                                    mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
+                                    console.print(
+                                        "Warning: Multi-disc release without disc numbers in filenames. "
+                                        "Using MusicBrainz order with disc-prefixed track numbers."
+                                    )
+                                    album_artist = selected_album_artist
+                                    album_title = selected_album_title
+                                else:
+                                    console.print(f"Warning: {reason}.")
+                                    if _confirm("Fallback to filename titles? [Y/n]", True, None, show_default=False):
+                                        mapped = None
+                                        album_artist = orig_album_artist
+                                        album_title = orig_album_title
+                                    else:
+                                        mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
+                                        console.print("Using MusicBrainz titles by track order.")
+                                        album_artist = selected_album_artist
+                                        album_title = selected_album_title
+                            if mapped is not None:
+                                planned_tracks = mapped
+                                album_artist = selected_album_artist
+                                album_title = selected_album_title
                             break
 
-                        mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
-                        if reason:
-                            console.print(f"Warning: {reason}.")
-                            if _confirm("Fallback to filename titles? [Y/n]", True, None, show_default=False):
-                                mapped = None
-                            else:
-                                mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                console.print("Using MusicBrainz titles by track order.")
-                        if mapped is not None:
-                            planned_tracks = mapped
-                        break
+            dest_artist = "Various Artists" if _should_use_various_artists(album, album_artist) else album_artist
+            dest_album = album_title
 
-        dest_artist = "Various Artists" if _should_use_various_artists(album, album_artist) else album_artist
-        dest_album = album_title
-
-        for track in planned_tracks:
-            destination = music_util.track_destination(
-                library,
-                dest_artist,
-                dest_album,
-                track.track_number_text,
-                track.track_title,
-                track.ext,
-            )
-            destination, _collision = _resolve_destination(destination, "rename", planned, None)
-            if destination is None:
-                continue
-            plan = MovePlan(
-                source=track.source,
-                destination=destination,
-                mode="apply" if apply else "dry-run",
-                media_type="music",
-                metadata={
-                    "artist": dest_artist,
-                    "album": dest_album,
-                    "track_number": track.track_number,
-                },
-            )
-            plans.append(plan)
-            if verbose_plan:
-                _print_plan(plan, None)
-
-        album_folder = music_util.album_destination(library, dest_artist, dest_album)
-        if keep_art:
-            artwork = music_util.select_best_artwork(album.images)
-            if artwork:
-                destination = album_folder / "cover.jpg"
+            album_track_plans: list[MovePlan] = []
+            for track in planned_tracks:
+                destination = music_util.track_destination(
+                    library,
+                    dest_artist,
+                    dest_album,
+                    track.track_number_text,
+                    track.track_title,
+                    track.ext,
+                )
                 destination, _collision = _resolve_destination(destination, "rename", planned, None)
-                if destination is not None:
-                    plans.append(
-                        MovePlan(
-                            source=artwork,
-                            destination=destination,
-                            mode="apply" if apply else "dry-run",
-                            media_type="music",
-                            metadata={"artist": dest_artist, "album": dest_album, "type": "artwork"},
-                        )
-                    )
-        if keep_cue:
-            for cue in album.cues:
-                destination = album_folder / cue.name
-                destination, _collision = _resolve_destination(destination, "rename", planned, None)
-                if destination is not None:
-                    plans.append(
-                        MovePlan(
-                            source=cue,
-                            destination=destination,
-                            mode="apply" if apply else "dry-run",
-                            media_type="music",
-                            metadata={"artist": dest_artist, "album": dest_album, "type": "cue"},
-                        )
-                    )
-        if keep_log:
-            for log in album.logs:
-                destination = album_folder / log.name
-                destination, _collision = _resolve_destination(destination, "rename", planned, None)
-                if destination is not None:
-                    plans.append(
-                        MovePlan(
-                            source=log,
-                            destination=destination,
-                            mode="apply" if apply else "dry-run",
-                            media_type="music",
-                            metadata={"artist": dest_artist, "album": dest_album, "type": "log"},
-                        )
-                    )
+                if destination is None:
+                    continue
+                plan = MovePlan(
+                    source=track.source,
+                    destination=destination,
+                    mode="apply" if apply else "dry-run",
+                    media_type="music",
+                    metadata={
+                        "artist": dest_artist,
+                        "album": dest_album,
+                        "track_number": track.track_number,
+                    },
+                )
+                plans.append(plan)
+                album_track_plans.append(plan)
+                if verbose_plan:
+                    _print_plan(plan, None)
 
-        if not verbose_plan:
-            _print_music_album_summary(
-                album_dest=album_folder,
-                track_count=len(planned_tracks),
-                artwork=keep_art and bool(album.images),
-                cue_count=len(album.cues) if keep_cue else 0,
-                log_count=len(album.logs) if keep_log else 0,
-            )
+            album_folder = music_util.album_destination(library, dest_artist, dest_album)
+            if keep_art:
+                artwork = music_util.select_best_artwork(album.images)
+                if artwork:
+                    destination = album_folder / "cover.jpg"
+                    destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                    if destination is not None:
+                        plans.append(
+                            MovePlan(
+                                source=artwork,
+                                destination=destination,
+                                mode="apply" if apply else "dry-run",
+                                media_type="music",
+                                metadata={"artist": dest_artist, "album": dest_album, "type": "artwork"},
+                            )
+                        )
+            if keep_cue:
+                for cue in album.cues:
+                    destination = album_folder / cue.name
+                    destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                    if destination is not None:
+                        plans.append(
+                            MovePlan(
+                                source=cue,
+                                destination=destination,
+                                mode="apply" if apply else "dry-run",
+                                media_type="music",
+                                metadata={"artist": dest_artist, "album": dest_album, "type": "cue"},
+                            )
+                        )
+            if keep_log:
+                for log in album.logs:
+                    destination = album_folder / log.name
+                    destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                    if destination is not None:
+                        plans.append(
+                            MovePlan(
+                                source=log,
+                                destination=destination,
+                                mode="apply" if apply else "dry-run",
+                                media_type="music",
+                                metadata={"artist": dest_artist, "album": dest_album, "type": "log"},
+                            )
+                        )
+
+            if not verbose_plan:
+                _print_music_album_summary(
+                    album_dest=album_folder,
+                    track_count=len(planned_tracks),
+                    artwork=keep_art and bool(album.images),
+                    cue_count=len(album.cues) if keep_cue else 0,
+                    log_count=len(album.logs) if keep_log else 0,
+                )
+                if plan_preview_tracks > 0:
+                    _print_music_track_previews(album_track_plans, limit=plan_preview_tracks)
+    finally:
+        if mb_session is not None:
+            mb_session.close()
 
     if apply and not copy_mode:
         console.print("Warning: move will remove the original files from the source folder.")
@@ -3516,6 +3663,14 @@ def music(
         result = execute_plans(plans, apply=apply, copy_mode=copy_mode, on_conflict="rename")
 
     if cleanup_empty_dirs and apply and not copy_mode and plans:
+        removed_sidecars, cleanup_warnings = _remove_skipped_music_sidecars(
+            albums,
+            keep_cue=keep_cue,
+            keep_log=keep_log,
+        )
+        console.print(f"Removed skipped sidecars: {removed_sidecars}")
+        if cleanup_warnings:
+            errors.extend(cleanup_warnings)
         _prune_empty_dirs(result.moved, source, dry_run=False)
 
     write_report(report_path, result.moved if apply else plans, "apply" if apply else "dry-run", copy_mode)
@@ -4058,7 +4213,15 @@ def _wizard_music(
     copy_mode = False
     cleanup_empty_dirs = False
     if mode == "apply":
-        copy_mode = _confirm("Copy files instead of moving? [y/N]", False, None, show_default=False)
+        copy_choice = _prompt_choice_loop(
+            "Copy or move? (copy/move)",
+            WIZARD_COPY_CHOICES,
+            None,
+            allow_empty=True,
+            error="Enter one of: copy, move.",
+            default="move",
+        )
+        copy_mode = copy_choice == "copy"
         if not copy_mode:
             console.print("Warning: move will remove the original files from the source folder.")
             cleanup_empty_dirs = _confirm("Clean up empty folders after move? [y/N]", False, None, show_default=False)
@@ -4067,7 +4230,22 @@ def _wizard_music(
     keep_art = _confirm("Keep album artwork? [Y/n]", True, None, show_default=False)
     keep_cue = _confirm("Keep .cue sidecars? [y/N]", False, None, show_default=False)
     keep_log = _confirm("Keep .log sidecars? [y/N]", False, None, show_default=False)
-    verbose_plan = _confirm("Show per-track plan? [y/N]", False, None, show_default=False)
+    plan_output = _prompt_choice_loop(
+        "Plan output (summary/preview/full)",
+        WIZARD_MUSIC_PLAN_OUTPUT_CHOICES,
+        None,
+        allow_empty=True,
+        error="Enter one of: summary, preview, full.",
+        default="summary",
+    )
+    verbose_plan = plan_output == "full"
+    plan_preview_tracks = 0
+    if plan_output == "preview":
+        while True:
+            plan_preview_tracks = _prompt_int("Preview tracks per album", 5, None)
+            if plan_preview_tracks > 0:
+                break
+            console.print("Enter a positive number.")
 
     music(
         source=source,
@@ -4082,6 +4260,7 @@ def _wizard_music(
         offline=False,
         cleanup_empty_dirs=cleanup_empty_dirs,
         verbose_plan=verbose_plan,
+        plan_preview_tracks=plan_preview_tracks,
         log_level=log_level,
         log_format=log_format,
         log_file=log_file,

@@ -108,6 +108,27 @@ def test_music_discover_flat_folder_year_suffix_is_preserved_as_metadata(tmp_pat
     assert albums[0].year == 2001
 
 
+def test_music_discover_disc_suffix_keeps_base_album_and_disc_number(tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    disc_one = source / "Various" / "Ultimate Disney - CD 1 (2004)"
+    disc_two = source / "Various" / "Ultimate Disney - CD 2 (2004)"
+    disc_one.mkdir(parents=True)
+    disc_two.mkdir(parents=True)
+    (disc_one / "01 - Circle of Life.flac").write_text("x", encoding="utf-8")
+    (disc_two / "01 - Hakuna Matata.flac").write_text("x", encoding="utf-8")
+
+    albums, errors = music.discover_albums(source, ["flac"])
+    assert errors == []
+    assert len(albums) == 2
+    albums_sorted = sorted(albums, key=lambda entry: entry.disc_number or 0)
+    assert albums_sorted[0].album == "Ultimate Disney"
+    assert albums_sorted[0].year == 2004
+    assert albums_sorted[0].disc_number == 1
+    assert albums_sorted[1].album == "Ultimate Disney"
+    assert albums_sorted[1].year == 2004
+    assert albums_sorted[1].disc_number == 2
+
+
 def test_music_discover_flat_folder_skips_ambiguous_artist(tmp_path: Path) -> None:
     source = tmp_path / "incoming"
     album = source / "Sampler"
@@ -118,6 +139,22 @@ def test_music_discover_flat_folder_skips_ambiguous_artist(tmp_path: Path) -> No
     albums, errors = music.discover_albums(source, ["flac"])
     assert albums == []
     assert any("ambiguous album artist" in error.lower() for error in errors)
+
+
+def test_music_tracks_from_filenames_uses_disc_prefix_in_multidisc_context() -> None:
+    tracks = [
+        music.TrackInfo(
+            source=Path("01 - Artist - Track One.flac"),
+            track_number=1,
+            track_title="Track One",
+            track_artist="Artist",
+            ext=".flac",
+        )
+    ]
+    planned = cli._music_tracks_from_filenames(tracks, disc_number=2, multi_disc=True)
+    assert planned[0].track_number == 201
+    assert planned[0].track_number_text == "201"
+    assert planned[0].disc_number == 2
 
 
 def test_parse_track_filename_supports_two_part_with_default_artist() -> None:

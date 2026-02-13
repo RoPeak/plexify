@@ -1472,19 +1472,42 @@ def _select_music_candidate(
     )
 
 
-def _music_tracks_from_filenames(tracks: list[music_util.TrackInfo]) -> list[MusicPlannedTrack]:
+def _music_tracks_from_filenames(
+    tracks: list[music_util.TrackInfo],
+    *,
+    disc_number: int | None = None,
+    multi_disc: bool = False,
+) -> list[MusicPlannedTrack]:
     planned: list[MusicPlannedTrack] = []
     for track in tracks:
-        multi_disc = track.track_number >= 100
-        track_number_text = music_util.format_track_number(track.track_number, multi_disc=multi_disc)
+        if track.track_number >= 100:
+            inferred_disc_number = track.track_number // 100
+            track_number_text = music_util.format_track_number(
+                track.track_number,
+                multi_disc=True,
+            )
+            planned_track_number = track.track_number
+        elif multi_disc and disc_number is not None and disc_number > 0:
+            inferred_disc_number = disc_number
+            planned_track_number = disc_number * 100 + track.track_number
+            track_number_text = music_util.format_track_number(
+                track.track_number,
+                disc_number=disc_number,
+                multi_disc=True,
+            )
+        else:
+            inferred_disc_number = None
+            planned_track_number = track.track_number
+            track_number_text = music_util.format_track_number(track.track_number, multi_disc=False)
         planned.append(
             MusicPlannedTrack(
                 source=track.source,
-                track_number=track.track_number,
+                track_number=planned_track_number,
                 track_number_text=track_number_text,
                 track_title=track.track_title,
                 track_artist=track.track_artist,
                 ext=track.ext,
+                disc_number=inferred_disc_number,
             )
         )
     return planned
@@ -1728,8 +1751,51 @@ def _musicbrainz_skip_or_override(album: music_util.AlbumGroup) -> tuple[bool, s
                     f"'{dominant_artist}' for verification."
                 ),
             )
-        return True, None, None
+        return (
+            False,
+            "Various Artists",
+            "Generic album metadata detected; searching as 'Various Artists'.",
+        )
     return False, None, None
+
+
+def _search_musicbrainz_candidates_with_retry(
+    *,
+    artist: str,
+    album: str,
+    year: int | None,
+    session: requests.Session | None,
+) -> tuple[list[musicbrainz.ReleaseCandidate] | None, str, str, str]:
+    search_artist = artist
+    search_album = album
+    while True:
+        candidates = musicbrainz.search_releases(
+            search_artist,
+            search_album,
+            limit=8,
+            session=session,
+            year=year,
+        )
+        if not musicbrainz.is_available():
+            return None, "offline", search_artist, search_album
+        if candidates:
+            return candidates, "ok", search_artist, search_album
+        if not sys.stdin.isatty():
+            return None, "no_matches", search_artist, search_album
+        action = _prompt_choice_loop(
+            "No MusicBrainz matches. r=retry edit query | f=filename metadata | s=skip album",
+            {"r": "r", "f": "f", "s": "s"},
+            None,
+            allow_empty=True,
+            error="Enter one of: r, f, s.",
+            default="r",
+        )
+        if action == "f":
+            return None, "fallback", search_artist, search_album
+        if action == "s":
+            return None, "skip", search_artist, search_album
+        search_artist = _prompt_text("Search artist", search_artist, None)
+        search_album = _prompt_text("Search album", search_album, None)
 
 
 def _print_music_album_summary(
@@ -3717,6 +3783,14 @@ def music(
         for error in errors:
             console.print(f"- {rich_escape(error)}")
         raise typer.Exit(code=1)
+    album_group_counts: Counter[tuple[str, str, int | None]] = Counter(
+        (
+            _normalise_artist_key(album.artist),
+            (album.album or "").strip().casefold(),
+            album.year,
+        )
+        for album in albums
+    )
 
     mb_disabled_reported = False
     if verify and not musicbrainz.is_available():
@@ -3745,7 +3819,18 @@ def music(
             album_artist = orig_album_artist
             album_title = orig_album_title
             search_album_artist = album_artist
-            planned_tracks = _music_tracks_from_filenames(album.tracks)
+            search_album_title = album_title
+            album_group_key = (
+                _normalise_artist_key(album.artist),
+                (album.album or "").strip().casefold(),
+                album.year,
+            )
+            folder_multidisc = album.disc_number is not None and album_group_counts.get(album_group_key, 0) > 1
+            planned_tracks = _music_tracks_from_filenames(
+                album.tracks,
+                disc_number=album.disc_number,
+                multi_disc=folder_multidisc,
+            )
 
             if verify_remaining:
                 if not musicbrainz.is_available():
@@ -3764,19 +3849,28 @@ def music(
                     else:
                         if override_reason:
                             console.print(override_reason)
-                        candidates = musicbrainz.search_releases(
-                            search_album_artist,
-                            album_title,
-                            limit=8,
-                            session=mb_session,
-                            year=album.year,
+                        candidates, search_state, final_search_artist, final_search_title = (
+                            _search_musicbrainz_candidates_with_retry(
+                                artist=search_album_artist,
+                                album=search_album_title,
+                                year=album.year,
+                                session=mb_session,
+                            )
                         )
-                        if not musicbrainz.is_available():
+                        search_album_artist = final_search_artist
+                        search_album_title = final_search_title
+                        if search_state == "offline":
                             if not mb_disabled_reported:
                                 reason = musicbrainz.unavailable_reason() or "offline"
                                 console.print(f"MusicBrainz disabled: {reason}")
                                 mb_disabled_reported = True
                             console.print("Skipped MusicBrainz (offline).")
+                        elif search_state == "skip":
+                            verification_stats["skipped_album"] += 1
+                            console.print("Skipping MusicBrainz verification for this album.")
+                        elif search_state == "fallback":
+                            verification_stats["filename_fallback"] += 1
+                            console.print("No MusicBrainz matches found. Using filename metadata.")
                         elif not candidates:
                             console.print("No MusicBrainz matches found. Using filename metadata.")
                         else:

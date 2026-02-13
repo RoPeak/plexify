@@ -29,10 +29,15 @@ class AlbumGroup:
     cues: list[Path]
     logs: list[Path]
     year: int | None = None
+    disc_number: int | None = None
 
 
 _FEAT_SUFFIX_RE = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", re.IGNORECASE)
 _ALBUM_YEAR_SUFFIX_RE = re.compile(r"^(?P<album>.+?)\s+\((?P<year>\d{4})\)$")
+_ALBUM_DISC_SUFFIX_RE = re.compile(
+    r"^(?P<album>.+?)\s*(?:\((?:cd|disc)\s*(?P<disc_paren>\d+)\)|[-\u2013\u2014]?\s*(?:cd|disc)\s*(?P<disc_plain>\d+))\s*$",
+    re.IGNORECASE,
+)
 
 
 def parse_album_folder(name: str) -> tuple[str, str] | None:
@@ -128,41 +133,59 @@ def _album_with_optional_year(name: str) -> tuple[str, int | None]:
     return album, year
 
 
+def split_disc_suffix(album_name: str) -> tuple[str, int | None]:
+    cleaned = album_name.strip()
+    match = _ALBUM_DISC_SUFFIX_RE.match(cleaned)
+    if not match:
+        return cleaned, None
+    base = match.group("album").strip()
+    disc_text = match.group("disc_paren") or match.group("disc_plain")
+    disc_number = int(disc_text) if disc_text and disc_text.isdigit() else None
+    if not base:
+        return cleaned, None
+    return base, disc_number
+
+
 def _normalise_artist_name(name: str | None) -> str:
     if not name:
         return ""
     return " ".join(name.split()).casefold()
 
 
-def _infer_album_metadata(path: Path, source: Path) -> tuple[str | None, str | None, int | None]:
+def _infer_album_metadata(path: Path, source: Path) -> tuple[str | None, str | None, int | None, int | None]:
     if path.parent != source:
         parent_artist = path.parent.name.strip()
         album, year = _album_with_optional_year(path.name)
+        album, disc_number = split_disc_suffix(album)
         parsed = parse_album_folder(path.name)
         if parsed:
             parsed_artist, parsed_album = parsed
             if _normalise_artist_name(parsed_artist) == _normalise_artist_name(parent_artist):
                 album, year = _album_with_optional_year(parsed_album)
+                album, disc_number = split_disc_suffix(album)
                 if parsed_artist and album:
-                    return parsed_artist, album, year
+                    return parsed_artist, album, year, disc_number
         if parent_artist and album:
-            return parent_artist, album, year
+            return parent_artist, album, year, disc_number
 
     parsed = parse_album_folder(path.name)
     if parsed:
         album, year = _album_with_optional_year(parsed[1])
-        return parsed[0], album, year
+        album, disc_number = split_disc_suffix(album)
+        return parsed[0], album, year, disc_number
 
     if path.parent != source:
         artist = path.parent.name.strip()
         album, year = _album_with_optional_year(path.name)
+        album, disc_number = split_disc_suffix(album)
         if artist and album:
-            return artist, album, year
+            return artist, album, year, disc_number
 
     album, year = _album_with_optional_year(path.name)
+    album, disc_number = split_disc_suffix(album)
     if album:
-        return None, album, year
-    return None, None, None
+        return None, album, year, disc_number
+    return None, None, None, None
 
 
 def _is_descendant(path: Path, parent: Path) -> bool:
@@ -195,7 +218,7 @@ def discover_albums(source: Path, extensions: Iterable[str]) -> tuple[list[Album
     albums: list[AlbumGroup] = []
 
     def _build_album(path: Path) -> None:
-        artist, album, inferred_year = _infer_album_metadata(path, source)
+        artist, album, inferred_year, inferred_disc_number = _infer_album_metadata(path, source)
         if not album:
             errors.append(f"Could not infer album title from folder: {path}")
             return
@@ -237,6 +260,7 @@ def discover_albums(source: Path, extensions: Iterable[str]) -> tuple[list[Album
                 cues=cues,
                 logs=logs,
                 year=inferred_year,
+                disc_number=inferred_disc_number,
             )
         )
 

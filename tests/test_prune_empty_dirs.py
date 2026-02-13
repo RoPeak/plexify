@@ -168,3 +168,49 @@ def test_prune_empty_dirs_full_sweep_removes_unrelated_empty_folders(tmp_path: P
 
     cli._prune_empty_dirs_full_sweep(incoming, dry_run=False)
     assert not leftover_empty.exists()
+
+
+def test_cleanup_music_source_leftovers_reports_unknown_files(tmp_path: Path) -> None:
+    album_dir = tmp_path / "incoming" / "Artist - Album"
+    album_dir.mkdir(parents=True)
+    unknown = album_dir / "stray-file"
+    unknown.write_text("x", encoding="utf-8")
+
+    album = cli.music_util.AlbumGroup(
+        source=album_dir,
+        artist="Artist",
+        album="Album",
+        tracks=[],
+        images=[],
+        cues=[],
+        logs=[],
+    )
+
+    removed, warnings = cli._cleanup_music_source_leftovers([album], remove_unknown_files=False)
+
+    assert removed == 0
+    assert warnings and "Leftover source file prevents cleanup" in warnings[0]
+    assert unknown.exists()
+
+
+def test_cleanup_music_source_leftovers_removes_unknown_files(tmp_path: Path) -> None:
+    album_dir = tmp_path / "incoming" / "Artist - Album"
+    album_dir.mkdir(parents=True)
+    unknown = album_dir / "stray-file"
+    unknown.write_text("x", encoding="utf-8")
+
+    album = cli.music_util.AlbumGroup(
+        source=album_dir,
+        artist="Artist",
+        album="Album",
+        tracks=[],
+        images=[],
+        cues=[],
+        logs=[],
+    )
+
+    removed, warnings = cli._cleanup_music_source_leftovers([album], remove_unknown_files=True)
+
+    assert removed == 1
+    assert warnings == []
+    assert not unknown.exists()

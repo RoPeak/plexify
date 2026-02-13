@@ -1677,8 +1677,15 @@ def _should_skip_musicbrainz_for_album(album: music_util.AlbumGroup) -> bool:
     artist_key = (album.artist or "").strip().casefold()
     if title_key in {"untitled", "[untitled]"}:
         return True
-    if artist_key in {"various artists", "va", "various"} and title_key in {"untitled", "[untitled]"}:
-        return True
+    if artist_key in {"various artists", "va", "various"}:
+        informative_artist_found = False
+        for track in album.tracks:
+            track_key = _normalise_artist_key(track.track_artist)
+            if track_key and track_key not in {"various artists", "va", "various"}:
+                informative_artist_found = True
+                break
+        if not informative_artist_found:
+            return True
     return False
 
 
@@ -1853,6 +1860,43 @@ def _remove_skipped_music_sidecars(
             removed += 1
         except OSError as exc:
             warnings.append(f"Could not remove sidecar {sidecar}: {exc}")
+    return removed, warnings
+
+
+def _cleanup_music_source_leftovers(
+    albums: list[music_util.AlbumGroup],
+    *,
+    remove_unknown_files: bool,
+) -> tuple[int, list[str]]:
+    removed = 0
+    warnings: list[str] = []
+    known_suffixes = {".flac", ".mp3", ".m4a", ".jpg", ".jpeg", ".png", ".cue", ".log"}
+    seen: set[Path] = set()
+    for album in albums:
+        album_dir = album.source
+        if album_dir in seen:
+            continue
+        seen.add(album_dir)
+        if not album_dir.exists() or not album_dir.is_dir():
+            continue
+        try:
+            entries = list(album_dir.iterdir())
+        except OSError as exc:
+            warnings.append(f"Could not inspect source folder {album_dir}: {exc}")
+            continue
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            if entry.suffix.lower() in known_suffixes:
+                continue
+            if remove_unknown_files:
+                try:
+                    entry.unlink()
+                    removed += 1
+                except OSError as exc:
+                    warnings.append(f"Could not remove leftover file {entry}: {exc}")
+                continue
+            warnings.append(f"Leftover source file prevents cleanup: {entry}")
     return removed, warnings
 
 
@@ -3458,6 +3502,12 @@ def music(
     cleanup_empty_dirs: bool = typer.Option(
         False, "--cleanup-empty-dirs", help="Remove empty folders after move", is_flag=True
     ),
+    cleanup_unknown_files: bool = typer.Option(
+        False,
+        "--cleanup-unknown-files",
+        help="When cleaning up after move, remove non-media leftover files in source album folders",
+        is_flag=True,
+    ),
     verbose_plan: bool = typer.Option(False, "--verbose-plan", help="Print per-track plan output", is_flag=True),
     plan_preview_tracks: int = typer.Option(
         0,
@@ -3886,10 +3936,18 @@ def music(
             keep_cue=keep_cue,
             keep_log=keep_log,
         )
+        removed_unknown, unknown_warnings = _cleanup_music_source_leftovers(
+            albums,
+            remove_unknown_files=cleanup_unknown_files,
+        )
         if removed_sidecars > 0:
             console.print(f"Removed skipped sidecars: {removed_sidecars}")
+        if removed_unknown > 0:
+            console.print(f"Removed unknown leftover files: {removed_unknown}")
         if cleanup_warnings:
             errors.extend(cleanup_warnings)
+        if unknown_warnings:
+            errors.extend(unknown_warnings)
         _prune_empty_dirs(result.moved, source, dry_run=False)
         _prune_empty_dirs_full_sweep(source, dry_run=False)
 
@@ -4442,6 +4500,7 @@ def _wizard_music(
 
     copy_mode = False
     cleanup_empty_dirs = False
+    cleanup_unknown_files = False
     if mode == "apply":
         copy_choice = _prompt_choice_loop(
             "Copy or move? (copy/move)",
@@ -4455,6 +4514,13 @@ def _wizard_music(
         if not copy_mode:
             console.print("Warning: move will remove the original files from the source folder.")
             cleanup_empty_dirs = _confirm("Clean up empty folders after move? [y/N]", False, None, show_default=False)
+            if cleanup_empty_dirs:
+                cleanup_unknown_files = _confirm(
+                    "Remove unknown leftover files to help prune source folders? [y/N]",
+                    False,
+                    None,
+                    show_default=False,
+                )
 
     verify = _confirm("Verify albums with MusicBrainz? [Y/n]", True, None, show_default=False)
     keep_art = _confirm("Keep album artwork? [Y/n]", True, None, show_default=False)
@@ -4497,6 +4563,7 @@ def _wizard_music(
         keep_log=keep_log,
         offline=False,
         cleanup_empty_dirs=cleanup_empty_dirs,
+        cleanup_unknown_files=cleanup_unknown_files,
         verbose_plan=verbose_plan,
         plan_preview_tracks=plan_preview_tracks,
         mismatch_policy=mismatch_policy,

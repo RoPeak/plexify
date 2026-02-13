@@ -2544,3 +2544,54 @@ def test_music_does_not_save_wizard_prefs_when_paths_provided(monkeypatch, tmp_p
 def test_prompt_music_track_mismatch_choice_honours_policy() -> None:
     assert cli._prompt_music_track_mismatch_choice(mismatch_policy="filename") == "f"
     assert cli._prompt_music_track_mismatch_choice(mismatch_policy="order") == "o"
+
+
+def test_music_skips_mb_for_various_artists_without_track_artist_signal(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_dir = source / "Various Artists" / "Sampler"
+    album_dir.mkdir(parents=True)
+    library.mkdir()
+    (album_dir / "01 - Song One.flac").write_text("x", encoding="utf-8")
+    (album_dir / "02 - Song Two.flac").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "search_releases",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("search should be skipped")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_plans",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=[], skipped=list(plans), errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            cleanup_unknown_files=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0

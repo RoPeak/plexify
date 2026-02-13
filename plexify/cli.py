@@ -1650,6 +1650,21 @@ def _music_auto_verification_decision(
     top = candidates[0]
     top_track_count = top.track_count
     if top_track_count is not None and _music_mismatch_is_extreme(file_track_count, top_track_count):
+        for candidate in candidates[1:]:
+            if candidate.track_count != file_track_count:
+                continue
+            if candidate.score < MUSIC_AUTO_ACCEPT_MIN_SCORE:
+                continue
+            return MusicAutoDecision(
+                action="accept",
+                candidate=candidate,
+                reason=(
+                    "Top MusicBrainz release has a very large track-count mismatch "
+                    f"(files={file_track_count}, release={top_track_count}). "
+                    "Auto-selected next exact track-count match "
+                    f"(rank={candidate.score:.3f})."
+                ),
+            )
         return MusicAutoDecision(
             action="skip",
             candidate=None,

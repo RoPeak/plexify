@@ -48,6 +48,32 @@ def test_music_discover_recursive_artist_album_year_with_two_part_tracks(tmp_pat
     assert albums[0].tracks[0].track_artist == "Carole King"
 
 
+def test_music_discover_nested_album_with_dash_keeps_parent_artist(tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    album = source / "Take That" / "Never Forget - The Ultimate Collection"
+    album.mkdir(parents=True)
+    (album / "01 - Never Forget.flac").write_text("x", encoding="utf-8")
+
+    albums, errors = music.discover_albums(source, ["flac"])
+    assert errors == []
+    assert len(albums) == 1
+    assert albums[0].artist == "Take That"
+    assert albums[0].album == "Never Forget - The Ultimate Collection"
+
+
+def test_music_discover_nested_artist_album_prefix_matching_parent(tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    album = source / "Take That" / "Take That - III"
+    album.mkdir(parents=True)
+    (album / "01 - Patience.flac").write_text("x", encoding="utf-8")
+
+    albums, errors = music.discover_albums(source, ["flac"])
+    assert errors == []
+    assert len(albums) == 1
+    assert albums[0].artist == "Take That"
+    assert albums[0].album == "III"
+
+
 def test_music_discover_flat_folder_uses_dominant_track_artist(tmp_path: Path) -> None:
     source = tmp_path / "incoming"
     album = source / "Bing Crosby & Friends"

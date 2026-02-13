@@ -2418,6 +2418,90 @@ def test_music_auto_skips_extreme_track_mismatch_without_selection_prompt(monkey
     assert all("Music\\Artist\\Album\\" in str(plan.destination) for plan in captured["plans"])
 
 
+def test_music_auto_uses_later_exact_match_when_top_is_extreme_mismatch(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album = source / "Artist - Album (2001)"
+    album.mkdir(parents=True)
+    library.mkdir()
+    (album / "01 - Artist - Song.flac").write_text("x", encoding="utf-8")
+
+    candidates = [
+        musicbrainz.ReleaseCandidate(
+            mbid="top-mismatch",
+            title="Album Anthology",
+            artist="Artist",
+            year=2001,
+            country="US",
+            score=1.0,
+            track_count=40,
+            raw_score=1.0,
+        ),
+        musicbrainz.ReleaseCandidate(
+            mbid="exact-match",
+            title="Album",
+            artist="Artist",
+            year=2001,
+            country="GB",
+            score=0.996,
+            track_count=1,
+            raw_score=1.0,
+        ),
+    ]
+    fetch_calls: list[str] = []
+    captured: dict[str, list[cli.MovePlan]] = {}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(cli.musicbrainz, "search_releases", lambda *_args, **_kwargs: candidates)
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda mbid, **_kwargs: fetch_calls.append(mbid) or [musicbrainz.Track(number=1, title="Song (MB)", disc=1)],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_music_candidate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("selection prompt should be skipped")),
+    )
+
+    def _fake_execute(plans, **_kwargs):
+        captured["plans"] = list(plans)
+        return cli.ExecutionResult(moved=[], skipped=[], errors=[])
+
+    monkeypatch.setattr(cli, "execute_plans", _fake_execute)
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert fetch_calls == ["exact-match"]
+    assert captured["plans"]
+    assert any("Music\\Artist\\Album\\01 - Song (MB).flac" in str(plan.destination) for plan in captured["plans"])
+
+
 def test_music_skip_all_remaining_verification_applies_to_later_albums(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "incoming"
     library = tmp_path / "library"

@@ -128,7 +128,26 @@ def _album_with_optional_year(name: str) -> tuple[str, int | None]:
     return album, year
 
 
+def _normalise_artist_name(name: str | None) -> str:
+    if not name:
+        return ""
+    return " ".join(name.split()).casefold()
+
+
 def _infer_album_metadata(path: Path, source: Path) -> tuple[str | None, str | None, int | None]:
+    if path.parent != source:
+        parent_artist = path.parent.name.strip()
+        album, year = _album_with_optional_year(path.name)
+        parsed = parse_album_folder(path.name)
+        if parsed:
+            parsed_artist, parsed_album = parsed
+            if _normalise_artist_name(parsed_artist) == _normalise_artist_name(parent_artist):
+                album, year = _album_with_optional_year(parsed_album)
+                if parsed_artist and album:
+                    return parsed_artist, album, year
+        if parent_artist and album:
+            return parent_artist, album, year
+
     parsed = parse_album_folder(path.name)
     if parsed:
         album, year = _album_with_optional_year(parsed[1])

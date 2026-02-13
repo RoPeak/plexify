@@ -2310,7 +2310,7 @@ def test_music_auto_accepts_top_candidate_and_passes_inferred_year(monkeypatch, 
     monkeypatch.setattr(
         cli,
         "_select_music_candidate",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("selection prompt should be skipped")),
+        lambda *_args, **_kwargs: candidate,
     )
 
     def _fake_execute(plans, **_kwargs):
@@ -2382,7 +2382,7 @@ def test_music_auto_skips_extreme_track_mismatch_without_selection_prompt(monkey
     monkeypatch.setattr(
         cli,
         "_select_music_candidate",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("selection prompt should be skipped")),
+        lambda *_args, **_kwargs: candidate,
     )
 
     def _fake_execute(plans, **_kwargs):
@@ -2466,7 +2466,7 @@ def test_music_auto_uses_later_exact_match_when_top_is_extreme_mismatch(monkeypa
     monkeypatch.setattr(
         cli,
         "_select_music_candidate",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("selection prompt should be skipped")),
+        lambda *_args, **_kwargs: candidate,
     )
 
     def _fake_execute(plans, **_kwargs):
@@ -2628,6 +2628,309 @@ def test_music_does_not_save_wizard_prefs_when_paths_provided(monkeypatch, tmp_p
 def test_prompt_music_track_mismatch_choice_honours_policy() -> None:
     assert cli._prompt_music_track_mismatch_choice(mismatch_policy="filename") == "f"
     assert cli._prompt_music_track_mismatch_choice(mismatch_policy="order") == "o"
+
+
+def test_music_generic_metadata_uses_dominant_track_artist_override(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_dir = source / "Various Artists" / "Ladies & Gentlemen - The Best of George Michael"
+    album_dir.mkdir(parents=True)
+    library.mkdir()
+    (album_dir / "01 - George Michael - Jesus to a Child.flac").write_text("x", encoding="utf-8")
+    (album_dir / "02 - George Michael - Father Figure.flac").write_text("x", encoding="utf-8")
+    (album_dir / "03 - George Michael - One More Try.flac").write_text("x", encoding="utf-8")
+    (album_dir / "04 - George Michael - Freedom! '90.flac").write_text("x", encoding="utf-8")
+    (album_dir / "05 - Guest Singer - Bonus Track.flac").write_text("x", encoding="utf-8")
+
+    search_artists: list[str] = []
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="gm-best-of",
+        title="Ladies & Gentlemen - The Best of George Michael",
+        artist="George Michael",
+        year=1998,
+        country="GB",
+        score=1.0,
+        track_count=5,
+        raw_score=1.0,
+    )
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "search_releases",
+        lambda artist, *_args, **_kwargs: search_artists.append(artist) or [candidate],
+    )
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda *_args, **_kwargs: [musicbrainz.Track(number=index, title=f"Track {index} (MB)", disc=1) for index in range(1, 6)],
+    )
+    monkeypatch.setattr(cli, "_select_music_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(
+        cli,
+        "execute_plans",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=[], skipped=list(plans), errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            cleanup_unknown_files=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert search_artists == ["George Michael"]
+
+
+def test_music_auto_prompts_when_top_candidate_gap_is_ambiguous(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album = source / "Artist - Album (2001)"
+    album.mkdir(parents=True)
+    library.mkdir()
+    (album / "01 - Artist - Song.flac").write_text("x", encoding="utf-8")
+
+    top = musicbrainz.ReleaseCandidate(
+        mbid="top",
+        title="Album",
+        artist="Artist",
+        year=2001,
+        country="GB",
+        score=1.0,
+        track_count=1,
+        raw_score=1.0,
+    )
+    second = musicbrainz.ReleaseCandidate(
+        mbid="second",
+        title="Album",
+        artist="Artist",
+        year=2001,
+        country="US",
+        score=0.995,
+        track_count=1,
+        raw_score=0.995,
+    )
+    selection_calls = {"count": 0}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(cli.musicbrainz, "search_releases", lambda *_args, **_kwargs: [top, second])
+    monkeypatch.setattr(cli, "_rank_music_candidates", lambda *_args, **_kwargs: [top, second])
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda *_args, **_kwargs: [musicbrainz.Track(number=1, title="Song (MB)", disc=1)],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_music_candidate",
+        lambda *_args, **_kwargs: selection_calls.update(count=selection_calls["count"] + 1) or top,
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_plans",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=[], skipped=list(plans), errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            cleanup_unknown_files=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert selection_calls["count"] == 1
+
+
+def test_music_cleanup_unknown_without_token_keeps_leftovers_in_interactive_mode(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_dir = source / "Artist - Album"
+    album_dir.mkdir(parents=True)
+    library.mkdir()
+    track = album_dir / "01 - Artist - Track.flac"
+    leftover = album_dir / "notes.txt"
+    track.write_text("x", encoding="utf-8")
+    leftover.write_text("keep", encoding="utf-8")
+
+    class _Stdin:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin())
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(cli, "_confirm_move", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        cli,
+        "_apply_with_progress",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=list(plans), skipped=[], errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=True,
+            copy=False,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=False,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=True,
+            cleanup_unknown_files=True,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert leftover.exists()
+
+
+def test_music_cleanup_unknown_noninteractive_requires_confirm_token(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_dir = source / "Artist - Album"
+    album_dir.mkdir(parents=True)
+    library.mkdir()
+    (album_dir / "01 - Artist - Track.flac").write_text("x", encoding="utf-8")
+    (album_dir / "notes.txt").write_text("remove", encoding="utf-8")
+
+    class _Stdin:
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin())
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=True,
+            copy=False,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=False,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=True,
+            cleanup_unknown_files=True,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 2
+
+
+def test_music_cleanup_unknown_noninteractive_with_valid_token_deletes_leftovers(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_dir = source / "Artist - Album"
+    album_dir.mkdir(parents=True)
+    library.mkdir()
+    (album_dir / "01 - Artist - Track.flac").write_text("x", encoding="utf-8")
+    leftover = album_dir / "notes.txt"
+    leftover.write_text("remove", encoding="utf-8")
+
+    class _Stdin:
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdin", _Stdin())
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_confirm_move", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        cli,
+        "_apply_with_progress",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=list(plans), skipped=[], errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=True,
+            copy=False,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=False,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=True,
+            cleanup_unknown_files=True,
+            cleanup_unknown_confirm_token="REMOVE-UNKNOWN",
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert not leftover.exists()
 
 
 def test_music_skips_mb_for_various_artists_without_track_artist_signal(monkeypatch, tmp_path: Path) -> None:

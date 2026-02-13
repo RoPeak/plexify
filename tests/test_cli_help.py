@@ -50,6 +50,8 @@ def test_music_help():
     assert "--log-format" in result.output
     assert "--log-file" in result.output
     assert "--offline" in result.output
+    assert "--cleanup-unknown" in result.output
+    assert "Confirmation token" in result.output
 
 
 def test_default_callback_invokes_wizard_with_parsed_defaults(monkeypatch) -> None:

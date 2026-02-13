@@ -2416,3 +2416,131 @@ def test_music_auto_skips_extreme_track_mismatch_without_selection_prompt(monkey
     assert fetch_called["value"] is False
     assert captured["plans"]
     assert all("Music\\Artist\\Album\\" in str(plan.destination) for plan in captured["plans"])
+
+
+def test_music_skip_all_remaining_verification_applies_to_later_albums(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_one = source / "Artist - One"
+    album_two = source / "Artist - Two"
+    album_one.mkdir(parents=True)
+    album_two.mkdir(parents=True)
+    library.mkdir()
+    (album_one / "01 - Artist - Track One.flac").write_text("x", encoding="utf-8")
+    (album_two / "01 - Artist - Track Two.flac").write_text("x", encoding="utf-8")
+
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="pick",
+        title="One",
+        artist="Artist",
+        year=2000,
+        country="US",
+        score=0.99,
+        track_count=1,
+        raw_score=0.99,
+    )
+    search_calls = {"count": 0}
+    captured: dict[str, list[cli.MovePlan]] = {}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "search_releases",
+        lambda *_args, **_kwargs: search_calls.update(count=search_calls["count"] + 1) or [candidate],
+    )
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda *_args, **_kwargs: [musicbrainz.Track(number=1, title="Track", disc=1)],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_music_candidate",
+        lambda *_args, **_kwargs: "skip_all",
+    )
+
+    def _fake_execute(plans, **_kwargs):
+        captured["plans"] = list(plans)
+        return cli.ExecutionResult(moved=[], skipped=[], errors=[])
+
+    monkeypatch.setattr(cli, "execute_plans", _fake_execute)
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert search_calls["count"] == 1
+    assert captured["plans"]
+
+
+def test_music_does_not_save_wizard_prefs_when_paths_provided(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_dir = source / "Artist - Album"
+    album_dir.mkdir(parents=True)
+    library.mkdir()
+    (album_dir / "01 - Artist - Track.flac").write_text("x", encoding="utf-8")
+
+    saved_calls = {"count": 0}
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: saved_calls.update(count=saved_calls["count"] + 1))
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "execute_plans",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=[], skipped=list(plans), errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=False,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert saved_calls["count"] == 0
+
+
+def test_prompt_music_track_mismatch_choice_honours_policy() -> None:
+    assert cli._prompt_music_track_mismatch_choice(mismatch_policy="filename") == "f"
+    assert cli._prompt_music_track_mismatch_choice(mismatch_policy="order") == "o"

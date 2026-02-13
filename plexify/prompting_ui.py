@@ -173,16 +173,24 @@ def album_panel(index: int, total: int, album: Any) -> Panel:
 
 def print_music_candidates(*, console: Any, candidates: list[Any]) -> None:
     table = Table(title="MusicBrainz releases")
+    requested_track_count = None
+    if candidates:
+        requested_track_count = getattr(candidates[0], "requested_track_count", None)
     table.add_column("#")
     table.add_column("Artist")
     table.add_column("Album")
     table.add_column("Tracks")
+    table.add_column("Track Δ")
     table.add_column("Year")
     table.add_column("Country")
     table.add_column("MB Score")
     table.add_column("Rank Score")
     for idx, cand in enumerate(candidates, start=1):
         track_count = str(cand.track_count) if cand.track_count is not None else "-"
+        track_diff_text = "-"
+        if requested_track_count is not None and cand.track_count is not None:
+            track_diff = abs(cand.track_count - requested_track_count)
+            track_diff_text = str(track_diff)
         year_text = str(cand.year) if cand.year else "-"
         country = cand.country or "-"
         mb_score = cand.raw_score if getattr(cand, "raw_score", None) is not None else cand.score
@@ -191,6 +199,7 @@ def print_music_candidates(*, console: Any, candidates: list[Any]) -> None:
             rich_escape(cand.artist),
             rich_escape(cand.title),
             track_count,
+            track_diff_text,
             year_text,
             country,
             f"{mb_score:.3f}",
@@ -211,7 +220,7 @@ def select_music_candidate(
         if candidates and not printed:
             print_music_candidates_fn(candidates)
             printed = True
-        safe_print("Enter=accept #1 | 1-9=choose | s=skip verification | q=quit")
+        safe_print("Enter=accept #1 | 1-9=choose | s=skip album | a=skip all remaining | q=quit")
         default_choice = "1" if candidates else ""
         choice = prompt_choice("Select", default_choice)
         if choice == "":
@@ -226,6 +235,8 @@ def select_music_candidate(
             continue
         if choice == "s":
             return "s"
+        if choice == "a":
+            return "skip_all"
         if choice == "q":
             return "q"
         safe_print("Invalid choice.")

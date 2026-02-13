@@ -67,6 +67,7 @@ class ReleaseCandidate:
     score: float
     track_count: int | None
     raw_score: float | None = None
+    requested_track_count: int | None = None
 
 
 @dataclass(frozen=True)

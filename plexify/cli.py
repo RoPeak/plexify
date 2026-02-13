@@ -63,7 +63,10 @@ from .util import (
 app = typer.Typer(add_completion=True)
 cache_app = typer.Typer(help="Cache maintenance commands")
 app.add_typer(cache_app, name="cache")
-ASCII_UI_ENABLED = os.getenv("PLEXIFY_ASCII_UI", "").strip().lower() in {"1", "true", "yes", "on"}
+_FORCE_ASCII_UI = os.getenv("PLEXIFY_ASCII_UI", "").strip().lower() in {"1", "true", "yes", "on"}
+_STDOUT_ENCODING = (getattr(sys.stdout, "encoding", None) or "").casefold()
+_UTF8_CAPABLE = "utf" in _STDOUT_ENCODING
+ASCII_UI_ENABLED = _FORCE_ASCII_UI or not _UTF8_CAPABLE
 console = Console(safe_box=ASCII_UI_ENABLED)
 logger = get_logger(__name__)
 COMPLETION_ENABLED = True
@@ -109,6 +112,14 @@ WIZARD_MUSIC_PLAN_OUTPUT_CHOICES = {
     "full": "full",
     "f": "full",
     "verbose": "full",
+}
+WIZARD_MUSIC_MISMATCH_CHOICES = {
+    "ask": "ask",
+    "a": "ask",
+    "filename": "filename",
+    "f": "filename",
+    "order": "order",
+    "o": "order",
 }
 WIZARD_ORGANISE_CHOICES = {
     "v": "video",
@@ -506,11 +517,15 @@ def _wizard_defaults(media_key: str) -> tuple[Path | None, Path | None]:
         if path is None:
             return None
         try:
-            if path.expanduser().resolve(strict=False) == Path.cwd().resolve(strict=False):
+            expanded = path.expanduser()
+            resolved = expanded.resolve(strict=False)
+            if resolved == Path.cwd().resolve(strict=False):
+                return None
+            if not expanded.exists() or not expanded.is_dir():
                 return None
         except (OSError, RuntimeError):
-            pass
-        return path
+            return None
+        return expanded
 
     prefs = _load_wizard_prefs()
     section = prefs.get(media_key, {})
@@ -580,7 +595,15 @@ def _confirm(prompt: str, default: bool, progress: Progress | None, show_default
         _safe_print("Please enter y/n.", progress)
 
 
-def _prompt_music_track_mismatch_choice(progress: Progress | None = None) -> str:
+def _prompt_music_track_mismatch_choice(
+    progress: Progress | None = None,
+    *,
+    mismatch_policy: str = "ask",
+) -> str:
+    if mismatch_policy == "filename":
+        return "f"
+    if mismatch_policy == "order":
+        return "o"
     while True:
         choice = _prompt_choice(
             "r=re-pick release | f=filename titles | o=order",
@@ -1647,6 +1670,16 @@ def _music_auto_verification_decision(
             reason=f"Auto-selected top MusicBrainz release (rank={top.score:.3f}, gap={gap:.3f}).",
         )
     return None
+
+
+def _should_skip_musicbrainz_for_album(album: music_util.AlbumGroup) -> bool:
+    title_key = (album.album or "").strip().casefold()
+    artist_key = (album.artist or "").strip().casefold()
+    if title_key in {"untitled", "[untitled]"}:
+        return True
+    if artist_key in {"various artists", "va", "various"} and title_key in {"untitled", "[untitled]"}:
+        return True
+    return False
 
 
 def _print_music_album_summary(
@@ -3432,6 +3465,11 @@ def music(
         min=0,
         help="Preview first N planned tracks per album (ignored with --verbose-plan)",
     ),
+    mismatch_policy: str = typer.Option(
+        "ask",
+        "--mismatch-policy",
+        help="Mismatch handling for MB track-count conflicts: ask, filename, order",
+    ),
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
@@ -3441,6 +3479,14 @@ def music(
         plan_preview_tracks = 0
     elif plan_preview_tracks < 0:
         plan_preview_tracks = 0
+    if not isinstance(mismatch_policy, str):
+        mismatch_policy = "ask"
+    mismatch_policy = (mismatch_policy or "ask").strip().lower()
+    if mismatch_policy not in {"ask", "filename", "order"}:
+        console.print("mismatch-policy must be one of: ask, filename, order.")
+        raise typer.Exit(code=2)
+    source_prompted = source is None
+    library_prompted = library is None
     run_id = uuid.uuid4().hex
     log_event(
         logger,
@@ -3523,7 +3569,8 @@ def music(
     except PathOverlapError as exc:
         _print_overlap_error(exc)
         raise typer.Exit(code=2)
-    _save_wizard_prefs("music", source, library)
+    if source_prompted or library_prompted:
+        _save_wizard_prefs("music", source, library)
 
     if not apply:
         console.print("DRY-RUN: no files will be moved/copied.")
@@ -3549,6 +3596,15 @@ def music(
     release_track_cache: dict[str, list[musicbrainz.Track]] = {}
     planned: dict[str, int] = {}
     plans: list[MovePlan] = []
+    verify_remaining = verify
+    verification_stats = {
+        "auto_selected": 0,
+        "manual_selected": 0,
+        "skipped_album": 0,
+        "skipped_remaining": 0,
+        "filename_fallback": 0,
+        "order_fallback": 0,
+    }
     try:
         for idx, album in enumerate(albums, start=1):
             console.print(_album_panel(idx, len(albums), album))
@@ -3558,13 +3614,16 @@ def music(
             album_title = orig_album_title
             planned_tracks = _music_tracks_from_filenames(album.tracks)
 
-            if verify:
+            if verify_remaining:
                 if not musicbrainz.is_available():
                     if not mb_disabled_reported:
                         reason = musicbrainz.unavailable_reason() or "offline"
                         console.print(f"MusicBrainz disabled: {reason}")
                         mb_disabled_reported = True
                     console.print("Skipped MusicBrainz (offline).")
+                elif _should_skip_musicbrainz_for_album(album):
+                    verification_stats["skipped_album"] += 1
+                    console.print("Skipping MusicBrainz verification for generic album metadata.")
                 else:
                     candidates = musicbrainz.search_releases(
                         album_artist,
@@ -3593,6 +3652,7 @@ def music(
                             file_track_count=len(album.tracks),
                         )
                         if auto_decision is not None and auto_decision.action == "skip":
+                            verification_stats["filename_fallback"] += 1
                             console.print(f"{auto_decision.reason} Using filename metadata.")
                         else:
                             auto_candidate = (
@@ -3607,6 +3667,7 @@ def music(
                                     selection = auto_candidate
                                     auto_candidate_used = True
                                     selection_mode = "auto"
+                                    verification_stats["auto_selected"] += 1
                                     if auto_decision is not None:
                                         console.print(auto_decision.reason)
                                 else:
@@ -3614,10 +3675,18 @@ def music(
                                 if selection == "q":
                                     raise typer.Exit(code=0)
                                 if selection == "s":
+                                    verification_stats["skipped_album"] += 1
                                     console.print("Skipping MusicBrainz verification for this album.")
+                                    break
+                                if selection == "skip_all":
+                                    verification_stats["skipped_remaining"] += max(0, len(albums) - idx)
+                                    verify_remaining = False
+                                    console.print("Skipping MusicBrainz verification for all remaining albums.")
                                     break
                                 if not isinstance(selection, musicbrainz.ReleaseCandidate):
                                     break
+                                if selection_mode == "manual":
+                                    verification_stats["manual_selected"] += 1
                                 selected_album_artist = selection.artist
                                 selected_album_title = selection.title
                                 if selection.mbid in release_track_cache:
@@ -3640,14 +3709,29 @@ def music(
                                     console.print(
                                         f"Track count mismatch: files={len(album.tracks)} release={len(mb_tracks)}."
                                     )
+                                    if selection_mode == "manual" and _music_mismatch_is_extreme(
+                                        len(album.tracks), len(mb_tracks)
+                                    ):
+                                        keep_release = _confirm(
+                                            "Large mismatch for chosen release. Continue with this release? [y/N]",
+                                            False,
+                                            None,
+                                            show_default=False,
+                                        )
+                                        if not keep_release:
+                                            continue
                                     if selection_mode == "auto" and _music_mismatch_is_extreme(
                                         len(album.tracks), len(mb_tracks)
                                     ):
                                         console.print("Large track-count mismatch after auto-selection. Using filename metadata.")
                                         album_artist = orig_album_artist
                                         album_title = orig_album_title
+                                        verification_stats["filename_fallback"] += 1
                                         break
-                                    choice = _prompt_music_track_mismatch_choice(None)
+                                    choice = _prompt_music_track_mismatch_choice(
+                                        None,
+                                        mismatch_policy=mismatch_policy,
+                                    )
                                     if choice == "r":
                                         continue
                                     if choice == "o":
@@ -3656,10 +3740,12 @@ def music(
                                         planned_tracks = mapped
                                         album_artist = selected_album_artist
                                         album_title = selected_album_title
+                                        verification_stats["order_fallback"] += 1
                                         break
                                     console.print("Using filename metadata.")
                                     album_artist = orig_album_artist
                                     album_title = orig_album_title
+                                    verification_stats["filename_fallback"] += 1
                                     break
 
                                 mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
@@ -3678,11 +3764,13 @@ def music(
                                             mapped = None
                                             album_artist = orig_album_artist
                                             album_title = orig_album_title
+                                            verification_stats["filename_fallback"] += 1
                                         else:
                                             mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
                                             console.print("Using MusicBrainz titles by track order.")
                                             album_artist = selected_album_artist
                                             album_title = selected_album_title
+                                            verification_stats["order_fallback"] += 1
                                 if mapped is not None:
                                     planned_tracks = mapped
                                     album_artist = selected_album_artist
@@ -3810,6 +3898,16 @@ def music(
     console.print("Summary:")
     console.print(f"Albums: {len(albums)}")
     console.print(f"Planned files: {len(plans)}")
+    if verify:
+        console.print(
+            "Verification decisions: "
+            f"auto={verification_stats['auto_selected']}, "
+            f"manual={verification_stats['manual_selected']}, "
+            f"skip-album={verification_stats['skipped_album']}, "
+            f"skip-remaining={verification_stats['skipped_remaining']}, "
+            f"filename-fallback={verification_stats['filename_fallback']}, "
+            f"order-fallback={verification_stats['order_fallback']}"
+        )
     if errors:
         console.print(f"Warnings: {len(errors)}")
         for error in errors:
@@ -4362,6 +4460,14 @@ def _wizard_music(
     keep_art = _confirm("Keep album artwork? [Y/n]", True, None, show_default=False)
     keep_cue = _confirm("Keep .cue sidecars? [y/N]", False, None, show_default=False)
     keep_log = _confirm("Keep .log sidecars? [y/N]", False, None, show_default=False)
+    mismatch_policy = _prompt_choice_loop(
+        "Track mismatch handling (ask/filename/order)",
+        WIZARD_MUSIC_MISMATCH_CHOICES,
+        None,
+        allow_empty=True,
+        error="Enter one of: ask, filename, order.",
+        default="ask",
+    )
     plan_output = _prompt_choice_loop(
         "Plan output (summary/preview/full)",
         WIZARD_MUSIC_PLAN_OUTPUT_CHOICES,
@@ -4393,6 +4499,7 @@ def _wizard_music(
         cleanup_empty_dirs=cleanup_empty_dirs,
         verbose_plan=verbose_plan,
         plan_preview_tracks=plan_preview_tracks,
+        mismatch_policy=mismatch_policy,
         log_level=log_level,
         log_format=log_format,
         log_file=log_file,

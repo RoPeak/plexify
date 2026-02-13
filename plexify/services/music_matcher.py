@@ -104,7 +104,14 @@ def rank_music_candidates(
         year_fit = _year_fit(requested_year, cand.year)
         rank_score = 0.45 * raw_score + 0.30 * title_similarity + 0.17 * track_fit + 0.08 * year_fit + sequel_penalty
         rank_score = min(0.999, max(0.0, rank_score))
-        ranked.append(replace(cand, score=rank_score, raw_score=raw_score))
+        ranked.append(
+            replace(
+                cand,
+                score=rank_score,
+                raw_score=raw_score,
+                requested_track_count=track_count,
+            )
+        )
     ranked.sort(
         key=lambda candidate: (
             -candidate.score,

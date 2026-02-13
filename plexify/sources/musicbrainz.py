@@ -128,11 +128,9 @@ def _parse_artist_credit(credit: list[dict[str, Any]] | None) -> str:
     return " ".join(names).strip() or "Unknown"
 
 
-def search_releases(artist: str, album: str, limit: int = 8, session: requests.Session | None = None) -> list[ReleaseCandidate]:
+def _release_query(session: requests.Session, query: str, limit: int) -> list[dict[str, Any]]:
     if not is_available():
         return []
-    session = session or _session()
-    query = f'artist:"{artist}" AND release:"{album}"'
     try:
         _rate_limit()
         resp = session.get(
@@ -148,37 +146,86 @@ def search_releases(artist: str, album: str, limit: int = 8, session: requests.S
         _set_unavailable("MusicBrainz lookups are unavailable (network error).")
         return []
     payload = resp.json()
+    releases = payload.get("releases", [])
+    return releases if isinstance(releases, list) else []
+
+
+def _parse_release_candidate(item: dict[str, Any]) -> ReleaseCandidate | None:
+    if not item:
+        return None
+    mbid = item.get("id")
+    title = item.get("title")
+    if not mbid or not title:
+        return None
+    year = _extract_year(item.get("date") or item.get("first-release-date"))
+    country = item.get("country")
+    score_raw = item.get("score") or 0
+    try:
+        score = float(score_raw) / 100.0
+    except (TypeError, ValueError):
+        score = 0.0
+    artist_name = _parse_artist_credit(item.get("artist-credit"))
+    track_count = item.get("track-count")
+    if isinstance(track_count, int):
+        track_count_val = track_count
+    elif isinstance(track_count, str) and track_count.isdigit():
+        track_count_val = int(track_count)
+    else:
+        track_count_val = None
+    return ReleaseCandidate(
+        mbid=str(mbid),
+        title=str(title),
+        artist=artist_name,
+        year=year,
+        country=str(country) if country else None,
+        score=score,
+        track_count=track_count_val,
+        raw_score=score,
+    )
+
+
+def search_releases(
+    artist: str,
+    album: str,
+    limit: int = 8,
+    session: requests.Session | None = None,
+    year: int | None = None,
+) -> list[ReleaseCandidate]:
+    if not is_available():
+        return []
+    session = session or _session()
+    artist_text = artist.strip()
+    album_text = album.strip()
+    queries: list[str] = []
+    if artist_text and album_text and year:
+        queries.append(f'artist:"{artist_text}" AND release:"{album_text}" AND date:{year}')
+    if artist_text and album_text:
+        queries.append(f'artist:"{artist_text}" AND release:"{album_text}"')
+    if album_text:
+        queries.append(f'release:"{album_text}"')
+
+    candidates_by_mbid: dict[str, ReleaseCandidate] = {}
+    for query in queries:
+        for item in _release_query(session, query, limit):
+            candidate = _parse_release_candidate(item)
+            if candidate is None:
+                continue
+            existing = candidates_by_mbid.get(candidate.mbid)
+            if existing is None or candidate.score > existing.score:
+                candidates_by_mbid[candidate.mbid] = candidate
+        if len(candidates_by_mbid) >= limit:
+            break
+
     results: list[ReleaseCandidate] = []
-    for item in payload.get("releases", []):
-        if not item:
-            continue
-        mbid = item.get("id")
-        title = item.get("title")
-        if not mbid or not title:
-            continue
-        year = _extract_year(item.get("date") or item.get("first-release-date"))
-        country = item.get("country")
-        score_raw = item.get("score") or 0
-        try:
-            score = float(score_raw) / 100.0
-        except (TypeError, ValueError):
-            score = 0.0
-        artist_name = _parse_artist_credit(item.get("artist-credit"))
-        track_count = item.get("track-count")
-        track_count_val = int(track_count) if isinstance(track_count, int) else None
-        results.append(
-            ReleaseCandidate(
-                mbid=str(mbid),
-                title=str(title),
-                artist=artist_name,
-                year=year,
-                country=str(country) if country else None,
-                score=score,
-                track_count=track_count_val,
-                raw_score=score,
-            )
+    for candidate in candidates_by_mbid.values():
+        results.append(candidate)
+    results.sort(
+        key=lambda cand: (
+            -(cand.raw_score if cand.raw_score is not None else cand.score),
+            cand.title.casefold(),
         )
-    return results
+    )
+    return results[:limit]
 
 
 def _parse_track_number(value: Any) -> int | None:

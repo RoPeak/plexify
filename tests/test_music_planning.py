@@ -44,6 +44,7 @@ def test_music_discover_recursive_artist_album_year_with_two_part_tracks(tmp_pat
     assert len(albums) == 1
     assert albums[0].artist == "Carole King"
     assert albums[0].album == "Tapestry"
+    assert albums[0].year == 1971
     assert albums[0].tracks[0].track_artist == "Carole King"
 
 
@@ -62,6 +63,23 @@ def test_music_discover_flat_folder_uses_dominant_track_artist(tmp_path: Path) -
     assert len(albums) == 1
     assert albums[0].artist == "Bing Crosby"
     assert albums[0].album == "Bing Crosby & Friends"
+
+
+def test_music_discover_flat_folder_year_suffix_is_preserved_as_metadata(tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    album = source / "Sampler (2001)"
+    album.mkdir(parents=True)
+    (album / "01 - Artist - One.flac").write_text("x", encoding="utf-8")
+    (album / "02 - Artist - Two.flac").write_text("x", encoding="utf-8")
+    (album / "03 - Artist - Three.flac").write_text("x", encoding="utf-8")
+    (album / "04 - Artist - Four.flac").write_text("x", encoding="utf-8")
+    (album / "05 - Guest - Five.flac").write_text("x", encoding="utf-8")
+
+    albums, errors = music.discover_albums(source, ["flac"])
+    assert errors == []
+    assert len(albums) == 1
+    assert albums[0].album == "Sampler"
+    assert albums[0].year == 2001
 
 
 def test_music_discover_flat_folder_skips_ambiguous_artist(tmp_path: Path) -> None:

@@ -2255,3 +2255,164 @@ def test_music_auto_maps_multidisc_without_disc_numbers(monkeypatch, tmp_path: P
     destinations = [str(plan.destination) for plan in planned]
     assert any("Music\\Artist\\Album Deluxe\\101 - Intro (MB).flac" in destination for destination in destinations)
     assert any("Music\\Artist\\Album Deluxe\\201 - Finale (MB).flac" in destination for destination in destinations)
+
+
+def test_music_auto_accepts_top_candidate_and_passes_inferred_year(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album = source / "Duffy - Rockferry (2008)"
+    album.mkdir(parents=True)
+    library.mkdir()
+    (album / "01 - Duffy - Rockferry.flac").write_text("x", encoding="utf-8")
+
+    candidates = [
+        musicbrainz.ReleaseCandidate(
+            mbid="top",
+            title="Rockferry",
+            artist="Duffy",
+            year=2008,
+            country="GB",
+            score=1.0,
+            track_count=1,
+            raw_score=1.0,
+        ),
+        musicbrainz.ReleaseCandidate(
+            mbid="other",
+            title="Rockferry Deluxe",
+            artist="Duffy",
+            year=2008,
+            country="US",
+            score=0.60,
+            track_count=3,
+            raw_score=0.60,
+        ),
+    ]
+    search_years: list[int | None] = []
+    fetch_calls: list[str] = []
+    captured: dict[str, list[cli.MovePlan]] = {}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "search_releases",
+        lambda *_args, **kwargs: search_years.append(kwargs.get("year")) or candidates,
+    )
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda mbid, **_kwargs: fetch_calls.append(mbid) or [musicbrainz.Track(number=1, title="Track", disc=1)],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_music_candidate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("selection prompt should be skipped")),
+    )
+
+    def _fake_execute(plans, **_kwargs):
+        captured["plans"] = list(plans)
+        return cli.ExecutionResult(moved=[], skipped=[], errors=[])
+
+    monkeypatch.setattr(cli, "execute_plans", _fake_execute)
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert search_years == [2008]
+    assert fetch_calls == ["top"]
+    assert captured["plans"]
+
+
+def test_music_auto_skips_extreme_track_mismatch_without_selection_prompt(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album = source / "Artist - Album"
+    album.mkdir(parents=True)
+    library.mkdir()
+    (album / "01 - Artist - Song.flac").write_text("x", encoding="utf-8")
+
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="mismatch",
+        title="Album Anthology",
+        artist="Artist",
+        year=2001,
+        country="US",
+        score=1.0,
+        track_count=40,
+        raw_score=1.0,
+    )
+    fetch_called = {"value": False}
+    captured: dict[str, list[cli.MovePlan]] = {}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(cli.musicbrainz, "search_releases", lambda *_args, **_kwargs: [candidate])
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda *_args, **_kwargs: fetch_called.update(value=True) or [],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_music_candidate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("selection prompt should be skipped")),
+    )
+
+    def _fake_execute(plans, **_kwargs):
+        captured["plans"] = list(plans)
+        return cli.ExecutionResult(moved=[], skipped=[], errors=[])
+
+    monkeypatch.setattr(cli, "execute_plans", _fake_execute)
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert fetch_called["value"] is False
+    assert captured["plans"]
+    assert all("Music\\Artist\\Album\\" in str(plan.destination) for plan in captured["plans"])

@@ -163,7 +163,7 @@ def file_panel(index: int, total: int, item: Any, incoming_root: Path | None) ->
 
 
 def album_panel(index: int, total: int, album: Any) -> Panel:
-    title_line = f"Album {index}/{total} - {rich_escape(album.source.name)}"
+    title_line = f"Album {index}/{total} - {rich_escape(album.album)}"
     lines = [
         f"Detected: Artist={rich_escape(album.artist)}, Album={rich_escape(album.album)}",
         f"Tracks: {len(album.tracks)}",

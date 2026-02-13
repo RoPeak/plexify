@@ -143,3 +143,28 @@ def test_music_sidecar_cleanup_respects_keep_flags(tmp_path: Path) -> None:
     assert log_file.exists()
     cli._prune_empty_dirs([plan], incoming, dry_run=False)
     assert album_dir.exists()
+
+
+def test_prune_empty_dirs_full_sweep_removes_unrelated_empty_folders(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    album_dir = incoming / "Artist - Album"
+    leftover_empty = incoming / "Other Artist" / "Unused Album"
+    album_dir.mkdir(parents=True)
+    leftover_empty.mkdir(parents=True)
+    moved_file = album_dir / "01 - Artist - Track.flac"
+    moved_file.write_text("x", encoding="utf-8")
+
+    plan = MovePlan(
+        source=moved_file,
+        destination=tmp_path / "library" / "Music" / "Artist" / "Album" / moved_file.name,
+        mode="apply",
+        media_type="music",
+        metadata={},
+    )
+    moved_file.unlink()
+
+    cli._prune_empty_dirs([plan], incoming, dry_run=False)
+    assert leftover_empty.exists()
+
+    cli._prune_empty_dirs_full_sweep(incoming, dry_run=False)
+    assert not leftover_empty.exists()

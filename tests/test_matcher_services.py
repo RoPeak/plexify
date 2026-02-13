@@ -68,3 +68,22 @@ def test_rank_music_candidates_avoids_uniform_one_scores() -> None:
     ranked = rank_music_candidates(candidates, track_count=12, requested_title="Tapestry")
     assert ranked[0].score < 1.0
     assert len({round(candidate.score, 3) for candidate in ranked}) > 1
+
+
+def test_rank_music_candidates_prefers_year_closer_match_when_requested() -> None:
+    candidates = [
+        ReleaseCandidate("1", "Rockferry", "Duffy", 2008, "GB", 0.95, 10, raw_score=0.95),
+        ReleaseCandidate("2", "Rockferry", "Duffy", 2006, "GB", 0.95, 10, raw_score=0.95),
+    ]
+    ranked = rank_music_candidates(candidates, track_count=10, requested_title="Rockferry", requested_year=2008)
+    assert ranked[0].mbid == "1"
+
+
+def test_rank_music_candidates_dedupes_identical_title_and_track_count() -> None:
+    candidates = [
+        ReleaseCandidate("1", "III", "Take That", 2014, "GB", 0.95, 12, raw_score=0.95),
+        ReleaseCandidate("2", "III", "Take That", 2014, "DZ", 0.92, 12, raw_score=0.92),
+        ReleaseCandidate("3", "III", "Take That", 2014, "GB", 0.90, 15, raw_score=0.90),
+    ]
+    ranked = rank_music_candidates(candidates, track_count=12, requested_title="III", requested_year=2014)
+    assert [candidate.mbid for candidate in ranked] == ["1", "3"]

@@ -75,6 +75,10 @@ DEFAULT_MIN_CONFIDENCE = 0.90
 AUTO_ACCEPT_GAP = 0.08
 REUSABLE_PROMOTION_MIN_CONFIDENCE = 0.95
 REUSABLE_PROMOTION_MIN_GAP = 0.10
+MUSIC_AUTO_ACCEPT_MIN_SCORE = 0.995
+MUSIC_AUTO_ACCEPT_MIN_GAP = 0.015
+MUSIC_MISMATCH_EXTREME_MIN_DIFF = 10
+MUSIC_MISMATCH_EXTREME_MIN_RATIO = 1.8
 DEFAULT_PRUNE_IGNORE = "Thumbs.db,desktop.ini,.DS_Store"
 PROMPT_BASE = "s=search | m=manual | k=skip | q=quit"
 NO_MORE_RESULTS_MESSAGE = "No more results. Try 's' to refine or 'm' to enter manually."
@@ -216,6 +220,13 @@ class MusicPlannedTrack:
     track_artist: str
     ext: str
     disc_number: int | None = None
+
+
+@dataclass(frozen=True)
+class MusicAutoDecision:
+    action: str
+    candidate: musicbrainz.ReleaseCandidate | None
+    reason: str
 
 
 class BackRequested(Exception):
@@ -1417,8 +1428,9 @@ def _rank_music_candidates(
     candidates: list[musicbrainz.ReleaseCandidate],
     track_count: int,
     requested_title: str,
+    requested_year: int | None,
 ) -> list[musicbrainz.ReleaseCandidate]:
-    return music_matcher.rank_music_candidates(candidates, track_count, requested_title)
+    return music_matcher.rank_music_candidates(candidates, track_count, requested_title, requested_year)
 
 
 def _select_music_candidate(
@@ -1587,6 +1599,54 @@ def _should_use_various_artists(album: music_util.AlbumGroup, candidate_artist: 
     if candidate_key or album_key:
         return False
     return _dominant_track_artist_ratio(album) < 0.8
+
+
+def _music_track_count_diff(file_count: int, release_count: int | None) -> int:
+    if release_count is None:
+        return 10_000
+    return abs(file_count - release_count)
+
+
+def _music_mismatch_is_extreme(file_count: int, release_count: int) -> bool:
+    if file_count <= 0 or release_count <= 0:
+        return False
+    diff = abs(file_count - release_count)
+    larger = max(file_count, release_count)
+    smaller = min(file_count, release_count)
+    ratio = larger / smaller
+    return diff >= MUSIC_MISMATCH_EXTREME_MIN_DIFF and ratio >= MUSIC_MISMATCH_EXTREME_MIN_RATIO
+
+
+def _music_auto_verification_decision(
+    candidates: list[musicbrainz.ReleaseCandidate],
+    *,
+    file_track_count: int,
+) -> MusicAutoDecision | None:
+    if not candidates:
+        return None
+    top = candidates[0]
+    top_track_count = top.track_count
+    if top_track_count is not None and _music_mismatch_is_extreme(file_track_count, top_track_count):
+        return MusicAutoDecision(
+            action="skip",
+            candidate=None,
+            reason=(
+                "Top MusicBrainz release has a very large track-count mismatch "
+                f"(files={file_track_count}, release={top_track_count})."
+            ),
+        )
+
+    if top_track_count is None or top_track_count != file_track_count:
+        return None
+    second = candidates[1] if len(candidates) > 1 else None
+    gap = top.score - second.score if second is not None else top.score
+    if top.score >= MUSIC_AUTO_ACCEPT_MIN_SCORE and gap >= MUSIC_AUTO_ACCEPT_MIN_GAP:
+        return MusicAutoDecision(
+            action="accept",
+            candidate=top,
+            reason=f"Auto-selected top MusicBrainz release (rank={top.score:.3f}, gap={gap:.3f}).",
+        )
+    return None
 
 
 def _print_music_album_summary(
@@ -1803,6 +1863,42 @@ def _prune_empty_dirs(
                 current = current.parent
                 continue
             break
+
+
+def _prune_empty_dirs_full_sweep(
+    incoming_root: Path,
+    *,
+    dry_run: bool,
+    ignored_files: set[str] | None = None,
+) -> None:
+    if not incoming_root.exists() or not incoming_root.is_dir():
+        return
+    ignored = ignored_files if ignored_files is not None else _parse_prune_ignore(DEFAULT_PRUNE_IGNORE)
+    removed_files: set[Path] = set()
+    removed_dirs: set[Path] = set()
+    try:
+        directory_candidates = [entry for entry in incoming_root.rglob("*") if entry.is_dir()]
+    except OSError:
+        return
+    directory_candidates.sort(key=lambda path: len(path.parts), reverse=True)
+    for current in directory_candidates:
+        if current == incoming_root:
+            continue
+        if current in removed_dirs:
+            continue
+        if not current.exists():
+            continue
+        _prune_ignorable_files(current, removed_files, ignored, dry_run=dry_run)
+        if not _dir_empty_after_removals(current, removed_files, removed_dirs):
+            continue
+        if dry_run:
+            console.print(f"Would remove empty folder: {format_path(current)}")
+        else:
+            try:
+                current.rmdir()
+            except OSError:
+                continue
+        removed_dirs.add(current)
 
 
 def _preview_group_key(plan: MovePlan) -> str:
@@ -3475,6 +3571,7 @@ def music(
                         album_title,
                         limit=8,
                         session=mb_session,
+                        year=album.year,
                     )
                     if not musicbrainz.is_available():
                         if not mb_disabled_reported:
@@ -3485,79 +3582,112 @@ def music(
                     elif not candidates:
                         console.print("No MusicBrainz matches found. Using filename metadata.")
                     else:
-                        candidates = _rank_music_candidates(candidates, len(album.tracks), orig_album_title)
-                        while True:
-                            selection = _select_music_candidate(candidates)
-                            if selection == "q":
-                                raise typer.Exit(code=0)
-                            if selection == "s":
-                                console.print("Skipping MusicBrainz verification for this album.")
-                                break
-                            if not isinstance(selection, musicbrainz.ReleaseCandidate):
-                                break
-                            selected_album_artist = selection.artist
-                            selected_album_title = selection.title
-                            if selection.mbid in release_track_cache:
-                                mb_tracks = release_track_cache[selection.mbid]
-                            else:
-                                mb_tracks = musicbrainz.fetch_release_tracks(selection.mbid, session=mb_session)
-                                release_track_cache[selection.mbid] = mb_tracks
-                            if not mb_tracks:
-                                if not musicbrainz.is_available():
-                                    if not mb_disabled_reported:
-                                        reason = musicbrainz.unavailable_reason() or "offline"
-                                        console.print(f"MusicBrainz disabled: {reason}")
-                                        mb_disabled_reported = True
-                                    console.print("Skipped MusicBrainz (offline).")
+                        candidates = _rank_music_candidates(
+                            candidates,
+                            len(album.tracks),
+                            orig_album_title,
+                            album.year,
+                        )
+                        auto_decision = _music_auto_verification_decision(
+                            candidates,
+                            file_track_count=len(album.tracks),
+                        )
+                        if auto_decision is not None and auto_decision.action == "skip":
+                            console.print(f"{auto_decision.reason} Using filename metadata.")
+                        else:
+                            auto_candidate = (
+                                auto_decision.candidate
+                                if auto_decision is not None and auto_decision.action == "accept"
+                                else None
+                            )
+                            auto_candidate_used = False
+                            while True:
+                                selection_mode = "manual"
+                                if auto_candidate is not None and not auto_candidate_used:
+                                    selection = auto_candidate
+                                    auto_candidate_used = True
+                                    selection_mode = "auto"
+                                    if auto_decision is not None:
+                                        console.print(auto_decision.reason)
                                 else:
-                                    console.print("No tracklist found. Using filename metadata.")
-                                break
+                                    selection = _select_music_candidate(candidates)
+                                if selection == "q":
+                                    raise typer.Exit(code=0)
+                                if selection == "s":
+                                    console.print("Skipping MusicBrainz verification for this album.")
+                                    break
+                                if not isinstance(selection, musicbrainz.ReleaseCandidate):
+                                    break
+                                selected_album_artist = selection.artist
+                                selected_album_title = selection.title
+                                if selection.mbid in release_track_cache:
+                                    mb_tracks = release_track_cache[selection.mbid]
+                                else:
+                                    mb_tracks = musicbrainz.fetch_release_tracks(selection.mbid, session=mb_session)
+                                    release_track_cache[selection.mbid] = mb_tracks
+                                if not mb_tracks:
+                                    if not musicbrainz.is_available():
+                                        if not mb_disabled_reported:
+                                            reason = musicbrainz.unavailable_reason() or "offline"
+                                            console.print(f"MusicBrainz disabled: {reason}")
+                                            mb_disabled_reported = True
+                                        console.print("Skipped MusicBrainz (offline).")
+                                    else:
+                                        console.print("No tracklist found. Using filename metadata.")
+                                    break
 
-                            if len(mb_tracks) != len(album.tracks):
-                                console.print(
-                                    f"Track count mismatch: files={len(album.tracks)} release={len(mb_tracks)}."
-                                )
-                                choice = _prompt_music_track_mismatch_choice(None)
-                                if choice == "r":
-                                    continue
-                                if choice == "o":
-                                    mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                    console.print("Using MusicBrainz titles by track order.")
+                                if len(mb_tracks) != len(album.tracks):
+                                    console.print(
+                                        f"Track count mismatch: files={len(album.tracks)} release={len(mb_tracks)}."
+                                    )
+                                    if selection_mode == "auto" and _music_mismatch_is_extreme(
+                                        len(album.tracks), len(mb_tracks)
+                                    ):
+                                        console.print("Large track-count mismatch after auto-selection. Using filename metadata.")
+                                        album_artist = orig_album_artist
+                                        album_title = orig_album_title
+                                        break
+                                    choice = _prompt_music_track_mismatch_choice(None)
+                                    if choice == "r":
+                                        continue
+                                    if choice == "o":
+                                        mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
+                                        console.print("Using MusicBrainz titles by track order.")
+                                        planned_tracks = mapped
+                                        album_artist = selected_album_artist
+                                        album_title = selected_album_title
+                                        break
+                                    console.print("Using filename metadata.")
+                                    album_artist = orig_album_artist
+                                    album_title = orig_album_title
+                                    break
+
+                                mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
+                                if reason:
+                                    if reason == "Multi-disc release without disc numbers in filenames":
+                                        mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
+                                        console.print(
+                                            "Warning: Multi-disc release without disc numbers in filenames. "
+                                            "Using MusicBrainz order with disc-prefixed track numbers."
+                                        )
+                                        album_artist = selected_album_artist
+                                        album_title = selected_album_title
+                                    else:
+                                        console.print(f"Warning: {reason}.")
+                                        if _confirm("Fallback to filename titles? [Y/n]", True, None, show_default=False):
+                                            mapped = None
+                                            album_artist = orig_album_artist
+                                            album_title = orig_album_title
+                                        else:
+                                            mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
+                                            console.print("Using MusicBrainz titles by track order.")
+                                            album_artist = selected_album_artist
+                                            album_title = selected_album_title
+                                if mapped is not None:
                                     planned_tracks = mapped
                                     album_artist = selected_album_artist
                                     album_title = selected_album_title
-                                    break
-                                console.print("Using filename metadata.")
-                                album_artist = orig_album_artist
-                                album_title = orig_album_title
                                 break
-
-                            mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
-                            if reason:
-                                if reason == "Multi-disc release without disc numbers in filenames":
-                                    mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                    console.print(
-                                        "Warning: Multi-disc release without disc numbers in filenames. "
-                                        "Using MusicBrainz order with disc-prefixed track numbers."
-                                    )
-                                    album_artist = selected_album_artist
-                                    album_title = selected_album_title
-                                else:
-                                    console.print(f"Warning: {reason}.")
-                                    if _confirm("Fallback to filename titles? [Y/n]", True, None, show_default=False):
-                                        mapped = None
-                                        album_artist = orig_album_artist
-                                        album_title = orig_album_title
-                                    else:
-                                        mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                        console.print("Using MusicBrainz titles by track order.")
-                                        album_artist = selected_album_artist
-                                        album_title = selected_album_title
-                            if mapped is not None:
-                                planned_tracks = mapped
-                                album_artist = selected_album_artist
-                                album_title = selected_album_title
-                            break
 
             dest_artist = "Various Artists" if _should_use_various_artists(album, album_artist) else album_artist
             dest_album = album_title
@@ -3668,10 +3798,12 @@ def music(
             keep_cue=keep_cue,
             keep_log=keep_log,
         )
-        console.print(f"Removed skipped sidecars: {removed_sidecars}")
+        if removed_sidecars > 0:
+            console.print(f"Removed skipped sidecars: {removed_sidecars}")
         if cleanup_warnings:
             errors.extend(cleanup_warnings)
         _prune_empty_dirs(result.moved, source, dry_run=False)
+        _prune_empty_dirs_full_sweep(source, dry_run=False)
 
     write_report(report_path, result.moved if apply else plans, "apply" if apply else "dry-run", copy_mode)
 

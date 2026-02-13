@@ -28,6 +28,7 @@ class AlbumGroup:
     images: list[Path]
     cues: list[Path]
     logs: list[Path]
+    year: int | None = None
 
 
 _FEAT_SUFFIX_RE = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", re.IGNORECASE)
@@ -117,28 +118,32 @@ def _collect_tracks(
     return tracks, invalid
 
 
-def _strip_album_year(name: str) -> str:
+def _album_with_optional_year(name: str) -> tuple[str, int | None]:
     match = _ALBUM_YEAR_SUFFIX_RE.match(name.strip())
     if not match:
-        return name.strip()
-    return match.group("album").strip()
+        return name.strip(), None
+    album = match.group("album").strip()
+    year_text = match.group("year")
+    year = int(year_text) if year_text.isdigit() else None
+    return album, year
 
 
-def _infer_album_metadata(path: Path, source: Path) -> tuple[str | None, str | None]:
+def _infer_album_metadata(path: Path, source: Path) -> tuple[str | None, str | None, int | None]:
     parsed = parse_album_folder(path.name)
     if parsed:
-        return parsed[0], parsed[1]
+        album, year = _album_with_optional_year(parsed[1])
+        return parsed[0], album, year
 
     if path.parent != source:
         artist = path.parent.name.strip()
-        album = _strip_album_year(path.name)
+        album, year = _album_with_optional_year(path.name)
         if artist and album:
-            return artist, album
+            return artist, album, year
 
-    album = path.name.strip()
+    album, year = _album_with_optional_year(path.name)
     if album:
-        return None, album
-    return None, None
+        return None, album, year
+    return None, None, None
 
 
 def _is_descendant(path: Path, parent: Path) -> bool:
@@ -171,7 +176,7 @@ def discover_albums(source: Path, extensions: Iterable[str]) -> tuple[list[Album
     albums: list[AlbumGroup] = []
 
     def _build_album(path: Path) -> None:
-        artist, album = _infer_album_metadata(path, source)
+        artist, album, inferred_year = _infer_album_metadata(path, source)
         if not album:
             errors.append(f"Could not infer album title from folder: {path}")
             return
@@ -212,6 +217,7 @@ def discover_albums(source: Path, extensions: Iterable[str]) -> tuple[list[Album
                 images=images,
                 cues=cues,
                 logs=logs,
+                year=inferred_year,
             )
         )
 

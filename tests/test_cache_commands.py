@@ -12,6 +12,7 @@ def test_cache_stats_reports_entry_counts(tmp_path: Path) -> None:
     cache.set_show("tv|show|2000", {"id": 1, "name": "Show", "confirmed_by_user": True})
     cache.set_movie("movie|film|2001", {"qid": "Q1", "title": "Film", "confirmed_by_user": True})
     cache.set_enrichment("wikidata:Q1", {"director": "A"})
+    cache.set_music("music|artist|album|unknown|1|abc", {"decision": "filename_fallback"})
     cache.save()
 
     runner = CliRunner()
@@ -57,4 +58,3 @@ def test_cache_delete_removes_matching_keys_by_query(tmp_path: Path) -> None:
     assert updated.get_show("tv|doctor who|2005") is None
     assert updated.get_movie("movie|doctor strange|2016") is None
     assert updated.get_movie("movie|inception|2010") is not None
-

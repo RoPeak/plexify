@@ -14,6 +14,7 @@ def test_legacy_cache_without_schema_version_upgrades(tmp_path: Path) -> None:
     assert "shows" in cache.data
     assert "movies" in cache.data
     assert "enrichment" in cache.data
+    assert "music" in cache.data
 
 
 def test_cache_upgrade_adds_missing_sections(tmp_path: Path) -> None:
@@ -24,6 +25,7 @@ def test_cache_upgrade_adds_missing_sections(tmp_path: Path) -> None:
 
     assert isinstance(cache.data["movies"], dict)
     assert isinstance(cache.data["enrichment"], dict)
+    assert isinstance(cache.data["music"], dict)
 
 
 def test_cache_upgrade_handles_non_dict_payload(tmp_path: Path) -> None:
@@ -36,6 +38,7 @@ def test_cache_upgrade_handles_non_dict_payload(tmp_path: Path) -> None:
     assert cache.data["shows"] == {}
     assert cache.data["movies"] == {}
     assert cache.data["enrichment"] == {}
+    assert cache.data["music"] == {}
 
 
 def test_cache_save_persists_schema_version(tmp_path: Path) -> None:

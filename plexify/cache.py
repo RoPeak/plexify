@@ -6,7 +6,7 @@ from typing import Any
 
 from .util import json_dump, json_load
 
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 MIN_SUPPORTED_SCHEMA_VERSION = 1
 
 
@@ -28,6 +28,7 @@ def _upgrade_cache_data(data: Any) -> dict[str, Any]:
     upgraded.setdefault("shows", {})
     upgraded.setdefault("movies", {})
     upgraded.setdefault("enrichment", {})
+    upgraded.setdefault("music", {})
     upgraded["schema_version"] = CACHE_SCHEMA_VERSION
     return upgraded
 
@@ -64,6 +65,15 @@ class Cache:
     def set_enrichment(self, key: str, value: dict[str, Any]) -> None:
         self.data.setdefault("enrichment", {})[key] = value
 
+    def get_music(self, key: str) -> dict[str, Any] | None:
+        return self.data.get("music", {}).get(key)
+
+    def set_music(self, key: str, value: dict[str, Any]) -> None:
+        self.data.setdefault("music", {})[key] = value
+
+    def delete_music(self, key: str) -> None:
+        self.data.setdefault("music", {}).pop(key, None)
+
 
 class NullCache(Cache):
     def __init__(self) -> None:
@@ -73,6 +83,7 @@ class NullCache(Cache):
             "shows": {},
             "movies": {},
             "enrichment": {},
+            "music": {},
         }
 
     def get_show(self, key: str) -> dict[str, Any] | None:
@@ -100,4 +111,13 @@ class NullCache(Cache):
         return None
 
     def set_enrichment(self, key: str, value: dict[str, Any]) -> None:
+        return None
+
+    def get_music(self, key: str) -> dict[str, Any] | None:
+        return None
+
+    def set_music(self, key: str, value: dict[str, Any]) -> None:
+        return None
+
+    def delete_music(self, key: str) -> None:
         return None

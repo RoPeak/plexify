@@ -259,3 +259,67 @@ def test_music_track_preview_prints_limit_and_remainder(monkeypatch) -> None:
     assert lines[1] == "- 01.flac -> 01.flac"
     assert lines[2] == "- 02.flac -> 02.flac"
     assert lines[3] == "... +2 more track(s)"
+
+
+def test_album_decision_cache_key_changes_with_track_count(tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    album_dir = source / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    one = album_dir / "01 - Track One.flac"
+    two = album_dir / "02 - Track Two.flac"
+    one.write_text("x", encoding="utf-8")
+    two.write_text("x", encoding="utf-8")
+
+    albums, errors = music.discover_albums(source, ["flac"])
+    assert errors == []
+    assert len(albums) == 1
+    key_one_track = music.album_decision_cache_key(
+        music.AlbumGroup(
+            source=albums[0].source,
+            artist=albums[0].artist,
+            album=albums[0].album,
+            tracks=albums[0].tracks[:1],
+            images=[],
+            cues=[],
+            logs=[],
+            year=albums[0].year,
+            disc_number=albums[0].disc_number,
+        )
+    )
+    key_two_tracks = music.album_decision_cache_key(albums[0])
+
+    assert key_one_track != key_two_tracks
+
+
+def test_album_decision_cache_key_changes_with_track_title_hash(tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    album_dir = source / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    (album_dir / "01 - Track One.flac").write_text("x", encoding="utf-8")
+
+    albums, errors = music.discover_albums(source, ["flac"])
+    assert errors == []
+    assert len(albums) == 1
+    base_album = albums[0]
+    key_original = music.album_decision_cache_key(base_album)
+    changed_track = music.TrackInfo(
+        source=base_album.tracks[0].source,
+        track_number=base_album.tracks[0].track_number,
+        track_title="Different Title",
+        track_artist=base_album.tracks[0].track_artist,
+        ext=base_album.tracks[0].ext,
+    )
+    modified_album = music.AlbumGroup(
+        source=base_album.source,
+        artist=base_album.artist,
+        album=base_album.album,
+        tracks=[changed_track],
+        images=[],
+        cues=[],
+        logs=[],
+        year=base_album.year,
+        disc_number=base_album.disc_number,
+    )
+    key_changed = music.album_decision_cache_key(modified_album)
+
+    assert key_original != key_changed

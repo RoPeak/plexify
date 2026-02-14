@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Iterable
 
 from collections import Counter
+import hashlib
 import re
 
 from .util import sanitise_name
@@ -150,6 +151,33 @@ def _normalise_artist_name(name: str | None) -> str:
     if not name:
         return ""
     return " ".join(name.split()).casefold()
+
+
+def _normalise_music_decision_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(value.split()).casefold()
+
+
+def _normalise_track_title_for_signature(title: str | None) -> str:
+    if not title:
+        return ""
+    return re.sub(r"\s+", " ", title).strip().casefold()
+
+
+def album_decision_cache_key(album: AlbumGroup) -> str:
+    artist_key = _normalise_music_decision_text(album.artist)
+    album_key = _normalise_music_decision_text(album.album)
+    year_text = str(album.year) if album.year is not None else "unknown"
+    track_count = len(album.tracks)
+    parts: list[str] = []
+    for track in sorted(album.tracks, key=lambda item: (item.track_number, item.source.name.lower())):
+        parts.append(
+            f"{track.track_number}|{_normalise_track_title_for_signature(track.track_title)}|{track.ext.lower()}"
+        )
+    digest_input = "\n".join(parts).encode("utf-8")
+    digest = hashlib.sha1(digest_input).hexdigest()
+    return f"music|{artist_key}|{album_key}|{year_text}|{track_count}|{digest}"
 
 
 def _infer_album_metadata(path: Path, source: Path) -> tuple[str | None, str | None, int | None, int | None]:

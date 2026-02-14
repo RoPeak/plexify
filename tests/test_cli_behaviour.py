@@ -3212,3 +3212,229 @@ def test_music_no_matches_can_skip_album_verification(monkeypatch, tmp_path: Pat
 
     assert search_calls["count"] == 1
     assert captured["plans"][0].destination.name == "01 - Song One.flac"
+
+
+def test_music_reuses_cached_selected_decision_without_prompt(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_dir = source / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    library.mkdir()
+    (album_dir / "01 - Song One.flac").write_text("x", encoding="utf-8")
+
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="release-1",
+        title="Album",
+        artist="Artist",
+        year=2001,
+        country="GB",
+        score=1.0,
+        track_count=1,
+        raw_score=1.0,
+    )
+    calls = {"search": 0, "select": 0}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "search_releases",
+        lambda *_args, **_kwargs: calls.update(search=calls["search"] + 1) or [candidate],
+    )
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda *_args, **_kwargs: [musicbrainz.Track(number=1, title="Song One (MB)", disc=1)],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_music_candidate",
+        lambda *_args, **_kwargs: calls.update(select=calls["select"] + 1) or candidate,
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_plans",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=[], skipped=list(plans), errors=[]),
+    )
+
+    for run in range(2):
+        try:
+            cli.music(
+                source=source,
+                library=library,
+                apply=False,
+                copy=True,
+                extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+                verify=True,
+                keep_art=False,
+                keep_cue=False,
+                keep_log=False,
+                offline=False,
+                cleanup_empty_dirs=False,
+                cleanup_unknown_files=False,
+                verbose_plan=False,
+                plan_preview_tracks=0,
+                mismatch_policy="ask",
+                log_level="WARNING",
+                log_format="text",
+                log_file=None,
+            )
+        except cli.typer.Exit as exc:
+            assert exc.exit_code == 0
+        if run == 0:
+            monkeypatch.setattr(
+                cli.musicbrainz,
+                "search_releases",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("search should be skipped on replay")),
+            )
+            monkeypatch.setattr(
+                cli,
+                "_select_music_candidate",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("prompt should be skipped on replay")),
+            )
+
+    assert calls["search"] == 1
+    assert calls["select"] == 1
+
+
+def test_music_reuses_cached_skip_album_without_search(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_dir = source / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    library.mkdir()
+    (album_dir / "01 - Song One.flac").write_text("x", encoding="utf-8")
+    albums, errors = cli.music_util.discover_albums(source, ["flac"])
+    assert errors == []
+    key = cli.music_util.album_decision_cache_key(albums[0])
+    cache = Cache(library / ".plexify" / "cache.json")
+    cache.set_music(
+        key,
+        {
+            "version": 1,
+            "selection_mode": "manual",
+            "decision": "skip_album",
+            "created_at": "2026-01-01_00-00-00",
+        },
+    )
+    cache.save()
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "search_releases",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("search should be skipped")),
+    )
+    monkeypatch.setattr(
+        cli,
+        "execute_plans",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=[], skipped=list(plans), errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            cleanup_unknown_files=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+
+def test_music_ignores_corrupt_cached_decision(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album_dir = source / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    library.mkdir()
+    (album_dir / "01 - Song One.flac").write_text("x", encoding="utf-8")
+    albums, errors = cli.music_util.discover_albums(source, ["flac"])
+    assert errors == []
+    key = cli.music_util.album_decision_cache_key(albums[0])
+    cache = Cache(library / ".plexify" / "cache.json")
+    cache.set_music(key, {"decision": 123})
+    cache.save()
+
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="release-1",
+        title="Album",
+        artist="Artist",
+        year=2001,
+        country="GB",
+        score=1.0,
+        track_count=1,
+        raw_score=1.0,
+    )
+    calls = {"search": 0}
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "search_releases",
+        lambda *_args, **_kwargs: calls.update(search=calls["search"] + 1) or [candidate],
+    )
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda *_args, **_kwargs: [musicbrainz.Track(number=1, title="Song One (MB)", disc=1)],
+    )
+    monkeypatch.setattr(cli, "_select_music_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(
+        cli,
+        "execute_plans",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=[], skipped=list(plans), errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            cleanup_unknown_files=False,
+            verbose_plan=False,
+            plan_preview_tracks=0,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert calls["search"] == 1

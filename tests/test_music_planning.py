@@ -91,6 +91,25 @@ def test_music_discover_flat_folder_uses_dominant_track_artist(tmp_path: Path) -
     assert albums[0].album == "Bing Crosby & Friends"
 
 
+def test_music_discover_reports_invalid_track_examples_and_keeps_valid_tracks(tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    album = source / "Artist - Album"
+    album.mkdir(parents=True)
+    (album / "01 - Artist - First.flac").write_text("x", encoding="utf-8")
+    (album / "02 - Artist - Second.flac").write_text("x", encoding="utf-8")
+    (album / "bad-name.flac").write_text("x", encoding="utf-8")
+    (album / "also bad.flac").write_text("x", encoding="utf-8")
+
+    albums, errors = music.discover_albums(source, ["flac"])
+
+    assert len(albums) == 1
+    assert len(albums[0].tracks) == 2
+    assert albums[0].invalid_track_count == 2
+    assert "bad-name.flac" in albums[0].invalid_track_examples
+    assert any("Planned with valid tracks only." in error for error in errors)
+    assert any("bad-name.flac" in error for error in errors)
+
+
 def test_music_discover_flat_folder_year_suffix_is_preserved_as_metadata(tmp_path: Path) -> None:
     source = tmp_path / "incoming"
     album = source / "Sampler (2001)"
@@ -237,6 +256,123 @@ def test_should_use_various_artists_ignores_featured_artists() -> None:
         logs=[],
     )
     assert cli._should_use_various_artists(album, "Eminem") is False
+
+
+def test_should_use_various_artists_uses_dominance_when_source_artist_is_generic() -> None:
+    dominant_album = music.AlbumGroup(
+        source=Path("Various Artists - Mylo Xyloto"),
+        artist="Various Artists",
+        album="Mylo Xyloto",
+        tracks=[
+            music.TrackInfo(
+                source=Path("01 - Coldplay - One.flac"),
+                track_number=1,
+                track_title="One",
+                track_artist="Coldplay",
+                ext=".flac",
+            ),
+            music.TrackInfo(
+                source=Path("02 - Coldplay - Two.flac"),
+                track_number=2,
+                track_title="Two",
+                track_artist="Coldplay",
+                ext=".flac",
+            ),
+            music.TrackInfo(
+                source=Path("03 - Coldplay - Three.flac"),
+                track_number=3,
+                track_title="Three",
+                track_artist="Coldplay",
+                ext=".flac",
+            ),
+            music.TrackInfo(
+                source=Path("04 - Guest - Four.flac"),
+                track_number=4,
+                track_title="Four",
+                track_artist="Guest",
+                ext=".flac",
+            ),
+            music.TrackInfo(
+                source=Path("05 - Coldplay - Five.flac"),
+                track_number=5,
+                track_title="Five",
+                track_artist="Coldplay",
+                ext=".flac",
+            ),
+        ],
+        images=[],
+        cues=[],
+        logs=[],
+    )
+    mixed_album = music.AlbumGroup(
+        source=Path("Various Artists - Mixed"),
+        artist="Various Artists",
+        album="Mixed",
+        tracks=[
+            music.TrackInfo(
+                source=Path("01 - Artist A - One.flac"),
+                track_number=1,
+                track_title="One",
+                track_artist="Artist A",
+                ext=".flac",
+            ),
+            music.TrackInfo(
+                source=Path("02 - Artist B - Two.flac"),
+                track_number=2,
+                track_title="Two",
+                track_artist="Artist B",
+                ext=".flac",
+            ),
+            music.TrackInfo(
+                source=Path("03 - Artist A - Three.flac"),
+                track_number=3,
+                track_title="Three",
+                track_artist="Artist A",
+                ext=".flac",
+            ),
+            music.TrackInfo(
+                source=Path("04 - Artist C - Four.flac"),
+                track_number=4,
+                track_title="Four",
+                track_artist="Artist C",
+                ext=".flac",
+            ),
+            music.TrackInfo(
+                source=Path("05 - Artist D - Five.flac"),
+                track_number=5,
+                track_title="Five",
+                track_artist="Artist D",
+                ext=".flac",
+            ),
+        ],
+        images=[],
+        cues=[],
+        logs=[],
+    )
+
+    assert cli._should_use_various_artists(dominant_album, "Coldplay") is False
+    assert cli._should_use_various_artists(mixed_album, "Coldplay") is True
+
+
+def test_should_use_various_artists_when_candidate_artist_is_generic() -> None:
+    album = music.AlbumGroup(
+        source=Path("Artist - Album"),
+        artist="Artist",
+        album="Album",
+        tracks=[
+            music.TrackInfo(
+                source=Path("01 - Artist - Track.flac"),
+                track_number=1,
+                track_title="Track",
+                track_artist="Artist",
+                ext=".flac",
+            )
+        ],
+        images=[],
+        cues=[],
+        logs=[],
+    )
+    assert cli._should_use_various_artists(album, "Various Artists") is True
 
 
 def test_music_track_preview_prints_limit_and_remainder(monkeypatch) -> None:

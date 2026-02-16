@@ -31,6 +31,8 @@ class AlbumGroup:
     logs: list[Path]
     year: int | None = None
     disc_number: int | None = None
+    invalid_track_count: int = 0
+    invalid_track_examples: tuple[str, ...] = ()
 
 
 _FEAT_SUFFIX_RE = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", re.IGNORECASE)
@@ -267,7 +269,13 @@ def discover_albums(source: Path, extensions: Iterable[str]) -> tuple[list[Album
                 return
             artist = dominant_artist
         if invalid_tracks:
-            errors.append(f"Skipped {len(invalid_tracks)} unsupported track filename(s) in: {path}")
+            example_names = ", ".join(entry.name for entry in invalid_tracks[:3])
+            if len(invalid_tracks) > 3:
+                example_names += ", ..."
+            errors.append(
+                f"Skipped {len(invalid_tracks)} unsupported track filename(s) in: {path}. "
+                f"Planned with valid tracks only. Examples: {example_names}"
+            )
         if not artist:
             errors.append(f"Could not infer album artist from folder: {path}")
             return
@@ -289,6 +297,8 @@ def discover_albums(source: Path, extensions: Iterable[str]) -> tuple[list[Album
                 logs=logs,
                 year=inferred_year,
                 disc_number=inferred_disc_number,
+                invalid_track_count=len(invalid_tracks),
+                invalid_track_examples=tuple(entry.name for entry in invalid_tracks[:3]),
             )
         )
 

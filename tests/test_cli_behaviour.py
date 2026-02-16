@@ -2100,6 +2100,73 @@ def test_music_mismatch_reprompts_and_filename_fallback_restores_album(monkeypat
     assert len(prompt_calls) == 2
 
 
+def test_music_mismatch_filename_titles_keeps_mb_album_artist(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album = source / "Various Artists" / "Version"
+    album.mkdir(parents=True)
+    library.mkdir()
+    (album / "01 - Mark Ronson - Intro.flac").write_text("x", encoding="utf-8")
+
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="mb-version",
+        title="Version",
+        artist="Mark Ronson",
+        year=2007,
+        country="GB",
+        score=1.0,
+        track_count=2,
+    )
+    mb_tracks = [
+        musicbrainz.Track(number=1, title="Intro", disc=1),
+        musicbrainz.Track(number=2, title="Second", disc=1),
+    ]
+    captured: dict[str, list[cli.MovePlan]] = {}
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(cli.musicbrainz, "search_releases", lambda *_args, **_kwargs: [candidate])
+    monkeypatch.setattr(cli.musicbrainz, "fetch_release_tracks", lambda *_args, **_kwargs: mb_tracks)
+    monkeypatch.setattr(cli, "_select_music_candidate", lambda *_args, **_kwargs: candidate)
+
+    def _fake_execute(plans, **_kwargs):
+        captured["plans"] = list(plans)
+        return cli.ExecutionResult(moved=[], skipped=[], errors=[])
+
+    monkeypatch.setattr(cli, "execute_plans", _fake_execute)
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            mismatch_policy="filename-titles",
+            verbose_plan=False,
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    planned = captured["plans"]
+    assert planned
+    assert any("Music\\Mark Ronson\\Version\\" in str(plan.destination) for plan in planned)
+    assert all("Music\\Various Artists\\" not in str(plan.destination) for plan in planned)
+
+
 def test_music_uses_single_session_and_caches_release_tracklists(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "incoming"
     library = tmp_path / "library"
@@ -2627,7 +2694,115 @@ def test_music_does_not_save_wizard_prefs_when_paths_provided(monkeypatch, tmp_p
 
 def test_prompt_music_track_mismatch_choice_honours_policy() -> None:
     assert cli._prompt_music_track_mismatch_choice(mismatch_policy="filename") == "f"
+    assert cli._prompt_music_track_mismatch_choice(mismatch_policy="filename-titles") == "t"
     assert cli._prompt_music_track_mismatch_choice(mismatch_policy="order") == "o"
+
+
+def test_music_mismatch_policy_rejects_unknown_value(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    source.mkdir()
+    library.mkdir()
+    printed: list[str] = []
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.console, "print", lambda message: printed.append(str(message)))
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=False,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            mismatch_policy="nope",
+            verbose_plan=False,
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+        raise AssertionError("Expected typer.Exit for invalid mismatch policy")
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 2
+
+    assert any("mismatch-policy must be one of: ask, filename, filename-titles, order." in line for line in printed)
+
+
+def test_music_decision_payload_includes_invalid_track_count(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "incoming"
+    library = tmp_path / "library"
+    album = source / "Artist - Album"
+    album.mkdir(parents=True)
+    library.mkdir()
+    (album / "01 - Artist - Song.flac").write_text("x", encoding="utf-8")
+    (album / "bad-name.flac").write_text("x", encoding="utf-8")
+
+    candidate = musicbrainz.ReleaseCandidate(
+        mbid="mb-song",
+        title="Album",
+        artist="Artist",
+        year=2000,
+        country="GB",
+        score=1.0,
+        track_count=1,
+    )
+    payloads: list[dict[str, object]] = []
+    original_set_music = cli.Cache.set_music
+
+    def _capture_set_music(cache_obj, key, payload):
+        payloads.append(dict(payload))
+        return original_set_music(cache_obj, key, payload)
+
+    monkeypatch.setattr(cli, "_initialise_logging", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "write_report", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.musicbrainz, "unavailable_reason", lambda: None)
+    monkeypatch.setattr(cli.musicbrainz, "create_session", lambda: requests.Session())
+    monkeypatch.setattr(cli.musicbrainz, "search_releases", lambda *_args, **_kwargs: [candidate])
+    monkeypatch.setattr(
+        cli.musicbrainz,
+        "fetch_release_tracks",
+        lambda *_args, **_kwargs: [musicbrainz.Track(number=1, title="Song (MB)", disc=1)],
+    )
+    monkeypatch.setattr(cli, "_select_music_candidate", lambda *_args, **_kwargs: candidate)
+    monkeypatch.setattr(cli.Cache, "set_music", _capture_set_music)
+    monkeypatch.setattr(
+        cli,
+        "execute_plans",
+        lambda plans, **_kwargs: cli.ExecutionResult(moved=[], skipped=list(plans), errors=[]),
+    )
+
+    try:
+        cli.music(
+            source=source,
+            library=library,
+            apply=False,
+            copy=True,
+            extensions=cli.DEFAULT_MUSIC_EXTENSIONS,
+            verify=True,
+            keep_art=False,
+            keep_cue=False,
+            keep_log=False,
+            offline=False,
+            cleanup_empty_dirs=False,
+            verbose_plan=False,
+            mismatch_policy="ask",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+        )
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 0
+
+    assert payloads
+    assert any(payload.get("invalid_track_count") == 1 for payload in payloads)
 
 
 def test_music_generic_metadata_uses_dominant_track_artist_override(monkeypatch, tmp_path: Path) -> None:

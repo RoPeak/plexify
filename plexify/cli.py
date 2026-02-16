@@ -124,6 +124,8 @@ WIZARD_MUSIC_MISMATCH_CHOICES = {
     "a": "ask",
     "filename": "filename",
     "f": "filename",
+    "filename-titles": "filename-titles",
+    "t": "filename-titles",
     "order": "order",
     "o": "order",
 }
@@ -608,18 +610,20 @@ def _prompt_music_track_mismatch_choice(
 ) -> str:
     if mismatch_policy == "filename":
         return "f"
+    if mismatch_policy == "filename-titles":
+        return "t"
     if mismatch_policy == "order":
         return "o"
     while True:
         choice = _prompt_choice(
-            "r=re-pick release | f=filename titles | o=order",
+            "r=re-pick release | f=filename titles (original album) | t=filename titles (keep MB album) | o=order",
             "r",
             progress,
             show_default=False,
         )
-        if choice in {"r", "f", "o"}:
+        if choice in {"r", "f", "t", "o"}:
             return choice
-        _safe_print("Enter one of: r, f, o.", progress)
+        _safe_print("Enter one of: r, f, t, o.", progress)
 
 
 def _prompt_int(prompt: str, default: int, progress: Progress | None) -> int:
@@ -1647,7 +1651,8 @@ def _should_use_various_artists(album: music_util.AlbumGroup, candidate_artist: 
         return True
     album_key = _normalise_artist_key(album.artist)
     if album_key in {"various artists", "va", "various"}:
-        return True
+        # Source folder may be generic; treat as single-artist when one artist dominates.
+        return _dominant_track_artist_ratio(album) < 0.8
     if candidate_key or album_key:
         return False
     return _dominant_track_artist_ratio(album) < 0.8
@@ -1767,7 +1772,7 @@ def _normalise_music_decision_entry(entry: dict[str, Any] | None) -> dict[str, A
     if not isinstance(decision, str):
         return None
     decision = decision.strip().lower()
-    if decision not in {"selected", "filename_fallback", "order_fallback", "skip_album"}:
+    if decision not in {"selected", "filename_fallback", "filename_titles_fallback", "order_fallback", "skip_album"}:
         return None
     selection_mode = entry.get("selection_mode")
     if isinstance(selection_mode, str):
@@ -1788,6 +1793,9 @@ def _normalise_music_decision_entry(entry: dict[str, Any] | None) -> dict[str, A
     reason = entry.get("reason")
     if not isinstance(reason, str) or not reason.strip():
         reason = None
+    invalid_track_count = entry.get("invalid_track_count")
+    if not isinstance(invalid_track_count, int) or invalid_track_count < 0:
+        invalid_track_count = 0
     return {
         "selection_mode": selection_mode,
         "decision": decision,
@@ -1795,6 +1803,7 @@ def _normalise_music_decision_entry(entry: dict[str, Any] | None) -> dict[str, A
         "chosen_artist": chosen_artist,
         "chosen_album": chosen_album,
         "reason": reason,
+        "invalid_track_count": invalid_track_count,
     }
 
 
@@ -3723,7 +3732,7 @@ def music(
     mismatch_policy: str = typer.Option(
         "ask",
         "--mismatch-policy",
-        help="Mismatch handling for MB track-count conflicts: ask, filename, order",
+        help="Mismatch handling for MB track-count conflicts: ask, filename, filename-titles, order",
     ),
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
@@ -3740,8 +3749,8 @@ def music(
     if not isinstance(cleanup_unknown_confirm_token, str):
         cleanup_unknown_confirm_token = ""
     cleanup_unknown_confirm_token = cleanup_unknown_confirm_token.strip()
-    if mismatch_policy not in {"ask", "filename", "order"}:
-        console.print("mismatch-policy must be one of: ask, filename, order.")
+    if mismatch_policy not in {"ask", "filename", "filename-titles", "order"}:
+        console.print("mismatch-policy must be one of: ask, filename, filename-titles, order.")
         raise typer.Exit(code=2)
     source_prompted = source is None
     library_prompted = library is None
@@ -3879,6 +3888,7 @@ def music(
         "skipped_album": 0,
         "skipped_remaining": 0,
         "filename_fallback": 0,
+        "filename_titles_fallback": 0,
         "order_fallback": 0,
     }
     try:
@@ -3904,6 +3914,7 @@ def music(
             music_decision_key = music_util.album_decision_cache_key(album)
             music_decision_payload: dict[str, Any] | None = None
             reused_cached_decision = False
+            invalid_track_count = int(getattr(album, "invalid_track_count", 0) or 0)
 
             if verify_remaining:
                 cached_entry = _normalise_music_decision_entry(music_cache.get_music(music_decision_key))
@@ -3926,6 +3937,24 @@ def music(
                         music_decision_payload = _build_music_decision_payload(
                             selection_mode=cached_selection_mode,
                             decision="filename_fallback",
+                            reason=cached_entry.get("reason"),
+                        )
+                        reused_cached_decision = True
+                    elif decision == "filename_titles_fallback":
+                        verification_stats["filename_titles_fallback"] += 1
+                        planned_tracks = _music_tracks_from_filenames(
+                            album.tracks,
+                            disc_number=album.disc_number,
+                            multi_disc=folder_multidisc,
+                        )
+                        album_artist = cached_artist
+                        album_title = cached_album
+                        music_decision_payload = _build_music_decision_payload(
+                            selection_mode=cached_selection_mode,
+                            decision="filename_titles_fallback",
+                            chosen_mbid=cached_mbid if isinstance(cached_mbid, str) else None,
+                            chosen_artist=album_artist,
+                            chosen_album=album_title,
                             reason=cached_entry.get("reason"),
                         )
                         reused_cached_decision = True
@@ -4164,6 +4193,25 @@ def music(
                                                 reason="track_count_mismatch",
                                             )
                                             break
+                                        if choice == "t":
+                                            planned_tracks = _music_tracks_from_filenames(
+                                                album.tracks,
+                                                disc_number=album.disc_number,
+                                                multi_disc=folder_multidisc,
+                                            )
+                                            console.print("Using filename titles while keeping MusicBrainz album metadata.")
+                                            album_artist = selected_album_artist
+                                            album_title = selected_album_title
+                                            verification_stats["filename_titles_fallback"] += 1
+                                            music_decision_payload = _build_music_decision_payload(
+                                                selection_mode=selection_mode,
+                                                decision="filename_titles_fallback",
+                                                chosen_mbid=selection.mbid,
+                                                chosen_artist=album_artist,
+                                                chosen_album=album_title,
+                                                reason="track_count_mismatch_filename_titles",
+                                            )
+                                            break
                                         console.print("Using filename metadata.")
                                         album_artist = orig_album_artist
                                         album_title = orig_album_title
@@ -4228,6 +4276,7 @@ def music(
                                     break
 
             if verify and music_decision_payload is not None:
+                music_decision_payload["invalid_track_count"] = invalid_track_count
                 pending_music_decisions[music_decision_key] = music_decision_payload
 
             dest_artist = "Various Artists" if _should_use_various_artists(album, album_artist) else album_artist
@@ -4394,6 +4443,7 @@ def music(
             f"skip-album={verification_stats['skipped_album']}, "
             f"skip-remaining={verification_stats['skipped_remaining']}, "
             f"filename-fallback={verification_stats['filename_fallback']}, "
+            f"filename-titles-fallback={verification_stats['filename_titles_fallback']}, "
             f"order-fallback={verification_stats['order_fallback']}"
         )
     if errors:
@@ -4957,11 +5007,11 @@ def _wizard_music(
     keep_cue = _confirm("Keep .cue sidecars? [y/N]", False, None, show_default=False)
     keep_log = _confirm("Keep .log sidecars? [y/N]", False, None, show_default=False)
     mismatch_policy = _prompt_choice_loop(
-        "Track mismatch handling (ask/filename/order)",
+        "Track mismatch handling (ask/filename/filename-titles/order)",
         WIZARD_MUSIC_MISMATCH_CHOICES,
         None,
         allow_empty=True,
-        error="Enter one of: ask, filename, order.",
+        error="Enter one of: ask, filename, filename-titles, order.",
         default="ask",
     )
     plan_output = _prompt_choice_loop(

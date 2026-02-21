@@ -6,6 +6,7 @@ import requests
 
 from plexify import cli
 from plexify.cache import Cache
+from plexify.report import read_report
 from plexify.tv_episode_cache import EpisodeCache
 from plexify.util import movie_cache_key, tv_show_folder_cache_key
 from plexify.infer import InferredItem
@@ -3613,3 +3614,35 @@ def test_music_ignores_corrupt_cached_decision(monkeypatch, tmp_path: Path) -> N
         assert exc.exit_code == 0
 
     assert calls["search"] == 1
+
+
+def test_apply_streamed_report_keeps_completed_operations_on_interrupt(monkeypatch, tmp_path: Path) -> None:
+    report_path = tmp_path / "report.json"
+    source = tmp_path / "source.mkv"
+    destination = tmp_path / "dest.mkv"
+    source.write_text("data", encoding="utf-8")
+    plan = cli.MovePlan(source=source, destination=destination, mode="apply", media_type="movie", metadata={})
+
+    def _fake_apply(
+        plans: list[cli.MovePlan],
+        copy_mode: bool,
+        on_conflict: str,
+        on_applied=None,
+    ) -> cli.ExecutionResult:
+        if on_applied is not None:
+            on_applied(plans[0])
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(cli, "_apply_with_progress", _fake_apply)
+
+    interrupted = False
+    try:
+        cli._apply_with_streamed_report([plan], copy_mode=False, on_conflict="rename", report_path=report_path)
+    except KeyboardInterrupt:
+        interrupted = True
+
+    assert interrupted is True
+    payload = read_report(report_path)
+    assert payload["mode"] == "apply"
+    assert len(payload["operations"]) == 1
+    assert payload["operations"][0]["source"] == str(source)

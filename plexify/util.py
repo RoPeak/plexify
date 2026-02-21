@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from .logging_config import get_logger
+
 WINDOWS_INVALID = r'<>"/\\|?*'
 NOISE_TOKENS = {
     "1080p",
@@ -88,6 +90,7 @@ TV_SEASON_TOKEN_WITH_NUMBER_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:season|series|seaon|seson|seasn)[-_. ]*\d{1,2}(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
+logger = get_logger(__name__)
 
 
 def sanitise_name(value: str) -> str:
@@ -219,7 +222,23 @@ def ensure_dir(path: Path) -> None:
 def json_load(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        corrupt_path = path.with_suffix(path.suffix + f".corrupt-{now_timestamp()}")
+        try:
+            os.replace(path, corrupt_path)
+        except OSError:
+            logger.warning(
+                "json_load_corrupt_unreadable",
+                extra={"path": str(path), "error": str(exc)},
+            )
+        else:
+            logger.warning(
+                "json_load_corrupt_renamed",
+                extra={"path": str(path), "renamed_to": str(corrupt_path), "error": str(exc)},
+            )
+        return {}
 
 
 def json_dump(path: Path, data: dict[str, Any]) -> None:

@@ -20,6 +20,9 @@ from rich.tree import Tree
 
 from .cache import Cache, NullCache
 from . import music as music_util
+from .commands import confirmations as confirm_cmd
+from .commands import music_flow
+from .commands import plan_flow
 from .command_builder import build_organise_command
 from .executor import execute_plans
 from .infer import InferredItem, infer_item
@@ -28,7 +31,7 @@ from .planner import plan_movie, plan_tv_show
 from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_overlapping
 from .prompting import _prompt_text
 from . import prompting_ui
-from .report import ReportFormatError, write_report
+from .report import ReportFormatError, open_report_stream, write_report
 from .services import movie_matcher, music_matcher, tv_matcher
 from .sources import musicbrainz, tvmaze, wikidata
 from .tv_episode_cache import EpisodeCache
@@ -340,23 +343,14 @@ def _resolve_media_type_override(
     incoming_root: Path | None,
     media_type_overrides: dict[str, str] | None,
 ) -> tuple[InferredItem, str | None]:
-    override_key = _media_override_key(item.path, incoming_root)
-    if override_key is None:
-        return item, None
-    override_media_type = None
-    if media_type_overrides is not None:
-        override_media_type = media_type_overrides.get(override_key)
-    if override_media_type is None:
-        cached = cache.get_show(override_key)
-        if cached and cached.get("confirmed_by_user"):
-            cached_media_type = str(cached.get("media_type") or "").lower()
-            if cached_media_type in {"movie", "tv"}:
-                override_media_type = cached_media_type
-                if media_type_overrides is not None:
-                    media_type_overrides[override_key] = cached_media_type
-    if override_media_type in {"movie", "tv"} and override_media_type != item.media_type:
-        return _switch_item_media_type(item, override_media_type), override_key
-    return item, override_key
+    return plan_flow.resolve_media_type_override(
+        item=item,
+        incoming_root=incoming_root,
+        cache=cache,
+        media_type_overrides=media_type_overrides,
+        media_override_key=_media_override_key,
+        switch_item_media_type=_switch_item_media_type,
+    )
 
 
 def _persist_media_type_override(
@@ -365,20 +359,12 @@ def _persist_media_type_override(
     media_type: str,
     media_type_overrides: dict[str, str] | None,
 ) -> None:
-    if override_key is None:
-        return
-    if media_type_overrides is not None:
-        media_type_overrides[override_key] = media_type
-    cache.set_show(
-        override_key,
-        {
-            "media_type": media_type,
-            "confirmed_by_user": True,
-            "created_at": now_timestamp(),
-            "source": "MediaTypeOverride",
-        },
+    plan_flow.persist_media_type_override(
+        cache=cache,
+        override_key=override_key,
+        media_type=media_type,
+        media_type_overrides=media_type_overrides,
     )
-    cache.save()
 
 
 def _initialise_logging(log_level: str, log_format: str, log_file: Path | None) -> None:
@@ -411,13 +397,7 @@ def _prompt_line(
 
 
 def _build_search_query(title: str, hint: str | None) -> str:
-    base = make_search_query(title) or title.strip()
-    parts = [base]
-    if hint:
-        hint_text = hint.strip()
-        if hint_text:
-            parts.append(hint_text)
-    return " ".join(part for part in parts if part)
+    return plan_flow.build_search_query(title, hint)
 
 
 def _normalize_tv_retry_query(value: str) -> str:
@@ -670,16 +650,23 @@ def _detect_media_in_path(path: Path, audio_exts: set[str], video_exts: set[str]
 
 
 def _confirm_move(progress: Progress | None) -> bool:
-    phrase = _prompt_text("To proceed, type MOVE", "", progress, show_default=False)
-    return phrase.strip().lower() == "move"
+    return confirm_cmd.confirm_move(
+        prompt_text=lambda prompt, default, current_progress: _prompt_text(
+            prompt, default, current_progress, show_default=False
+        ),
+        progress=progress,
+    )
 
 
 def _confirm_overwrite_apply(plans: list[MovePlan], copy_mode: bool) -> bool:
-    operation = "copy" if copy_mode else "move"
-    console.print("Warning: overwrite mode will replace existing destination files.")
-    console.print(f"Apply mode: {operation} | Planned items: {len(plans)} | Conflict policy: overwrite")
-    phrase = _prompt_text("To proceed, type OVERWRITE", "", None, show_default=False)
-    return phrase.strip() == "OVERWRITE"
+    return confirm_cmd.confirm_overwrite_apply(
+        plans=plans,
+        copy_mode=copy_mode,
+        prompt_text=lambda prompt, default, current_progress: _prompt_text(
+            prompt, default, current_progress, show_default=False
+        ),
+        print_line=console.print,
+    )
 
 
 def _compact_text(value: str) -> str:
@@ -1766,45 +1753,7 @@ def _musicbrainz_skip_or_override(album: music_util.AlbumGroup) -> tuple[bool, s
 
 
 def _normalise_music_decision_entry(entry: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(entry, dict):
-        return None
-    decision = entry.get("decision")
-    if not isinstance(decision, str):
-        return None
-    decision = decision.strip().lower()
-    if decision not in {"selected", "filename_fallback", "filename_titles_fallback", "order_fallback", "skip_album"}:
-        return None
-    selection_mode = entry.get("selection_mode")
-    if isinstance(selection_mode, str):
-        selection_mode = selection_mode.strip().lower()
-    else:
-        selection_mode = "manual"
-    if selection_mode not in {"auto", "manual"}:
-        selection_mode = "manual"
-    chosen_mbid = entry.get("chosen_mbid")
-    if not isinstance(chosen_mbid, str) or not chosen_mbid.strip():
-        chosen_mbid = None
-    chosen_artist = entry.get("chosen_artist")
-    if not isinstance(chosen_artist, str) or not chosen_artist.strip():
-        chosen_artist = None
-    chosen_album = entry.get("chosen_album")
-    if not isinstance(chosen_album, str) or not chosen_album.strip():
-        chosen_album = None
-    reason = entry.get("reason")
-    if not isinstance(reason, str) or not reason.strip():
-        reason = None
-    invalid_track_count = entry.get("invalid_track_count")
-    if not isinstance(invalid_track_count, int) or invalid_track_count < 0:
-        invalid_track_count = 0
-    return {
-        "selection_mode": selection_mode,
-        "decision": decision,
-        "chosen_mbid": chosen_mbid,
-        "chosen_artist": chosen_artist,
-        "chosen_album": chosen_album,
-        "reason": reason,
-        "invalid_track_count": invalid_track_count,
-    }
+    return music_flow.normalise_music_decision_entry(entry)
 
 
 def _build_music_decision_payload(
@@ -1816,24 +1765,16 @@ def _build_music_decision_payload(
     chosen_album: str | None = None,
     reason: str | None = None,
 ) -> dict[str, Any]:
-    mode = selection_mode.strip().lower() if isinstance(selection_mode, str) else "manual"
-    if mode not in {"auto", "manual"}:
-        mode = "manual"
-    payload: dict[str, Any] = {
-        "version": MUSIC_DECISION_CACHE_VERSION,
-        "selection_mode": mode,
-        "decision": decision,
-        "created_at": now_timestamp(),
-    }
-    if chosen_mbid:
-        payload["chosen_mbid"] = chosen_mbid
-    if chosen_artist:
-        payload["chosen_artist"] = chosen_artist
-    if chosen_album:
-        payload["chosen_album"] = chosen_album
-    if reason:
-        payload["reason"] = reason
-    return payload
+    return music_flow.build_music_decision_payload(
+        selection_mode=selection_mode,
+        decision=decision,
+        cache_version=MUSIC_DECISION_CACHE_VERSION,
+        now_timestamp=now_timestamp,
+        chosen_mbid=chosen_mbid,
+        chosen_artist=chosen_artist,
+        chosen_album=chosen_album,
+        reason=reason,
+    )
 
 
 def _search_musicbrainz_candidates_with_retry(
@@ -1952,9 +1893,14 @@ def _build_tree(paths: list[Path]) -> Tree:
     return tree
 
 
-def _apply_with_progress(plans: list[MovePlan], copy_mode: bool, on_conflict: str) -> ExecutionResult:
+def _apply_with_progress(
+    plans: list[MovePlan],
+    copy_mode: bool,
+    on_conflict: str,
+    on_applied: Callable[[MovePlan], None] | None = None,
+) -> ExecutionResult:
     if not plans:
-        return execute_plans(plans, apply=True, copy_mode=copy_mode, on_conflict=on_conflict)
+        return execute_plans(plans, apply=True, copy_mode=copy_mode, on_conflict=on_conflict, on_applied=on_applied)
     action = "Copying" if copy_mode else "Moving"
     with Progress(
         BarColumn(),
@@ -1969,7 +1915,34 @@ def _apply_with_progress(plans: list[MovePlan], copy_mode: bool, on_conflict: st
             progress.update(task, description=description)
             progress.advance(task, 1)
 
-        return execute_plans(plans, apply=True, copy_mode=copy_mode, on_conflict=on_conflict, on_progress=_on_progress)
+        return execute_plans(
+            plans,
+            apply=True,
+            copy_mode=copy_mode,
+            on_conflict=on_conflict,
+            on_progress=_on_progress,
+            on_applied=on_applied,
+        )
+
+
+def _apply_with_streamed_report(
+    plans: list[MovePlan],
+    copy_mode: bool,
+    on_conflict: str,
+    report_path: Path,
+) -> ExecutionResult:
+    stream = open_report_stream(report_path, mode="apply", copy_mode=copy_mode)
+    try:
+        result = _apply_with_progress(
+            plans,
+            copy_mode=copy_mode,
+            on_conflict=on_conflict,
+            on_applied=stream.append,
+        )
+        stream.finalize()
+        return result
+    finally:
+        stream.close()
 
 
 def _dir_empty_after_removals(path: Path, removed_files: set[Path], removed_dirs: set[Path]) -> bool:
@@ -2290,153 +2263,154 @@ def _plan_items(
     media_type_overrides: dict[str, str] = {}
     tv_search_cache: dict[str, list[tvmaze.TVMazeShow]] = {}
 
-    with Progress(
-        TextColumn("{task.completed}/{task.total} - {task.description}"),
-        disable=interactive or not sys.stdout.isatty(),
-    ) as progress:
-        task = progress.add_task("Planning files...", total=len(files))
-        with tvmaze.create_session() as session_tv, wikidata.create_session() as session_wd:
-            total = len(files)
-            index = 0
-            while index < len(files):
-                path = files[index]
-                progress.update(task, completed=min(index + 1, total), description=f"Planning: {rich_escape(path.name)}")
-                try:
-                    item = infer_item(path)
-                    item, override_key = _resolve_media_type_override(item, cache_store, incoming, media_type_overrides)
-                    log_event(
-                        logger,
-                        "file_inferred",
-                        level=10,
-                        path=path,
-                        media_type=item.media_type,
-                        title=item.title,
-                        year=item.year,
-                        season=item.season,
-                        episode=item.episode,
-                    )
-                    if media_type_filter and item.media_type != media_type_filter:
-                        index += 1
-                        continue
-                    if not QUIET_OUTPUT:
-                        _safe_print("", progress)
-                        _console_for(progress).rule()
-                        _safe_print(_file_panel(index + 1, total, item, incoming), progress)
-                    cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
-                    cache_snapshots: list[CacheSnapshot] = []
-                    if override_key:
-                        cache_snapshots.append(CacheSnapshot("show", override_key, cache_store.get_show(override_key)))
-                    if item.media_type == "tv":
-                        reusable_safe = _reusable_tv_cache_safe(item)
-                        reusable_show_key = tv_show_cache_key(item.title, item.year) if reusable_safe else None
-                        folder_show_key = tv_show_folder_cache_key(item.path, incoming)
-                        keys = [cache_key]
-                        if reusable_show_key:
-                            keys.append(reusable_show_key)
-                        if folder_show_key:
-                            keys.append(folder_show_key)
-                        if reusable_safe and item.season is not None and item.episode is not None:
-                            keys.append(tv_episode_cache_key(item.title, item.year, item.season, item.episode))
-                        for key in keys:
-                            cache_snapshots.append(CacheSnapshot("show", key, cache_store.get_show(key)))
-                    else:
-                        reusable_movie_key = movie_cache_key(item.title, item.year)
-                        for key in [cache_key, reusable_movie_key]:
-                            cache_snapshots.append(CacheSnapshot("movie", key, cache_store.get_movie(key)))
-                    stats_snapshot = _snapshot_stats(stats)
-                    errors_len = len(errors)
-                    plan, collision = _process_item(
-                        item=item,
-                        library=library,
-                        cache=cache_store,
-                        mode=mode,
-                        copy_mode=copy_mode,
-                        interactive=interactive,
-                        auto_accept=auto_accept,
-                        min_confidence=min_confidence,
-                        session_tv=session_tv,
-                        session_wd=session_wd,
-                        episode_cache=episode_cache,
-                        progress=progress,
-                        show_cache=show_cache,
-                        stats=stats,
-                        incoming_root=incoming,
-                        planned=planned,
-                        on_conflict=on_conflict,
-                        allow_back=bool(history),
-                        offline=offline,
-                        media_type_overrides=media_type_overrides,
-                        tv_search_cache=tv_search_cache,
-                    )
-                    history.append(
-                        HistoryEntry(
-                            index=index,
-                            plan=plan,
-                            collision=collision,
-                            cache_snapshots=cache_snapshots,
-                            stats_snapshot=stats_snapshot,
-                            errors_len=errors_len,
+    with cache_store.batch():
+        with Progress(
+            TextColumn("{task.completed}/{task.total} - {task.description}"),
+            disable=interactive or not sys.stdout.isatty(),
+        ) as progress:
+            task = progress.add_task("Planning files...", total=len(files))
+            with tvmaze.create_session() as session_tv, wikidata.create_session() as session_wd:
+                total = len(files)
+                index = 0
+                while index < len(files):
+                    path = files[index]
+                    progress.update(task, completed=min(index + 1, total), description=f"Planning: {rich_escape(path.name)}")
+                    try:
+                        item = infer_item(path)
+                        item, override_key = _resolve_media_type_override(item, cache_store, incoming, media_type_overrides)
+                        log_event(
+                            logger,
+                            "file_inferred",
+                            level=10,
+                            path=path,
+                            media_type=item.media_type,
+                            title=item.title,
+                            year=item.year,
+                            season=item.season,
+                            episode=item.episode,
                         )
-                    )
-                    if plan:
-                        plans.append(plan)
-                        if collision:
-                            collisions += 1
-                    index += 1
-                except BackRequested:
-                    if not history:
-                        _safe_print("No previous decision to return to.", progress)
-                        continue
-                    entry = history.pop()
-                    if entry.plan:
-                        if plans and plans[-1] == entry.plan:
-                            plans.pop()
+                        if media_type_filter and item.media_type != media_type_filter:
+                            index += 1
+                            continue
+                        if not QUIET_OUTPUT:
+                            _safe_print("", progress)
+                            _console_for(progress).rule()
+                            _safe_print(_file_panel(index + 1, total, item, incoming), progress)
+                        cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
+                        cache_snapshots: list[CacheSnapshot] = []
+                        if override_key:
+                            cache_snapshots.append(CacheSnapshot("show", override_key, cache_store.get_show(override_key)))
+                        if item.media_type == "tv":
+                            reusable_safe = _reusable_tv_cache_safe(item)
+                            reusable_show_key = tv_show_cache_key(item.title, item.year) if reusable_safe else None
+                            folder_show_key = tv_show_folder_cache_key(item.path, incoming)
+                            keys = [cache_key]
+                            if reusable_show_key:
+                                keys.append(reusable_show_key)
+                            if folder_show_key:
+                                keys.append(folder_show_key)
+                            if reusable_safe and item.season is not None and item.episode is not None:
+                                keys.append(tv_episode_cache_key(item.title, item.year, item.season, item.episode))
+                            for key in keys:
+                                cache_snapshots.append(CacheSnapshot("show", key, cache_store.get_show(key)))
                         else:
-                            try:
-                                plans.remove(entry.plan)
-                            except ValueError:
-                                pass
-                        key = str(entry.plan.destination).lower()
-                        if key in planned:
-                            if planned[key] <= 1:
-                                planned.pop(key, None)
+                            reusable_movie_key = movie_cache_key(item.title, item.year)
+                            for key in [cache_key, reusable_movie_key]:
+                                cache_snapshots.append(CacheSnapshot("movie", key, cache_store.get_movie(key)))
+                        stats_snapshot = _snapshot_stats(stats)
+                        errors_len = len(errors)
+                        plan, collision = _process_item(
+                            item=item,
+                            library=library,
+                            cache=cache_store,
+                            mode=mode,
+                            copy_mode=copy_mode,
+                            interactive=interactive,
+                            auto_accept=auto_accept,
+                            min_confidence=min_confidence,
+                            session_tv=session_tv,
+                            session_wd=session_wd,
+                            episode_cache=episode_cache,
+                            progress=progress,
+                            show_cache=show_cache,
+                            stats=stats,
+                            incoming_root=incoming,
+                            planned=planned,
+                            on_conflict=on_conflict,
+                            allow_back=bool(history),
+                            offline=offline,
+                            media_type_overrides=media_type_overrides,
+                            tv_search_cache=tv_search_cache,
+                        )
+                        history.append(
+                            HistoryEntry(
+                                index=index,
+                                plan=plan,
+                                collision=collision,
+                                cache_snapshots=cache_snapshots,
+                                stats_snapshot=stats_snapshot,
+                                errors_len=errors_len,
+                            )
+                        )
+                        if plan:
+                            plans.append(plan)
+                            if collision:
+                                collisions += 1
+                        index += 1
+                    except BackRequested:
+                        if not history:
+                            _safe_print("No previous decision to return to.", progress)
+                            continue
+                        entry = history.pop()
+                        if entry.plan:
+                            if plans and plans[-1] == entry.plan:
+                                plans.pop()
                             else:
-                                planned[key] -= 1
-                    if entry.collision and collisions > 0:
-                        collisions -= 1
-                    for snapshot in entry.cache_snapshots:
-                        if snapshot.section == "show":
-                            if snapshot.previous is None:
-                                cache_store.delete_show(snapshot.key)
+                                try:
+                                    plans.remove(entry.plan)
+                                except ValueError:
+                                    pass
+                            key = str(entry.plan.destination).lower()
+                            if key in planned:
+                                if planned[key] <= 1:
+                                    planned.pop(key, None)
+                                else:
+                                    planned[key] -= 1
+                        if entry.collision and collisions > 0:
+                            collisions -= 1
+                        for snapshot in entry.cache_snapshots:
+                            if snapshot.section == "show":
+                                if snapshot.previous is None:
+                                    cache_store.delete_show(snapshot.key)
+                                else:
+                                    cache_store.set_show(snapshot.key, snapshot.previous)
                             else:
-                                cache_store.set_show(snapshot.key, snapshot.previous)
-                        else:
-                            if snapshot.previous is None:
-                                cache_store.delete_movie(snapshot.key)
-                            else:
-                                cache_store.set_movie(snapshot.key, snapshot.previous)
-                    cache_store.save()
-                    stats.auto_matched = entry.stats_snapshot.auto_matched
-                    stats.user_confirmed = entry.stats_snapshot.user_confirmed
-                    stats.manual = entry.stats_snapshot.manual
-                    stats.skipped = entry.stats_snapshot.skipped
-                    stats.errors = entry.stats_snapshot.errors
-                    stats.cache_hits = entry.stats_snapshot.cache_hits
-                    stats.elapsed = entry.stats_snapshot.elapsed
-                    del errors[entry.errors_len:]
-                    index = entry.index
-                    back_path = files[index]
-                    progress.update(
-                        task,
-                        completed=min(index + 1, total),
-                        description=f"Planning: {rich_escape(back_path.name)}",
-                    )
-                    _safe_print("Rewound to previous file.", progress)
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("planning_failed", extra={"path": path})
-                    stats.errors += 1
-                    errors.append(f"{path}: {exc}")
-                    index += 1
+                                if snapshot.previous is None:
+                                    cache_store.delete_movie(snapshot.key)
+                                else:
+                                    cache_store.set_movie(snapshot.key, snapshot.previous)
+                        cache_store.save()
+                        stats.auto_matched = entry.stats_snapshot.auto_matched
+                        stats.user_confirmed = entry.stats_snapshot.user_confirmed
+                        stats.manual = entry.stats_snapshot.manual
+                        stats.skipped = entry.stats_snapshot.skipped
+                        stats.errors = entry.stats_snapshot.errors
+                        stats.cache_hits = entry.stats_snapshot.cache_hits
+                        stats.elapsed = entry.stats_snapshot.elapsed
+                        del errors[entry.errors_len:]
+                        index = entry.index
+                        back_path = files[index]
+                        progress.update(
+                            task,
+                            completed=min(index + 1, total),
+                            description=f"Planning: {rich_escape(back_path.name)}",
+                        )
+                        _safe_print("Rewound to previous file.", progress)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("planning_failed", extra={"path": path})
+                        stats.errors += 1
+                        errors.append(f"{path}: {exc}")
+                        index += 1
 
     stats.elapsed = time.monotonic() - started
     if collisions:
@@ -3591,7 +3565,7 @@ def organise(
             console.print("Cancelled. No changes were made.")
             raise typer.Exit(code=0)
     if apply_mode and plans:
-        result = _apply_with_progress(plans, copy_mode=copy_mode, on_conflict=on_conflict)
+        result = _apply_with_streamed_report(plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=report_path)
     else:
         result = execute_plans(plans, apply=apply_mode, copy_mode=copy_mode, on_conflict=on_conflict)
 
@@ -3601,7 +3575,10 @@ def organise(
         else:
             _prune_empty_dirs(plans, incoming, dry_run=True, ignored_files=ignored_prune_files)
 
-    write_report(report_path, result.moved if apply_mode else plans, mode, copy_mode)
+    if not apply_mode:
+        write_report(report_path, plans, mode, copy_mode)
+    elif not plans:
+        write_report(report_path, [], mode, copy_mode)
     _print_run_summary(
         stats=stats,
         plans=plans,
@@ -3621,15 +3598,17 @@ def organise(
                 if not _confirm_move(None):
                     console.print("Cancelled. No changes were made.")
                 else:
-                    result = _apply_with_progress(plans, copy_mode=copy_mode, on_conflict=on_conflict)
+                    apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
+                    result = _apply_with_streamed_report(
+                        plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path
+                    )
                     if prune_empty_dirs:
                         _prune_empty_dirs(result.moved, incoming, dry_run=False, ignored_files=ignored_prune_files)
-                    apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
-                    write_report(apply_report_path, result.moved, "apply", copy_mode)
             else:
-                result = _apply_with_progress(plans, copy_mode=copy_mode, on_conflict=on_conflict)
                 apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
-                write_report(apply_report_path, result.moved, "apply", copy_mode)
+                result = _apply_with_streamed_report(
+                    plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path
+                )
 
     if not apply_mode:
         apply_config = BuildCommandConfig(
@@ -4371,9 +4350,9 @@ def music(
             mb_session.close()
 
     if pending_music_decisions:
-        for decision_key, payload in pending_music_decisions.items():
-            music_cache.set_music(decision_key, payload)
-        music_cache.save()
+        with music_cache.batch():
+            for decision_key, payload in pending_music_decisions.items():
+                music_cache.set_music(decision_key, payload)
 
     unknown_leftovers: list[Path] = []
     unknown_leftovers_kept = 0
@@ -4401,7 +4380,7 @@ def music(
 
     report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
     if apply and plans:
-        result = _apply_with_progress(plans, copy_mode=copy_mode, on_conflict="rename")
+        result = _apply_with_streamed_report(plans, copy_mode=copy_mode, on_conflict="rename", report_path=report_path)
     else:
         result = execute_plans(plans, apply=apply, copy_mode=copy_mode, on_conflict="rename")
 
@@ -4430,7 +4409,10 @@ def music(
         _prune_empty_dirs(result.moved, source, dry_run=False)
         _prune_empty_dirs_full_sweep(source, dry_run=False)
 
-    write_report(report_path, result.moved if apply else plans, "apply" if apply else "dry-run", copy_mode)
+    if not apply:
+        write_report(report_path, plans, "dry-run", copy_mode)
+    elif not plans:
+        write_report(report_path, [], "apply", copy_mode)
 
     console.print("Summary:")
     console.print(f"Albums: {len(albums)}")

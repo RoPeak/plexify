@@ -49,3 +49,16 @@ def test_cache_save_persists_schema_version(tmp_path: Path) -> None:
 
     reloaded = Cache(cache_path)
     assert reloaded.data.get("schema_version") == CACHE_SCHEMA_VERSION
+
+
+def test_cache_init_recovers_from_corrupt_json(tmp_path: Path) -> None:
+    cache_path = tmp_path / "cache.json"
+    cache_path.write_text("{not-valid-json", encoding="utf-8")
+
+    cache = Cache(cache_path)
+
+    assert cache.data.get("schema_version") == CACHE_SCHEMA_VERSION
+    assert cache.data["shows"] == {}
+    assert cache.data["movies"] == {}
+    corrupt_files = list(tmp_path.glob("cache.json.corrupt-*"))
+    assert corrupt_files

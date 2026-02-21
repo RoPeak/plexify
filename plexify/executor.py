@@ -16,6 +16,7 @@ def execute_plans(
     copy_mode: bool,
     on_conflict: str = "rename",
     on_progress: Callable[[int, int, MovePlan], None] | None = None,
+    on_applied: Callable[[MovePlan], None] | None = None,
 ) -> ExecutionResult:
     plan_list = list(plans)
     moved: list[MovePlan] = []
@@ -55,7 +56,10 @@ def execute_plans(
                 shutil.copy2(plan.source, destination)
             else:
                 shutil.move(plan.source, destination)
-            moved.append(MovePlan(plan.source, destination, plan.mode, plan.media_type, plan.metadata))
+            applied = MovePlan(plan.source, destination, plan.mode, plan.media_type, plan.metadata)
+            moved.append(applied)
+            if on_applied is not None:
+                on_applied(applied)
         except Exception as exc:  # noqa: BLE001
             logger.exception("plan_execution_failed", extra={"source": plan.source, "destination": plan.destination})
             errors.append(f"{plan.source}: {exc}")

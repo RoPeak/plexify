@@ -35,6 +35,7 @@ def build_organise_command(
     prune_empty_dirs: bool,
     quiet: bool,
     prune_ignore: str | None,
+    allow_risky_enter_accept: bool = False,
 ) -> str:
     parts = [
         "python -m plexify.cli organise",
@@ -73,6 +74,8 @@ def build_organise_command(
         parts.append(f"--prune-ignore {quote_cli_arg(prune_ignore)}")
     if quiet:
         parts.append("--quiet")
+    if allow_risky_enter_accept:
+        parts.append("--allow-risky-enter-accept")
     if not interactive:
         parts.append("--no-interactive")
     return " ".join(parts)

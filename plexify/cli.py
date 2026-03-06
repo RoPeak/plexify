@@ -74,6 +74,7 @@ console = Console(safe_box=ASCII_UI_ENABLED)
 logger = get_logger(__name__)
 COMPLETION_ENABLED = True
 QUIET_OUTPUT = False
+_cache_save_warning_shown = False
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
 DEFAULT_EXTENSIONS_LIST = [ext.strip() for ext in DEFAULT_EXTENSIONS.split(",") if ext.strip()]
 DEFAULT_MUSIC_EXTENSIONS = "flac,mp3,m4a"
@@ -179,6 +180,7 @@ class CandidatePage:
     search_time: float | None = None
     fetch_time: float | None = None
     total_time: float | None = None
+    cache_reusable: bool = False
 
 
 @dataclass
@@ -231,6 +233,7 @@ class BuildCommandConfig:
     prune_empty_dirs: bool
     quiet: bool
     prune_ignore: str | None
+    allow_risky_enter_accept: bool = False
 
 
 @dataclass(frozen=True)
@@ -269,6 +272,20 @@ def _safe_print(message: str, progress: Progress | None = None) -> None:
     if QUIET_OUTPUT:
         return
     _console_for(progress).print(message)
+
+
+def _save_cache(cache: Cache, progress: Progress | None = None) -> None:
+    if cache.save_with_status():
+        return
+    _warn_cache_busy(progress)
+
+
+def _warn_cache_busy(progress: Progress | None = None) -> None:
+    global _cache_save_warning_shown
+    if _cache_save_warning_shown:
+        return
+    _cache_save_warning_shown = True
+    _console_for(progress).print("Warning: cache is busy; this run may proceed without saving some cache updates.")
 
 
 def _parse_prune_ignore(value: str | None) -> set[str]:
@@ -358,13 +375,16 @@ def _persist_media_type_override(
     override_key: str | None,
     media_type: str,
     media_type_overrides: dict[str, str] | None,
+    progress: Progress | None = None,
 ) -> None:
-    plan_flow.persist_media_type_override(
+    saved = plan_flow.persist_media_type_override(
         cache=cache,
         override_key=override_key,
         media_type=media_type,
         media_type_overrides=media_type_overrides,
     )
+    if not saved:
+        _warn_cache_busy(progress)
 
 
 def _initialise_logging(log_level: str, log_format: str, log_file: Path | None) -> None:
@@ -381,6 +401,7 @@ def _initialise_logging(log_level: str, log_format: str, log_file: Path | None) 
 def _prompt_line(
     *,
     has_candidates: bool,
+    allow_enter_accept: bool,
     allow_search: bool,
     allow_manual: bool,
     has_more: bool,
@@ -388,6 +409,7 @@ def _prompt_line(
 ) -> str:
     return prompting_ui.prompt_line(
         has_candidates=has_candidates,
+        allow_enter_accept=allow_enter_accept,
         allow_search=allow_search,
         allow_manual=allow_manual,
         has_more=has_more,
@@ -756,7 +778,7 @@ def _maybe_enrich_candidates(
             else:
                 cand.enrichment = {}
     if updated:
-        cache.save()
+        _save_cache(cache)
 
 
 def _print_candidates(
@@ -784,6 +806,7 @@ def _select_candidate(
     allow_manual: bool,
     allow_back: bool,
     item: InferredItem | None = None,
+    allow_enter_accept: bool = True,
 ) -> Candidate | None | str:
     return prompting_ui.select_candidate(
         media_type=media_type,
@@ -797,13 +820,15 @@ def _select_candidate(
         prompt_choice=lambda prompt, default: _prompt_choice(prompt, default, progress, show_default=False),
         safe_print=lambda message: _safe_print(message, progress),
         print_candidates_fn=lambda mt, cands, current_item: _print_candidates(mt, cands, progress, item=current_item),
-        prompt_line_fn=lambda has_cands, can_search, can_manual, more, can_back: _prompt_line(
+        prompt_line_fn=lambda has_cands, can_enter, can_search, can_manual, more, can_back: _prompt_line(
             has_candidates=has_cands,
+            allow_enter_accept=can_enter,
             allow_search=can_search,
             allow_manual=can_manual,
             has_more=more,
             allow_back=can_back,
         ),
+        allow_enter_accept=allow_enter_accept,
     )
 
 
@@ -919,7 +944,14 @@ def _tv_candidates(
             candidate.metadata["episode"] = cached.get("episode")
             candidate.metadata["episode_title"] = cached.get("episode_title")
         results.append(candidate)
-        return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
+        return CandidatePage(
+            candidates=results,
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            cache_hit=True,
+            cache_reusable=cached_key in {reusable_show_key, reusable_episode_key},
+        )
 
     if offline:
         log_event(
@@ -1188,7 +1220,14 @@ def _movie_candidates(
             )
         film = wikidata.WikidataFilm(qid=cached["qid"], title=cached["title"], year=cached.get("year"), is_film=True)
         results.append(_movie_candidate_from_film(item, film))
-        return CandidatePage(candidates=results, raw_results=None, next_offset=0, has_more=False, cache_hit=True)
+        return CandidatePage(
+            candidates=results,
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            cache_hit=True,
+            cache_reusable=cached_key == reusable_key,
+        )
 
     if offline:
         log_event(
@@ -1201,20 +1240,51 @@ def _movie_candidates(
         return CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
 
     if raw_results is None:
-        query = search_query or make_search_query(item.title) or item.title
+        fallback_queries = plan_flow.build_movie_fallback_queries(item.title, None)
+        queries: list[str] = []
+        if search_query and search_query.strip():
+            queries.append(search_query.strip())
+        queries.extend(fallback_queries)
+        if not queries:
+            base_query = make_search_query(item.title) or item.title
+            if base_query:
+                queries.append(base_query)
+        if not queries:
+            queries.append("unknown")
+        deduped_queries: list[str] = []
+        seen_queries: set[str] = set()
+        for query in queries:
+            marker = query.casefold()
+            if marker in seen_queries:
+                continue
+            seen_queries.add(marker)
+            deduped_queries.append(query)
+        queries = deduped_queries
+        query = queries[0]
         log_event(
             logger,
             "candidate_search_started",
             source="Wikidata",
             query=query,
+            query_attempts=len(queries),
             media_type=item.media_type,
             path=item.path,
         )
         _safe_print(f"Searching Wikidata for: {rich_escape(query)}", progress)
         total_started = time.monotonic()
-        started = total_started
-        raw_results = wikidata.search(query, session=session, limit=10, raise_on_error=interactive)
-        elapsed = time.monotonic() - started
+        attempts = 0
+        raw_results = []
+        for current_query in queries:
+            attempts += 1
+            if attempts > 1:
+                _safe_print(f"Retrying Wikidata with simplified query: {rich_escape(current_query)}", progress)
+            started = time.monotonic()
+            attempt_results = wikidata.search(current_query, session=session, limit=10, raise_on_error=interactive)
+            elapsed += time.monotonic() - started
+            query = current_query
+            if attempt_results:
+                raw_results = attempt_results
+                break
         if not raw_results:
             total_time = time.monotonic() - total_started
             _safe_print(f"No candidates (api={total_time:.2f}s).", progress)
@@ -1232,6 +1302,7 @@ def _movie_candidates(
             "candidate_search_finished",
             source="Wikidata",
             query=query,
+            query_attempts=attempts,
             media_type=item.media_type,
             path=item.path,
             result_count=len(raw_results),
@@ -1409,6 +1480,16 @@ def _auto_acceptable(
         target_year=target_year,
         min_gap=AUTO_ACCEPT_GAP,
     )
+
+
+def _reusable_cache_hit_looks_risky(item: InferredItem, candidates: list[Candidate], min_confidence: float) -> bool:
+    if not candidates:
+        return False
+    if _is_ambiguous_cache_title(item.title):
+        return True
+    if item.year is None:
+        return True
+    return candidates[0].confidence < min_confidence
 
 
 def _resolve_destination(
@@ -2245,7 +2326,10 @@ def _plan_items(
     use_cache: bool,
     on_conflict: str,
     offline: bool = False,
+    allow_risky_enter_accept: bool = False,
 ) -> tuple[list[MovePlan], list[str], PlanStats]:
+    global _cache_save_warning_shown
+    _cache_save_warning_shown = False
     cache_store: Cache = Cache(cache_path) if use_cache else NullCache()
     exts = _parse_extensions(extensions)
     files = iter_video_files(incoming, exts)
@@ -2339,6 +2423,7 @@ def _plan_items(
                             on_conflict=on_conflict,
                             allow_back=bool(history),
                             offline=offline,
+                            allow_risky_enter_accept=allow_risky_enter_accept,
                             media_type_overrides=media_type_overrides,
                             tv_search_cache=tv_search_cache,
                         )
@@ -2389,7 +2474,7 @@ def _plan_items(
                                     cache_store.delete_movie(snapshot.key)
                                 else:
                                     cache_store.set_movie(snapshot.key, snapshot.previous)
-                        cache_store.save()
+                        _save_cache(cache_store, progress)
                         stats.auto_matched = entry.stats_snapshot.auto_matched
                         stats.user_confirmed = entry.stats_snapshot.user_confirmed
                         stats.manual = entry.stats_snapshot.manual
@@ -2441,6 +2526,7 @@ def _build_command(config: BuildCommandConfig) -> str:
         prune_empty_dirs=config.prune_empty_dirs,
         quiet=config.quiet,
         prune_ignore=config.prune_ignore,
+        allow_risky_enter_accept=config.allow_risky_enter_accept,
     )
 
 
@@ -2464,6 +2550,7 @@ def _process_item(
     on_conflict: str = "rename",
     allow_back: bool = False,
     offline: bool = False,
+    allow_risky_enter_accept: bool = False,
     media_type_overrides: dict[str, str] | None = None,
     tv_search_cache: dict[str, list[tvmaze.TVMazeShow]] | None = None,
 ) -> tuple[MovePlan | None, bool]:
@@ -2475,7 +2562,7 @@ def _process_item(
         if re.search(r"\b(series|episode)\b", item.path.stem, re.IGNORECASE):
             if _confirm("This looks like TV. Treat as TV? [Y/n]", True, progress, show_default=False):
                 item = _switch_item_media_type(item, "tv")
-                _persist_media_type_override(cache, override_key, "tv", media_type_overrides)
+                _persist_media_type_override(cache, override_key, "tv", media_type_overrides, progress)
     reusable_movie_key = None
     reusable_show_key = None
     reusable_episode_key = None
@@ -2536,7 +2623,7 @@ def _process_item(
                     _record_stat(stats, "skipped")
                     return None, False
                 if _confirm("No TV candidates. Switch to movie search? [y/N]", False, progress, show_default=False):
-                    _persist_media_type_override(cache, override_key, "movie", media_type_overrides)
+                    _persist_media_type_override(cache, override_key, "movie", media_type_overrides, progress)
                     return _process_item(
                         item=_switch_item_media_type(item, "movie"),
                         library=library,
@@ -2557,6 +2644,7 @@ def _process_item(
                         on_conflict=on_conflict,
                         allow_back=allow_back,
                         offline=offline,
+                        allow_risky_enter_accept=allow_risky_enter_accept,
                         media_type_overrides=media_type_overrides,
                         tv_search_cache=tv_search_cache,
                     )
@@ -2666,11 +2754,27 @@ def _process_item(
             if not interactive:
                 _record_stat(stats, "skipped")
                 return None, False
-            if candidates[0].confidence < min_confidence:
+            low_confidence = candidates[0].confidence < min_confidence
+            risky_reusable_cache_hit = page.cache_reusable and _reusable_cache_hit_looks_risky(
+                item, candidates, min_confidence
+            )
+            require_explicit_choice = (low_confidence or risky_reusable_cache_hit) and not allow_risky_enter_accept
+            if low_confidence:
                 _safe_print(
                     f"Low confidence ({candidates[0].confidence:.2f} < {min_confidence:.2f}). "
-                    "Press Enter to accept anyway, or choose s/m/k/q.",
+                    "Choose explicitly with 1-9, or choose s/m/k/q.",
                     progress,
+                )
+            if require_explicit_choice:
+                log_event(
+                    logger,
+                    "risky_candidate_prompted",
+                    media_type="tv",
+                    path=item.path,
+                    title=item.title,
+                    cache_reusable=page.cache_reusable,
+                    top_confidence=candidates[0].confidence,
+                    min_confidence=min_confidence,
                 )
             _maybe_enrich_candidates("tv", candidates, session_tv, session_wd, cache, interactive)
             choice = _select_candidate(
@@ -2682,8 +2786,18 @@ def _process_item(
                 allow_manual=True,
                 allow_back=allow_back,
                 item=item,
+                allow_enter_accept=not require_explicit_choice,
             )
             if isinstance(choice, Candidate):
+                if require_explicit_choice and choice == candidates[0]:
+                    log_event(
+                        logger,
+                        "risky_candidate_explicitly_accepted",
+                        media_type="tv",
+                        path=item.path,
+                        title=item.title,
+                        confidence=choice.confidence,
+                    )
                 selected = choice
                 outcome = "confirmed"
                 break
@@ -2917,12 +3031,32 @@ def _process_item(
             }
         cache.set_show(cache_key, entry)
         if reusable_show_key and promote_reusable:
-            _promote_reusable_with_conflict_tracking("tv", cache=cache, key=reusable_show_key, entry=show_entry)
+            if _reusable_tv_cache_safe(item):
+                _promote_reusable_with_conflict_tracking("tv", cache=cache, key=reusable_show_key, entry=show_entry)
+            else:
+                log_event(
+                    logger,
+                    "reusable_cache_blocked_ambiguous_title",
+                    media_type="tv",
+                    title=item.title,
+                    year=item.year,
+                    key=reusable_show_key,
+                )
         if folder_show_key and (confirmed_by_user or trusted_auto):
             cache.set_show(folder_show_key, show_entry)
         if reusable_episode_key and promote_reusable:
-            cache.set_show(reusable_episode_key, entry)
-        cache.save()
+            if _reusable_tv_cache_safe(item):
+                cache.set_show(reusable_episode_key, entry)
+            else:
+                log_event(
+                    logger,
+                    "reusable_cache_blocked_ambiguous_title",
+                    media_type="tv",
+                    title=item.title,
+                    year=item.year,
+                    key=reusable_episode_key,
+                )
+        _save_cache(cache, progress)
         destination = plan_tv_show(
             library,
             metadata.get("name") or selected.title,
@@ -3015,7 +3149,7 @@ def _process_item(
                 _record_stat(stats, "skipped")
                 return None, False
             if _confirm("No movie candidates. Switch to TV search? [y/N]", False, progress, show_default=False):
-                _persist_media_type_override(cache, override_key, "tv", media_type_overrides)
+                _persist_media_type_override(cache, override_key, "tv", media_type_overrides, progress)
                 return _process_item(
                     item=_switch_item_media_type(item, "tv"),
                     library=library,
@@ -3036,6 +3170,7 @@ def _process_item(
                     on_conflict=on_conflict,
                     allow_back=allow_back,
                     offline=offline,
+                    allow_risky_enter_accept=allow_risky_enter_accept,
                     media_type_overrides=media_type_overrides,
                     tv_search_cache=tv_search_cache,
                 )
@@ -3176,11 +3311,27 @@ def _process_item(
         if not interactive:
             _record_stat(stats, "skipped")
             return None, False
-        if candidates[0].confidence < min_confidence:
+        low_confidence = candidates[0].confidence < min_confidence
+        risky_reusable_cache_hit = page.cache_reusable and _reusable_cache_hit_looks_risky(
+            item, candidates, min_confidence
+        )
+        require_explicit_choice = (low_confidence or risky_reusable_cache_hit) and not allow_risky_enter_accept
+        if low_confidence:
             _safe_print(
                 f"Low confidence ({candidates[0].confidence:.2f} < {min_confidence:.2f}). "
-                "Press Enter to accept anyway, or choose s/m/k/q.",
+                "Choose explicitly with 1-9, or choose s/m/k/q.",
                 progress,
+            )
+        if require_explicit_choice:
+            log_event(
+                logger,
+                "risky_candidate_prompted",
+                media_type="movie",
+                path=item.path,
+                title=item.title,
+                cache_reusable=page.cache_reusable,
+                top_confidence=candidates[0].confidence,
+                min_confidence=min_confidence,
             )
         _maybe_enrich_candidates("movie", candidates, session_tv, session_wd, cache, interactive)
         choice = _select_candidate(
@@ -3192,8 +3343,18 @@ def _process_item(
             allow_manual=True,
             allow_back=allow_back,
             item=item,
+            allow_enter_accept=not require_explicit_choice,
         )
         if isinstance(choice, Candidate):
+            if require_explicit_choice and choice == candidates[0]:
+                log_event(
+                    logger,
+                    "risky_candidate_explicitly_accepted",
+                    media_type="movie",
+                    path=item.path,
+                    title=item.title,
+                    confidence=choice.confidence,
+                )
             selected = choice
             outcome = "confirmed"
             break
@@ -3370,9 +3531,19 @@ def _process_item(
             "source": selected.source,
         }
     cache.set_movie(cache_key, entry)
-    if reusable_movie_key and _reusable_movie_cache_safe(item) and promote_reusable:
-        _promote_reusable_with_conflict_tracking("movie", cache=cache, key=reusable_movie_key, entry=entry)
-    cache.save()
+    if reusable_movie_key and promote_reusable:
+        if _reusable_movie_cache_safe(item):
+            _promote_reusable_with_conflict_tracking("movie", cache=cache, key=reusable_movie_key, entry=entry)
+        else:
+            log_event(
+                logger,
+                "reusable_cache_blocked_ambiguous_title",
+                media_type="movie",
+                title=item.title,
+                year=item.year,
+                key=reusable_movie_key,
+            )
+    _save_cache(cache, progress)
 
     year = metadata.get("year") or selected.year
     if year is None and interactive:
@@ -3438,7 +3609,15 @@ def organise(
         "--prune-ignore",
         help="Comma-separated ignorable filenames for prune-empty-dirs",
     ),
+    allow_risky_enter_accept: bool = typer.Option(
+        False,
+        "--allow-risky-enter-accept",
+        help="Allow Enter to accept top match in risky candidate prompts",
+        is_flag=True,
+    ),
 ) -> None:
+    global _cache_save_warning_shown
+    _cache_save_warning_shown = False
     _initialise_logging(log_level, log_format, log_file)
     run_id = uuid.uuid4().hex
     log_event(
@@ -3525,6 +3704,7 @@ def organise(
             use_cache=not no_cache,
             on_conflict=on_conflict,
             offline=offline,
+            allow_risky_enter_accept=allow_risky_enter_accept,
         )
     finally:
         QUIET_OUTPUT = previous_quiet_output
@@ -3632,6 +3812,7 @@ def organise(
             prune_empty_dirs=prune_empty_dirs,
             quiet=quiet,
             prune_ignore=prune_ignore,
+            allow_risky_enter_accept=allow_risky_enter_accept,
         )
         console.print("Apply command:")
         console.print(_build_command(apply_config))

@@ -12,6 +12,7 @@ from .ui import format_path, rich_escape
 def prompt_line(
     *,
     has_candidates: bool,
+    allow_enter_accept: bool,
     allow_search: bool,
     allow_manual: bool,
     has_more: bool,
@@ -20,7 +21,8 @@ def prompt_line(
 ) -> str:
     parts: list[str] = []
     if has_candidates:
-        parts.append("Enter=accept #1")
+        if allow_enter_accept:
+            parts.append("Enter=accept #1")
         parts.append("1-9=choose")
     if allow_search:
         parts.append("s=search")
@@ -93,19 +95,32 @@ def select_candidate(
     prompt_choice: Callable[[str, str], str],
     safe_print: Callable[[str], None],
     print_candidates_fn: Callable[[str, list[Any], Any | None], None],
-    prompt_line_fn: Callable[[bool, bool, bool, bool, bool], str],
+    prompt_line_fn: Callable[[bool, bool, bool, bool, bool, bool], str],
+    allow_enter_accept: bool = True,
 ) -> Any | None | str:
     printed_table = False
     while True:
         if candidates and not printed_table:
             print_candidates_fn(media_type, candidates, item)
             printed_table = True
-        safe_print(prompt_line_fn(bool(candidates), allow_search, allow_manual, has_more, allow_back))
-        default_choice = "1" if candidates else ""
+        safe_print(
+            prompt_line_fn(
+                bool(candidates),
+                allow_enter_accept,
+                allow_search,
+                allow_manual,
+                has_more,
+                allow_back,
+            )
+        )
+        default_choice = "1" if candidates and allow_enter_accept else ""
         choice = prompt_choice("Select", default_choice)
         if choice == "":
-            if candidates:
+            if candidates and allow_enter_accept:
                 return candidates[0]
+            if candidates:
+                safe_print("Please choose explicitly.")
+                continue
             safe_print("No candidates available to accept.")
             continue
         if choice.isdigit():

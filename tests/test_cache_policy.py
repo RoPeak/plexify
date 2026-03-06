@@ -24,6 +24,8 @@ def test_cache_entry_compatible_allows_small_year_gap() -> None:
 def test_reusable_cache_safe_without_year_blocks_ambiguous_titles() -> None:
     assert reusable_cache_safe("The Dark Knight", None) is True
     assert reusable_cache_safe("Show", None) is False
+    assert reusable_cache_safe("B1_t00", None) is False
+    assert reusable_cache_safe("VTS_01_1", None) is False
 
 
 def test_should_promote_to_reusable_requires_auto_confident_non_ambiguous() -> None:
@@ -70,4 +72,3 @@ def test_promote_reusable_with_conflict_tracking_marks_ambiguous(tmp_path: Path)
     assert entry is not None
     assert entry.get("ambiguous") is True
     assert len(entry.get("matches", [])) == 2
-

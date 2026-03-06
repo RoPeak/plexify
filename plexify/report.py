@@ -39,8 +39,8 @@ class ReportStream:
         self._write_line(
             {
                 "type": "operation",
-                "source": str(plan.source),
-                "destination": str(plan.destination),
+                "source": str(plan.source.resolve(strict=False)),
+                "destination": str(plan.destination.resolve(strict=False)),
                 "media_type": plan.media_type,
                 "metadata": plan.metadata,
             }
@@ -69,8 +69,8 @@ def write_report(path: Path, plans: list[MovePlan], mode: str, copy_mode: bool) 
         "copy": copy_mode,
         "operations": [
             {
-                "source": str(plan.source),
-                "destination": str(plan.destination),
+                "source": str(plan.source.resolve(strict=False)),
+                "destination": str(plan.destination.resolve(strict=False)),
                 "media_type": plan.media_type,
                 "metadata": plan.metadata,
             }

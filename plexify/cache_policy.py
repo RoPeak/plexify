@@ -6,6 +6,16 @@ from typing import Any
 from .cache import Cache
 from .util import normalize_title_for_similarity, now_timestamp
 
+GENERIC_RIP_TITLE_RE = re.compile(
+    r"^(?:"
+    r"[a-z]\d+\s*t\d+"
+    r"|vts\s*\d+(?:\s+\d+)?"
+    r"|disc\s*\d+"
+    r"|track\s*\d+"
+    r")$",
+    re.IGNORECASE,
+)
+
 
 def cache_entry_confirmed_or_auto(entry: dict[str, Any] | None) -> bool:
     if not entry:
@@ -33,6 +43,15 @@ def year_distance(target_year: int | None, candidate_year: int | None) -> int:
 
 def is_ambiguous_cache_title(title: str) -> bool:
     normalised = normalize_title_for_similarity(title)
+    compact = re.sub(r"[\s._-]+", "", normalised)
+    if compact and GENERIC_RIP_TITLE_RE.fullmatch(normalised):
+        return True
+    if compact and re.fullmatch(r"[a-z]\d+t\d+", compact):
+        return True
+    if compact and re.fullmatch(r"vts\d+(?:\d+)?", compact):
+        return True
+    if compact and re.fullmatch(r"(?:disc|track)\d+", compact):
+        return True
     tokens = [token for token in re.split(r"\s+", normalised) if token]
     if not tokens:
         return True

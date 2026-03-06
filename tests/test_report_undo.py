@@ -116,6 +116,25 @@ def test_read_report_accepts_jsonl_stream_format(tmp_path: Path) -> None:
     assert payload["operations"][0]["destination"] == str(plan.destination)
 
 
+def test_report_writes_absolute_paths_for_relative_plan(tmp_path: Path) -> None:
+    report = tmp_path / "report.json"
+    plan = MovePlan(
+        source=Path("incoming.mkv"),
+        destination=Path("library") / "incoming.mkv",
+        mode="apply",
+        media_type="movie",
+        metadata={},
+    )
+    write_report(report, [plan], mode="apply", copy_mode=False)
+
+    payload = read_report(report)
+    operation = payload["operations"][0]
+    assert Path(operation["source"]).is_absolute()
+    assert Path(operation["destination"]).is_absolute()
+    assert operation["source"] == str(plan.source.resolve(strict=False))
+    assert operation["destination"] == str(plan.destination.resolve(strict=False))
+
+
 def test_undo_from_jsonl_report(tmp_path: Path) -> None:
     report = tmp_path / "stream.json"
     src = tmp_path / "source.mkv"

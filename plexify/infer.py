@@ -28,6 +28,15 @@ YEAR_RANGE_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*[-–]\s*(19\d{2}|20\d{2
 LEADING_EPISODE_RE = re.compile(r"^\s*(\d{1,3})\s*[-_. ]+\s*(.+?)\s*$")
 LEADING_EPISODE_RANGE_RE = re.compile(r"^\s*(\d{1,3})\s*[-_. ]+\s*(\d{1,3})(?:\s*[-_. ]+.*)?\s*$")
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts"}
+GENERIC_MOVIE_STEM_RE = re.compile(
+    r"^(?:"
+    r"[A-Za-z]\d+[_\-\s]*t\d+"
+    r"|vts[_\-\s]*\d+(?:[_\-\s]*\d+)?"
+    r"|disc[_\-\s]*\d+"
+    r"|track[_\-\s]*\d+"
+    r")$",
+    re.IGNORECASE,
+)
 GENERIC_TV_FOLDERS = {
     "tv",
     "tv shows",
@@ -185,6 +194,10 @@ def _looks_like_title_fragment(value: str) -> bool:
             continue
         cleaned.append(token)
     return bool(cleaned)
+
+
+def _is_generic_movie_stem(stem: str) -> bool:
+    return GENERIC_MOVIE_STEM_RE.fullmatch(stem.strip()) is not None
 
 
 def infer_tv_episode_from_stem(stem: str) -> Optional[int]:
@@ -459,6 +472,13 @@ def infer_item(path: Path) -> InferredItem:
         media_type = "tv"
 
     if media_type == "movie":
+        parent_name = path.parent.name.strip()
+        if _is_generic_movie_stem(path.stem) and parent_name and not _is_generic_tv_folder_name(parent_name):
+            parent_title, parent_year = _clean_parent_show_name(parent_name)
+            if parent_title:
+                title = parent_title
+                if year_override is None:
+                    year_override = parent_year
         cleaned = _clean_title_from_stem(path.stem)
         if cleaned:
             if _starts_with_number(path.stem) and not _starts_with_number(str(title)):

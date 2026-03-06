@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,47 @@ def build_search_query(title: str, hint: str | None) -> str:
         if hint_text:
             parts.append(hint_text)
     return " ".join(part for part in parts if part)
+
+
+def build_movie_fallback_queries(title: str, hint: str | None) -> list[str]:
+    hint_text = (hint or "").strip()
+    base_title = (title or "").strip()
+    canonical = build_search_query(base_title, hint_text)
+    title_variants: list[str] = [base_title]
+
+    if ":" in base_title:
+        title_variants.append(base_title.split(":", 1)[0].strip())
+    if " - " in base_title:
+        title_variants.append(base_title.split(" - ", 1)[0].strip())
+
+    stripped_suffix = re.sub(r"\s*[\(\[].*?[\)\]]\s*$", "", base_title).strip()
+    if stripped_suffix:
+        title_variants.append(stripped_suffix)
+
+    candidates: list[str] = []
+    if canonical:
+        candidates.append(canonical)
+    for variant in title_variants:
+        if not variant:
+            continue
+        normalized = make_search_query(variant) or variant
+        if normalized:
+            candidates.append(normalized)
+            if hint_text:
+                candidates.append(f"{normalized} {hint_text}".strip())
+
+    seen: set[str] = set()
+    queries: list[str] = []
+    for candidate in candidates:
+        compact = " ".join(candidate.split()).strip()
+        if not compact:
+            continue
+        marker = compact.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        queries.append(compact)
+    return queries
 
 
 def resolve_media_type_override(
@@ -50,9 +92,9 @@ def persist_media_type_override(
     override_key: str | None,
     media_type: str,
     media_type_overrides: dict[str, str] | None,
-) -> None:
+) -> bool:
     if override_key is None:
-        return
+        return True
     if media_type_overrides is not None:
         media_type_overrides[override_key] = media_type
     cache.set_show(
@@ -64,5 +106,4 @@ def persist_media_type_override(
             "source": "MediaTypeOverride",
         },
     )
-    cache.save()
-
+    return cache.save_with_status()

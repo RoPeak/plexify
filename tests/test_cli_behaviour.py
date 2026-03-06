@@ -304,6 +304,42 @@ def test_reusable_movie_cache_key_hit(tmp_path: Path) -> None:
     assert page.candidates[0].title == "Superman II"
 
 
+def test_movie_candidates_retries_with_fallback_query(monkeypatch, tmp_path: Path) -> None:
+    queries: list[str] = []
+
+    def _fake_search(query: str, *_args, **_kwargs):
+        queries.append(query)
+        if len(queries) == 1:
+            return []
+        return [cli.wikidata.WikidataCandidate(qid="Q2", label="Jack Reacher: Never Go Back", description=None)]
+
+    def _fake_fetch_entity(qid: str, *_args, **_kwargs):
+        return cli.wikidata.WikidataFilm(qid=qid, title="Jack Reacher: Never Go Back", year=2016, is_film=True)
+
+    monkeypatch.setattr(cli.wikidata, "search", _fake_search)
+    monkeypatch.setattr(cli.wikidata, "fetch_entity", _fake_fetch_entity)
+
+    item = InferredItem(
+        path=tmp_path / "Jack Reacher - Never Go Back.mkv",
+        media_type="movie",
+        title="Jack Reacher: Never Go Back",
+        year=None,
+        episode_title=None,
+    )
+    page = cli._movie_candidates(
+        item=item,
+        session=requests.Session(),
+        cache=Cache(tmp_path / "cache.json"),
+        show_cache=False,
+        cache_key="movie|path|jack-reacher-never-go-back|unknown",
+        search_query="jack reacher never go back",
+    )
+
+    assert [query.casefold() for query in queries] == ["jack reacher never go back", "jack reacher"]
+    assert page.candidates
+    assert page.candidates[0].title == "Jack Reacher: Never Go Back"
+
+
 def test_reusable_movie_cache_ignored_when_stem_has_extra_tokens(monkeypatch, tmp_path: Path) -> None:
     def _fake_search(*_args, **_kwargs):
         return []
@@ -625,6 +661,156 @@ def test_reusable_tv_cache_not_written_without_year(monkeypatch, tmp_path: Path)
     assert folder_key is None
 
 
+def test_low_confidence_movie_forces_explicit_selection(monkeypatch, tmp_path: Path) -> None:
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="I Am Legend",
+            year=2007,
+            source="Wikidata",
+            confidence=0.34,
+            metadata={"qid": "Q1", "title": "I Am Legend", "year": 2007},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    seen_allow_enter: list[bool] = []
+
+    def _fake_select(*args, **kwargs):
+        seen_allow_enter.append(bool(kwargs.get("allow_enter_accept", True)))
+        return args[1][0]
+
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "_select_candidate", _fake_select)
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "I Am Legend.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="movie", title="I Am Legend", year=2007, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=False,
+        min_confidence=0.90,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert seen_allow_enter == [False]
+
+
+def test_reusable_movie_cache_hit_with_generic_title_forces_explicit_selection(monkeypatch, tmp_path: Path) -> None:
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="The Hurt Locker",
+            year=2008,
+            source="Wikidata",
+            confidence=0.97,
+            metadata={"qid": "Q1", "title": "The Hurt Locker", "year": 2008},
+            enrichment=None,
+        )
+        return cli.CandidatePage(
+            candidates=[candidate],
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            cache_hit=True,
+            cache_reusable=True,
+        )
+
+    seen_allow_enter: list[bool] = []
+
+    def _fake_select(*args, **kwargs):
+        seen_allow_enter.append(bool(kwargs.get("allow_enter_accept", True)))
+        return args[1][0]
+
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "_select_candidate", _fake_select)
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "I Am Legend" / "B1_t00.mkv"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="movie", title="B1_t00", year=None, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=False,
+        min_confidence=0.90,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert seen_allow_enter == [False]
+
+
+def test_select_candidate_requires_explicit_numeric_choice_when_enter_disabled(monkeypatch) -> None:
+    candidate = cli.Candidate(
+        title="Movie",
+        year=2001,
+        source="Wikidata",
+        confidence=0.34,
+        metadata={"qid": "Q1", "title": "Movie", "year": 2001},
+        enrichment=None,
+    )
+    answers = iter(["", "1"])
+    messages: list[str] = []
+
+    monkeypatch.setattr(cli, "_prompt_choice", lambda *_args, **_kwargs: next(answers))
+    monkeypatch.setattr(cli, "_safe_print", lambda message, _progress=None: messages.append(str(message)))
+    monkeypatch.setattr(cli, "_print_candidates", lambda *_args, **_kwargs: None)
+
+    selected = cli._select_candidate(
+        "movie",
+        [candidate],
+        None,
+        has_more=False,
+        allow_search=True,
+        allow_manual=True,
+        allow_back=False,
+        item=None,
+        allow_enter_accept=False,
+    )
+
+    assert selected == candidate
+    assert "Please choose explicitly." in messages
+
+
 def test_prompt_season_episode_reprompts_on_invalid_number(monkeypatch, tmp_path: Path) -> None:
     def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
         candidate = cli.Candidate(
@@ -735,9 +921,9 @@ def test_process_item_tv_saves_cache_once_per_item(monkeypatch, tmp_path: Path) 
             super().__init__(path)
             self.save_calls = 0
 
-        def save(self) -> None:
+        def save_with_status(self, force: bool = False) -> bool:
             self.save_calls += 1
-            super().save()
+            return super().save_with_status(force=force)
 
     def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
         candidate = cli.Candidate(
@@ -792,9 +978,9 @@ def test_process_item_movie_saves_cache_once_per_item(monkeypatch, tmp_path: Pat
             super().__init__(path)
             self.save_calls = 0
 
-        def save(self) -> None:
+        def save_with_status(self, force: bool = False) -> bool:
             self.save_calls += 1
-            super().save()
+            return super().save_with_status(force=force)
 
     def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
         candidate = cli.Candidate(
@@ -840,6 +1026,63 @@ def test_process_item_movie_saves_cache_once_per_item(monkeypatch, tmp_path: Pat
 
     assert plan is not None
     assert cache.save_calls == 1
+
+
+def test_cache_lock_warning_is_emitted_once_per_run(monkeypatch, tmp_path: Path) -> None:
+    class BusyCache(Cache):
+        def save_with_status(self, force: bool = False) -> bool:
+            return False
+
+    def _fake_movie_candidates(item: InferredItem, *_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title=item.title,
+            year=2001,
+            source="Wikidata",
+            confidence=1.0,
+            metadata={"qid": "Q1", "title": item.title, "year": 2001},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    messages: list[str] = []
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli.console, "print", lambda message: messages.append(str(message)))
+    cli._cache_save_warning_shown = False
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path_a = incoming / "Movie.A.mkv"
+    path_b = incoming / "Movie.B.mkv"
+    path_a.write_text("x", encoding="utf-8")
+    path_b.write_text("x", encoding="utf-8")
+
+    cache = BusyCache(library / ".plexify" / "cache.json")
+    for title, path in [("Movie A", path_a), ("Movie B", path_b)]:
+        item = InferredItem(path=path, media_type="movie", title=title, year=2001, episode_title=None)
+        plan, _collision = cli._process_item(
+            item=item,
+            library=library,
+            cache=cache,
+            mode="dry-run",
+            copy_mode=True,
+            interactive=False,
+            auto_accept=True,
+            min_confidence=0.55,
+            session_tv=requests.Session(),
+            session_wd=requests.Session(),
+            episode_cache=EpisodeCache(),
+            progress=None,
+            show_cache=False,
+            incoming_root=incoming,
+            planned={},
+            on_conflict="rename",
+        )
+        assert plan is not None
+
+    warning = "Warning: cache is busy; this run may proceed without saving some cache updates."
+    assert sum(1 for message in messages if warning in message) == 1
 
 
 def test_tv_folder_cache_hit_without_year_uses_inferred_season_episode(monkeypatch, tmp_path: Path) -> None:

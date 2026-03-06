@@ -78,3 +78,32 @@ def test_build_command_escapes_apostrophes_for_windows_shells() -> None:
     incoming_quoted = quote_cli_arg(str(Path("C:/Ronan's Incoming")))
 
     assert f"--incoming {incoming_quoted}" in command
+
+
+def test_build_command_includes_allow_risky_enter_accept_flag() -> None:
+    config = cli.BuildCommandConfig(
+        incoming=Path("C:/Incoming"),
+        library=Path("D:/Library"),
+        media_type="auto",
+        mode="dry-run",
+        copy_mode=True,
+        extensions=cli.DEFAULT_EXTENSIONS_LIST,
+        min_confidence=cli.DEFAULT_MIN_CONFIDENCE,
+        limit=None,
+        interactive=True,
+        print_tree=False,
+        show_enrichment=False,
+        yes=False,
+        no_cache=False,
+        cache_file=None,
+        clear_cache=False,
+        report=None,
+        on_conflict="rename",
+        prune_empty_dirs=False,
+        quiet=False,
+        prune_ignore=cli.DEFAULT_PRUNE_IGNORE,
+        allow_risky_enter_accept=True,
+    )
+
+    command = cli._build_command(config)
+    assert "--allow-risky-enter-accept" in command

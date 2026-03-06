@@ -91,6 +91,14 @@ def test_infer_movie_hyphen_noise_ignored() -> None:
     assert item.title == "Movie"
 
 
+def test_infer_movie_generic_stem_uses_parent_folder_title() -> None:
+    path = Path("About Time (2013)/C1_t00.mkv")
+    item = infer_item(path)
+    assert item.media_type == "movie"
+    assert item.title == "About Time"
+    assert item.year == 2013
+
+
 def test_infer_tv_series_separator_pattern() -> None:
     path = Path("Show/Series_6_-_01.mkv")
     item = infer_item(path)

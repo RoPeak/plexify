@@ -87,16 +87,20 @@ class Cache:
                 return None
 
     def save(self, force: bool = False) -> None:
+        self.save_with_status(force=force)
+
+    def save_with_status(self, force: bool = False) -> bool:
         if self._batch_depth > 0 and not force:
-            return
+            return True
         if not self._dirty and not force:
-            return
+            return True
         lock_path = self._acquire_lock()
         if lock_path is None:
-            return
+            return False
         try:
             json_dump(self.path, self.data)
             self._dirty = False
+            return True
         finally:
             try:
                 lock_path.unlink(missing_ok=True)
@@ -165,6 +169,9 @@ class NullCache(Cache):
 
     def save(self, force: bool = False) -> None:
         return None
+
+    def save_with_status(self, force: bool = False) -> bool:
+        return True
 
     def get_enrichment(self, key: str) -> dict[str, Any] | None:
         return None

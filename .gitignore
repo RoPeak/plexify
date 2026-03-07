@@ -36,3 +36,5 @@ Desktop.ini
 
 .tmp/
 plexify-run.txt
+exports/
+artifacts/

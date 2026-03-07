@@ -844,6 +844,12 @@ def _tv_candidates(
             cache_key=cached_key,
             path=item.path,
             media_type=item.media_type,
+            title=item.title,
+            query=None,
+            selection_mode=None,
+            selection_source="cache",
+            decision_reason="cache_lookup",
+            confidence=None,
         )
         if show_cache:
             name = cached.get("name") or item.title
@@ -915,6 +921,12 @@ def _tv_candidates(
             media_type=item.media_type,
             path=item.path,
             title=item.title,
+            query=search_query,
+            selection_mode=None,
+            selection_source="offline",
+            decision_reason="offline_no_cached_match",
+            confidence=None,
+            cache_scope="tv",
         )
         return CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
 
@@ -1159,6 +1171,12 @@ def _movie_candidates(
             cache_key=cached_key,
             path=item.path,
             media_type=item.media_type,
+            title=item.title,
+            query=search_query,
+            selection_mode=None,
+            selection_source="cache",
+            decision_reason="cache_lookup",
+            confidence=None,
         )
         if show_cache:
             title = cached.get("title") or item.title
@@ -1191,6 +1209,12 @@ def _movie_candidates(
             media_type=item.media_type,
             path=item.path,
             title=item.title,
+            query=search_query,
+            selection_mode=None,
+            selection_source="offline",
+            decision_reason="offline_no_cached_match",
+            confidence=None,
+            cache_scope="movie",
         )
         return CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
 
@@ -2189,44 +2213,15 @@ def _prune_empty_dirs_full_sweep(
 
 
 def _preview_group_key(plan: MovePlan) -> str:
-    if plan.media_type == "tv":
-        show = str(plan.metadata.get("show") or "").strip().casefold()
-        if show:
-            return f"tv:{show}"
-    if plan.media_type == "movie":
-        title = str(plan.metadata.get("title") or "").strip().casefold()
-        if title:
-            return f"movie:{title}"
-    return f"path:{str(plan.destination.parent).casefold()}"
+    return video_flow.preview_group_key(plan)
 
 
 def _select_preview_plans(plans: list[MovePlan], limit: int = 5) -> list[MovePlan]:
-    if len(plans) <= limit:
-        return plans
-    selected: list[MovePlan] = []
-    seen_groups: set[str] = set()
-    for plan in plans:
-        group = _preview_group_key(plan)
-        if group in seen_groups:
-            continue
-        selected.append(plan)
-        seen_groups.add(group)
-        if len(selected) >= limit:
-            return selected
-    if len(seen_groups) <= 1:
-        return plans[:limit]
-    for plan in plans:
-        if plan in selected:
-            continue
-        selected.append(plan)
-        if len(selected) >= limit:
-            break
-    return selected
+    return video_flow.select_preview_plans(plans, limit=limit)
 
 
 def _preview_spans_multiple_groups(plans: list[MovePlan]) -> bool:
-    groups = {_preview_group_key(plan) for plan in plans}
-    return len(groups) > 1
+    return video_flow.preview_spans_multiple_groups(plans)
 
 
 def _print_run_summary(
@@ -2239,22 +2234,17 @@ def _print_run_summary(
     report_path: Path | None,
     apply_report_path: Path | None = None,
 ) -> None:
-    failures = len(errors) + len(result.errors)
-    console.print("Summary:")
-    console.print(f"Planned: {len(plans)}")
-    console.print(f"Skipped: {stats.skipped}")
-    console.print(f"Cache hits: {stats.cache_hits}")
-    console.print(f"Manual entries: {stats.manual}")
-    console.print(f"Failures: {failures}")
-    console.print(f"Elapsed: {stats.elapsed:.2f}s")
-    if cache_path is not None:
-        console.print(f"Cache path: {format_path(cache_path)}")
-    else:
-        console.print("Cache path: disabled")
-    if report_path is not None:
-        console.print(f"Report path: {format_path(report_path)}")
-    if apply_report_path is not None:
-        console.print(f"Apply report path: {format_path(apply_report_path)}")
+    video_flow.print_run_summary(
+        console=console,
+        format_path_fn=format_path,
+        stats=stats,
+        plans=plans,
+        errors=errors,
+        result=result,
+        cache_path=cache_path,
+        report_path=report_path,
+        apply_report_path=apply_report_path,
+    )
 
 
 def _plan_items(
@@ -2277,177 +2267,44 @@ def _plan_items(
 ) -> tuple[list[MovePlan], list[str], PlanStats]:
     global _cache_save_warning_shown
     _cache_save_warning_shown = False
-    cache_store: Cache = Cache(cache_path) if use_cache else NullCache()
-    exts = _parse_extensions(extensions)
-    files = iter_video_files(incoming, exts)
-    if limit:
-        files = files[:limit]
-
-    plans: list[MovePlan] = []
-    errors: list[str] = []
-    stats = PlanStats()
-    started = time.monotonic()
-    planned: dict[str, int] = {}
-    collisions = 0
-    history: list[HistoryEntry] = []
-    episode_cache = EpisodeCache()
-    media_type_overrides: dict[str, str] = {}
-    tv_search_cache: dict[str, list[tvmaze.TVMazeShow]] = {}
-
-    with cache_store.batch():
-        with Progress(
-            TextColumn("{task.completed}/{task.total} - {task.description}"),
-            disable=interactive or not sys.stdout.isatty(),
-        ) as progress:
-            task = progress.add_task("Planning files...", total=len(files))
-            with tvmaze.create_session() as session_tv, wikidata.create_session() as session_wd:
-                total = len(files)
-                index = 0
-                while index < len(files):
-                    path = files[index]
-                    progress.update(task, completed=min(index + 1, total), description=f"Planning: {rich_escape(path.name)}")
-                    try:
-                        item = infer_item(path)
-                        item, override_key = _resolve_media_type_override(item, cache_store, incoming, media_type_overrides)
-                        log_event(
-                            logger,
-                            "file_inferred",
-                            level=10,
-                            path=path,
-                            media_type=item.media_type,
-                            title=item.title,
-                            year=item.year,
-                            season=item.season,
-                            episode=item.episode,
-                        )
-                        if media_type_filter and item.media_type != media_type_filter:
-                            index += 1
-                            continue
-                        if not QUIET_OUTPUT:
-                            _safe_print("", progress)
-                            _console_for(progress).rule()
-                            _safe_print(_file_panel(index + 1, total, item, incoming), progress)
-                        cache_key = build_cache_key(item.path, incoming, item.media_type, item.year)
-                        cache_snapshots: list[CacheSnapshot] = []
-                        if override_key:
-                            cache_snapshots.append(CacheSnapshot("show", override_key, cache_store.get_show(override_key)))
-                        if item.media_type == "tv":
-                            reusable_safe = _reusable_tv_cache_safe(item)
-                            reusable_show_key = tv_show_cache_key(item.title, item.year) if reusable_safe else None
-                            folder_show_key = tv_show_folder_cache_key(item.path, incoming)
-                            keys = [cache_key]
-                            if reusable_show_key:
-                                keys.append(reusable_show_key)
-                            if folder_show_key:
-                                keys.append(folder_show_key)
-                            if reusable_safe and item.season is not None and item.episode is not None:
-                                keys.append(tv_episode_cache_key(item.title, item.year, item.season, item.episode))
-                            for key in keys:
-                                cache_snapshots.append(CacheSnapshot("show", key, cache_store.get_show(key)))
-                        else:
-                            reusable_movie_key = movie_cache_key(item.title, item.year)
-                            for key in [cache_key, reusable_movie_key]:
-                                cache_snapshots.append(CacheSnapshot("movie", key, cache_store.get_movie(key)))
-                        stats_snapshot = _snapshot_stats(stats)
-                        errors_len = len(errors)
-                        plan, collision = _process_item(
-                            item=item,
-                            library=library,
-                            cache=cache_store,
-                            mode=mode,
-                            copy_mode=copy_mode,
-                            interactive=interactive,
-                            auto_accept=auto_accept,
-                            min_confidence=min_confidence,
-                            session_tv=session_tv,
-                            session_wd=session_wd,
-                            episode_cache=episode_cache,
-                            progress=progress,
-                            show_cache=show_cache,
-                            stats=stats,
-                            incoming_root=incoming,
-                            planned=planned,
-                            on_conflict=on_conflict,
-                            allow_back=bool(history),
-                            offline=offline,
-                            allow_risky_enter_accept=allow_risky_enter_accept,
-                            media_type_overrides=media_type_overrides,
-                            tv_search_cache=tv_search_cache,
-                        )
-                        history.append(
-                            HistoryEntry(
-                                index=index,
-                                plan=plan,
-                                collision=collision,
-                                cache_snapshots=cache_snapshots,
-                                stats_snapshot=stats_snapshot,
-                                errors_len=errors_len,
-                            )
-                        )
-                        if plan:
-                            plans.append(plan)
-                            if collision:
-                                collisions += 1
-                        index += 1
-                    except BackRequested:
-                        if not history:
-                            _safe_print("No previous decision to return to.", progress)
-                            continue
-                        entry = history.pop()
-                        if entry.plan:
-                            if plans and plans[-1] == entry.plan:
-                                plans.pop()
-                            else:
-                                try:
-                                    plans.remove(entry.plan)
-                                except ValueError:
-                                    pass
-                            key = str(entry.plan.destination).lower()
-                            if key in planned:
-                                if planned[key] <= 1:
-                                    planned.pop(key, None)
-                                else:
-                                    planned[key] -= 1
-                        if entry.collision and collisions > 0:
-                            collisions -= 1
-                        for snapshot in entry.cache_snapshots:
-                            if snapshot.section == "show":
-                                if snapshot.previous is None:
-                                    cache_store.delete_show(snapshot.key)
-                                else:
-                                    cache_store.set_show(snapshot.key, snapshot.previous)
-                            else:
-                                if snapshot.previous is None:
-                                    cache_store.delete_movie(snapshot.key)
-                                else:
-                                    cache_store.set_movie(snapshot.key, snapshot.previous)
-                        _save_cache(cache_store, progress)
-                        stats.auto_matched = entry.stats_snapshot.auto_matched
-                        stats.user_confirmed = entry.stats_snapshot.user_confirmed
-                        stats.manual = entry.stats_snapshot.manual
-                        stats.skipped = entry.stats_snapshot.skipped
-                        stats.errors = entry.stats_snapshot.errors
-                        stats.cache_hits = entry.stats_snapshot.cache_hits
-                        stats.elapsed = entry.stats_snapshot.elapsed
-                        del errors[entry.errors_len:]
-                        index = entry.index
-                        back_path = files[index]
-                        progress.update(
-                            task,
-                            completed=min(index + 1, total),
-                            description=f"Planning: {rich_escape(back_path.name)}",
-                        )
-                        _safe_print("Rewound to previous file.", progress)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("planning_failed", extra={"path": path})
-                        stats.errors += 1
-                        errors.append(f"{path}: {exc}")
-                        index += 1
-
-    stats.elapsed = time.monotonic() - started
-    if collisions:
-        _safe_print(f"{collisions} collision(s) resolved by suffixing (2), (3), ...", None)
-    return plans, errors, stats
+    return video_flow.plan_items(
+        incoming=incoming,
+        library=library,
+        mode=mode,
+        copy_mode=copy_mode,
+        interactive=interactive,
+        auto_accept=auto_accept,
+        min_confidence=min_confidence,
+        extensions=extensions,
+        cache_path=cache_path,
+        limit=limit,
+        show_cache=show_cache,
+        media_type_filter=media_type_filter,
+        use_cache=use_cache,
+        on_conflict=on_conflict,
+        offline=offline,
+        allow_risky_enter_accept=allow_risky_enter_accept,
+        parse_extensions_fn=_parse_extensions,
+        infer_item_fn=infer_item,
+        resolve_media_type_override_fn=_resolve_media_type_override,
+        safe_print_fn=_safe_print,
+        console_for_fn=_console_for,
+        file_panel_fn=_file_panel,
+        reusable_tv_cache_safe_fn=_reusable_tv_cache_safe,
+        snapshot_stats_fn=_snapshot_stats,
+        process_item_fn=_process_item,
+        save_cache_fn=_save_cache,
+        record_log_event_fn=log_event,
+        logger=logger,
+        rich_escape_fn=rich_escape,
+        progress_cls=Progress,
+        text_column_cls=TextColumn,
+        back_requested_exc=BackRequested,
+        cache_snapshot_cls=CacheSnapshot,
+        history_entry_cls=HistoryEntry,
+        plan_stats_cls=PlanStats,
+        quiet_output=QUIET_OUTPUT,
+    )
 
 
 def _build_command(config: BuildCommandConfig) -> str:
@@ -2719,9 +2576,15 @@ def _process_item(
                     media_type="tv",
                     path=item.path,
                     title=item.title,
+                    query=search_query,
+                    selection_mode=None,
+                    selection_source="interactive",
+                    decision_reason="risky_candidate_requires_explicit_choice",
                     cache_reusable=page.cache_reusable,
                     top_confidence=candidates[0].confidence,
                     min_confidence=min_confidence,
+                    confidence=candidates[0].confidence,
+                    cache_scope="tv",
                 )
             _maybe_enrich_candidates("tv", candidates, session_tv, session_wd, cache, interactive)
             choice = _select_candidate(
@@ -2743,7 +2606,12 @@ def _process_item(
                         media_type="tv",
                         path=item.path,
                         title=item.title,
+                        query=search_query,
+                        selection_mode="confirmed",
+                        selection_source=choice.source,
+                        decision_reason="explicit_accept_risky_candidate",
                         confidence=choice.confidence,
+                        cache_scope="tv",
                     )
                 selected = choice
                 outcome = "confirmed"
@@ -2870,11 +2738,14 @@ def _process_item(
             "candidate_selected",
             media_type="tv",
             selection_mode=outcome,
-            source=selected.source,
+            selection_source=selected.source,
+            decision_reason="user_or_auto_selection",
             path=item.path,
             title=selected.title,
             year=selected.year,
+            query=search_query,
             confidence=selected.confidence,
+            cache_scope="tv",
         )
         _maybe_fetch_episode_title(item, selected, session_tv, episode_cache, bump_confidence=False)
         metadata = selected.metadata
@@ -3287,9 +3158,15 @@ def _process_item(
                 media_type="movie",
                 path=item.path,
                 title=item.title,
+                query=search_query,
+                selection_mode=None,
+                selection_source="interactive",
+                decision_reason="risky_candidate_requires_explicit_choice",
                 cache_reusable=page.cache_reusable,
                 top_confidence=candidates[0].confidence,
                 min_confidence=min_confidence,
+                confidence=candidates[0].confidence,
+                cache_scope="movie",
             )
         _maybe_enrich_candidates("movie", candidates, session_tv, session_wd, cache, interactive)
         choice = _select_candidate(
@@ -3311,7 +3188,12 @@ def _process_item(
                     media_type="movie",
                     path=item.path,
                     title=item.title,
+                    query=search_query,
+                    selection_mode="confirmed",
+                    selection_source=choice.source,
+                    decision_reason="explicit_accept_risky_candidate",
                     confidence=choice.confidence,
+                    cache_scope="movie",
                 )
             selected = choice
             outcome = "confirmed"
@@ -3464,11 +3346,14 @@ def _process_item(
         "candidate_selected",
         media_type="movie",
         selection_mode=outcome,
-        source=selected.source,
+        selection_source=selected.source,
+        decision_reason="user_or_auto_selection",
         path=item.path,
         title=selected.title,
         year=selected.year,
+        query=search_query,
         confidence=selected.confidence,
+        cache_scope="movie",
     )
     metadata = selected.metadata
     confirmed_by_user = outcome in {"confirmed", "manual"}
@@ -3796,7 +3681,10 @@ def organise(
             command="organise",
             status="error",
             planned_count=len(plans),
+            skipped_count=stats.skipped,
             error_count=len(result.errors) + len(errors),
+            elapsed_seconds=stats.elapsed,
+            applied=apply_mode,
         )
         console.print("Errors:")
         for error in result.errors + errors:
@@ -3810,7 +3698,10 @@ def organise(
             command="organise",
             status="empty",
             planned_count=0,
+            skipped_count=stats.skipped,
             error_count=0,
+            elapsed_seconds=stats.elapsed,
+            applied=apply_mode,
         )
         raise typer.Exit(code=1)
     log_event(
@@ -3820,7 +3711,10 @@ def organise(
         command="organise",
         status="success",
         planned_count=len(plans),
+        skipped_count=stats.skipped,
         error_count=0,
+        elapsed_seconds=stats.elapsed,
+        applied=apply_mode,
     )
     raise typer.Exit(code=0)
 
@@ -4592,7 +4486,10 @@ def music(
             command="music",
             status="error",
             planned_count=len(plans),
+            skipped_count=0,
             error_count=len(result.errors),
+            elapsed_seconds=None,
+            applied=apply,
         )
         console.print("Errors:")
         for error in result.errors:
@@ -4606,7 +4503,10 @@ def music(
             command="music",
             status="empty",
             planned_count=0,
+            skipped_count=0,
             error_count=0,
+            elapsed_seconds=None,
+            applied=apply,
         )
         raise typer.Exit(code=1)
     log_event(
@@ -4616,7 +4516,10 @@ def music(
         command="music",
         status="success",
         planned_count=len(plans),
+        skipped_count=0,
         error_count=0,
+        elapsed_seconds=None,
+        applied=apply,
     )
     raise typer.Exit(code=0)
 

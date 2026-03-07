@@ -207,3 +207,19 @@ D:\Media\Music\Alanis Morissette\Jagged Little Pill\01 - All I Really Want.flac
 - Cache is stored at `.plexify/cache.json` under the library folder by default (override with `--cache`).
 - Numbered episode folders (e.g., `Pride and Prejudice\1.mkv`, `2.mkv`) are treated as TV when the folder
   contains multiple video files. The show name is taken from the folder name and any year is used as a hint.
+
+## Clean project export
+
+To create a shareable archive without local runtime artifacts (`.git`, `.venv`, `.pytest_cache`, `.plexify`, temp folders):
+
+```powershell
+.\scripts\export-clean.ps1
+```
+
+This writes `exports\plexify-clean.zip` by default.
+
+You can override the destination path:
+
+```powershell
+.\scripts\export-clean.ps1 -OutputPath "exports\plexify-YYYYMMDD.zip"
+```

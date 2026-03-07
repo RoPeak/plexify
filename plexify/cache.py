@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .logging_config import get_logger
+from .models import CacheData
 from .util import json_dump, json_load
 
 CACHE_SCHEMA_VERSION = 3
@@ -22,7 +23,7 @@ class CacheEntry:
     value: dict[str, Any]
 
 
-def _upgrade_cache_data(data: Any) -> dict[str, Any]:
+def _upgrade_cache_data(data: Any) -> CacheData:
     if not isinstance(data, dict):
         data = {}
     schema_version = data.get("schema_version")

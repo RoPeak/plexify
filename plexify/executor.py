@@ -60,7 +60,7 @@ def execute_plans(
             moved.append(applied)
             if on_applied is not None:
                 on_applied(applied)
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, shutil.Error, ValueError) as exc:
             logger.exception("plan_execution_failed", extra={"source": plan.source, "destination": plan.destination})
             errors.append(f"{plan.source}: {exc}")
         completed += 1

@@ -146,3 +146,63 @@ def test_log_event_run_finished_schema_fields() -> None:
     assert payload["error_count"] == 0
     assert payload["elapsed_seconds"] == 1.23
     assert payload["applied"] is True
+
+
+def test_log_event_risky_candidate_prompted_schema_fields() -> None:
+    formatter = JsonFormatter()
+    record = logging.LogRecord(
+        name="plexify.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=10,
+        msg="risky_candidate_prompted",
+        args=(),
+        exc_info=None,
+    )
+    record.event = "risky_candidate_prompted"
+    record.media_type = "movie"
+    record.path = "C:/incoming/file.mkv"
+    record.title = "B1 t00"
+    record.query = "b1 t00"
+    record.selection_mode = None
+    record.selection_source = "interactive"
+    record.decision_reason = "risky_candidate_requires_explicit_choice"
+    record.confidence = 0.34
+    record.cache_scope = "movie"
+
+    payload = json.loads(formatter.format(record))
+    assert payload["event"] == "risky_candidate_prompted"
+    assert payload["media_type"] == "movie"
+    assert payload["selection_source"] == "interactive"
+    assert payload["decision_reason"] == "risky_candidate_requires_explicit_choice"
+    assert payload["cache_scope"] == "movie"
+
+
+def test_log_event_cache_hit_schema_fields() -> None:
+    formatter = JsonFormatter()
+    record = logging.LogRecord(
+        name="plexify.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=10,
+        msg="cache_hit",
+        args=(),
+        exc_info=None,
+    )
+    record.event = "cache_hit"
+    record.cache_scope = "tv"
+    record.cache_key = "show:24:2001"
+    record.media_type = "tv"
+    record.path = "C:/incoming/24/Season 1/1.mkv"
+    record.title = "24"
+    record.query = None
+    record.selection_mode = None
+    record.selection_source = "cache"
+    record.decision_reason = "cache_lookup"
+    record.confidence = None
+
+    payload = json.loads(formatter.format(record))
+    assert payload["event"] == "cache_hit"
+    assert payload["cache_scope"] == "tv"
+    assert payload["selection_source"] == "cache"
+    assert payload["decision_reason"] == "cache_lookup"

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .models import ReportPayload
 from .util import MovePlan, ensure_dir, json_dump
 
 
@@ -80,7 +81,7 @@ def write_report(path: Path, plans: list[MovePlan], mode: str, copy_mode: bool) 
     json_dump(path, payload)
 
 
-def _validate_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _validate_payload(payload: dict[str, Any]) -> ReportPayload:
     if not isinstance(payload, dict):
         raise ReportFormatError("Report root must be a JSON object.")
     operations = payload.get("operations")
@@ -95,10 +96,10 @@ def _validate_payload(payload: dict[str, Any]) -> dict[str, Any]:
             raise ReportFormatError(f"Operation #{idx} has invalid source path.")
         if not isinstance(destination, str) or not destination.strip():
             raise ReportFormatError(f"Operation #{idx} has invalid destination path.")
-    return payload
+    return payload  # type: ignore[return-value]
 
 
-def _parse_jsonl_report(text: str) -> dict[str, Any]:
+def _parse_jsonl_report(text: str) -> ReportPayload:
     mode: str | None = None
     copy_mode = False
     operations: list[dict[str, Any]] = []
@@ -149,7 +150,7 @@ def _parse_jsonl_report(text: str) -> dict[str, Any]:
     }
 
 
-def read_report(path: Path) -> dict[str, Any]:
+def read_report(path: Path) -> ReportPayload:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:

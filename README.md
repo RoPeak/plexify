@@ -83,6 +83,15 @@ Auto-accept and confidence threshold:
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --yes --min-confidence 0.90
 ```
 
+Strict safety preset:
+
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --strict-safe
+```
+
+`--strict-safe` applies conservative defaults for that run: disables cache usage, disables auto-accept,
+forces explicit risky-choice handling, and enforces a minimum confidence floor of `0.95`.
+
 Interactive selection shortcuts:
 
 - `Enter` accepts #1 (only when candidates exist)

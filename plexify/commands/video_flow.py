@@ -308,3 +308,444 @@ def plan_items(
     if collisions:
         safe_print_fn(f"{collisions} collision(s) resolved by suffixing (2), (3), ...", None)
     return plans, errors, stats
+
+
+def tv_candidates(
+    *,
+    item: InferredItem,
+    session: requests.Session,
+    cache: Any,
+    show_cache: bool,
+    incoming_root: Path | None = None,
+    cache_key: str | None = None,
+    offset: int = 0,
+    raw_results: list[Any] | None = None,
+    search_query: str | None = None,
+    progress: Any = None,
+    limit: int = 5,
+    offline: bool = False,
+    interactive: bool = False,
+    search_cache: dict[str, list[Any]] | None = None,
+    reusable_tv_cache_safe_fn: Any = None,
+    tv_show_cache_key_fn: Any = None,
+    tv_episode_cache_key_fn: Any = None,
+    tv_show_folder_cache_key_fn: Any = None,
+    cache_entry_confirmed_or_auto_fn: Any = None,
+    cache_entry_compatible_fn: Any = None,
+    log_event_fn: Any = None,
+    logger: Any = None,
+    safe_print_fn: Any = None,
+    rich_escape_fn: Any = None,
+    candidate_cls: Any = None,
+    candidate_page_cls: Any = None,
+    tv_candidate_from_show_fn: Any = None,
+    make_search_query_fn: Any = None,
+    tv_search_cache_key_fn: Any = None,
+    normalize_tv_retry_query_fn: Any = None,
+    year_distance_fn: Any = None,
+) -> Any:
+    path_key = cache_key or item.title
+    reusable_safe = reusable_tv_cache_safe_fn(item)
+    reusable_show_key = tv_show_cache_key_fn(item.title, item.year) if reusable_safe else None
+    reusable_episode_key = None
+    folder_show_key = tv_show_folder_cache_key_fn(item.path, incoming_root)
+    if reusable_safe and item.season is not None and item.episode is not None:
+        reusable_episode_key = tv_episode_cache_key_fn(item.title, item.year, item.season, item.episode)
+    cached = None
+    cached_key = None
+    candidate_keys: list[str] = []
+    if reusable_episode_key:
+        candidate_keys.append(reusable_episode_key)
+    if reusable_show_key:
+        candidate_keys.append(reusable_show_key)
+    if folder_show_key:
+        candidate_keys.append(folder_show_key)
+    candidate_keys.append(path_key)
+
+    for key in candidate_keys:
+        possible = cache.get_show(key)
+        if not possible:
+            continue
+        if not cache_entry_confirmed_or_auto_fn(possible):
+            continue
+        if not possible.get("manual") and not cache_entry_compatible_fn(item.year, possible.get("premiered")):
+            continue
+        cached = possible
+        cached_key = key
+        break
+    results: list[Any] = []
+    elapsed = 0.0
+    total_time = None
+    if cached:
+        log_event_fn(
+            logger,
+            "cache_hit",
+            cache_scope="tv",
+            cache_key=cached_key,
+            path=item.path,
+            media_type=item.media_type,
+            title=item.title,
+            query=None,
+            selection_mode=None,
+            selection_source="cache",
+            decision_reason="cache_lookup",
+            confidence=None,
+        )
+        if show_cache:
+            name = cached.get("name") or item.title
+            year = cached.get("chosen_year") or cached.get("premiered")
+            year_text = f" ({year})" if year else ""
+            safe_print_fn("Cache hit.", progress)
+            if cached_key == reusable_show_key:
+                safe_print_fn("Cache type: REUSABLE", progress)
+                safe_print_fn(
+                    f"Using cached show match: {name}{year_text} [TVMaze]. Using inferred S/E for this file.",
+                    progress,
+                )
+            elif cached_key == folder_show_key:
+                safe_print_fn("Cache type: FOLDER", progress)
+                safe_print_fn(
+                    f"Using cached show match for folder: {name}{year_text} [TVMaze]. Using inferred S/E for this file.",
+                    progress,
+                )
+            else:
+                safe_print_fn("Cache type: FILE-SPECIFIC", progress)
+                safe_print_fn(
+                    f"Using cached match for: {rich_escape_fn(item.path.name)} -> {rich_escape_fn(name)}{year_text} [TVMaze]",
+                    progress,
+                )
+        if cached.get("manual"):
+            metadata: dict[str, Any] = {
+                "id": None,
+                "name": cached.get("name") or item.title,
+                "year": cached.get("chosen_year") or cached.get("premiered"),
+                "manual": True,
+            }
+            if cached_key == folder_show_key and cached.get("season") is not None:
+                metadata["season"] = cached.get("season")
+            if cached_key not in {reusable_show_key, folder_show_key}:
+                if "season" in cached:
+                    metadata["season"] = cached.get("season")
+                if "episode" in cached:
+                    metadata["episode"] = cached.get("episode")
+                if "episode_title" in cached:
+                    metadata["episode_title"] = cached.get("episode_title")
+            candidate = candidate_cls(
+                title=metadata["name"],
+                year=metadata.get("year"),
+                source="Manual",
+                confidence=1.0,
+                metadata=metadata,
+            )
+        else:
+            show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
+            candidate = tv_candidate_from_show_fn(item, show)
+        if cached_key not in {reusable_show_key, folder_show_key}:
+            candidate.metadata["season"] = cached.get("season")
+            candidate.metadata["episode"] = cached.get("episode")
+            candidate.metadata["episode_title"] = cached.get("episode_title")
+        results.append(candidate)
+        return candidate_page_cls(
+            candidates=results,
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            cache_hit=True,
+            cache_reusable=cached_key in {reusable_show_key, reusable_episode_key},
+        )
+
+    if offline:
+        log_event_fn(
+            logger,
+            "offline_no_cached_match",
+            media_type=item.media_type,
+            path=item.path,
+            title=item.title,
+            query=search_query,
+            selection_mode=None,
+            selection_source="offline",
+            decision_reason="offline_no_cached_match",
+            confidence=None,
+            cache_scope="tv",
+        )
+        return candidate_page_cls(candidates=[], raw_results=[], next_offset=0, has_more=False)
+
+    if raw_results is None:
+        query = search_query or make_search_query_fn(item.title) or item.title
+        cache_lookup_key = tv_search_cache_key_fn(query, item.year)
+        if search_cache is not None and cache_lookup_key in search_cache:
+            raw_results = search_cache[cache_lookup_key]
+            elapsed = 0.0
+            total_time = 0.0
+        else:
+            log_event_fn(
+                logger,
+                "candidate_search_started",
+                source="TVMaze",
+                query=query,
+                media_type=item.media_type,
+                path=item.path,
+            )
+            safe_print_fn(f"Searching TVMaze for: {rich_escape_fn(query)}", progress)
+            total_started = time.monotonic()
+            started = total_started
+            raw_results = tvmaze.search_shows(query, session=session, raise_on_error=interactive)
+            elapsed = time.monotonic() - started
+            total_time = time.monotonic() - total_started
+            if not raw_results:
+                retry_query = normalize_tv_retry_query_fn(search_query or item.title)
+                if retry_query and retry_query != query:
+                    safe_print_fn(f"Retrying TVMaze with normalized query: {rich_escape_fn(retry_query)}", progress)
+                    started_retry = time.monotonic()
+                    raw_results = tvmaze.search_shows(retry_query, session=session, raise_on_error=interactive)
+                    elapsed += time.monotonic() - started_retry
+                    total_time = time.monotonic() - total_started
+                    cache_lookup_key = tv_search_cache_key_fn(retry_query, item.year)
+            log_event_fn(
+                logger,
+                "candidate_search_finished",
+                source="TVMaze",
+                query=query,
+                media_type=item.media_type,
+                path=item.path,
+                result_count=len(raw_results),
+                duration_ms=int(total_time * 1000),
+            )
+            if search_cache is not None:
+                search_cache[cache_lookup_key] = raw_results
+            if not raw_results:
+                safe_print_fn(f"No candidates (api={elapsed:.2f}s).", progress)
+                return candidate_page_cls(
+                    candidates=[],
+                    raw_results=raw_results,
+                    next_offset=0,
+                    has_more=False,
+                    search_time=elapsed,
+                    total_time=total_time,
+                )
+    page = raw_results[offset : offset + limit]
+    for show in page:
+        results.append(tv_candidate_from_show_fn(item, show))
+    results.sort(key=lambda cand: (-cand.confidence, year_distance_fn(item.year, cand.year)))
+    next_offset = offset + limit
+    has_more = next_offset < len(raw_results)
+    if raw_results is not None and offset == 0:
+        best = results[0].confidence if results else 0.0
+        total_text = f"{total_time:.2f}s" if total_time is not None else f"{elapsed:.2f}s"
+        safe_print_fn(
+            f"Found {len(results)} candidates (best confidence {best:.2f}, api={elapsed:.2f}s, total={total_text}).",
+            progress,
+        )
+    return candidate_page_cls(candidates=results, raw_results=raw_results, next_offset=next_offset, has_more=has_more)
+
+
+def movie_candidates(
+    *,
+    item: InferredItem,
+    session: requests.Session,
+    cache: Any,
+    show_cache: bool,
+    cache_key: str | None = None,
+    offset: int = 0,
+    raw_results: list[Any] | None = None,
+    search_query: str | None = None,
+    progress: Any = None,
+    limit: int = 5,
+    offline: bool = False,
+    interactive: bool = False,
+    movie_cache_key_fn: Any = None,
+    reusable_movie_cache_safe_fn: Any = None,
+    cache_entry_confirmed_or_auto_fn: Any = None,
+    cache_entry_compatible_fn: Any = None,
+    log_event_fn: Any = None,
+    logger: Any = None,
+    safe_print_fn: Any = None,
+    rich_escape_fn: Any = None,
+    movie_candidate_from_film_fn: Any = None,
+    candidate_page_cls: Any = None,
+    build_movie_fallback_queries_fn: Any = None,
+    make_search_query_fn: Any = None,
+    year_distance_fn: Any = None,
+) -> Any:
+    path_key = cache_key or item.title
+    reusable_key = movie_cache_key_fn(item.title, item.year)
+    cached = None
+    cached_key = None
+    candidate_keys: list[str] = []
+    if reusable_movie_cache_safe_fn(item):
+        candidate_keys.append(reusable_key)
+    candidate_keys.append(path_key)
+    for key in candidate_keys:
+        possible = cache.get_movie(key)
+        if not possible:
+            continue
+        if bool(possible.get("manual")):
+            continue
+        if not cache_entry_confirmed_or_auto_fn(possible):
+            continue
+        if not cache_entry_compatible_fn(item.year, possible.get("year")):
+            continue
+        cached = possible
+        cached_key = key
+        break
+    results: list[Any] = []
+    elapsed = 0.0
+    fetch_time = 0.0
+    total_time = None
+    if cached and not cached.get("manual"):
+        log_event_fn(
+            logger,
+            "cache_hit",
+            cache_scope="movie",
+            cache_key=cached_key,
+            path=item.path,
+            media_type=item.media_type,
+            title=item.title,
+            query=search_query,
+            selection_mode=None,
+            selection_source="cache",
+            decision_reason="cache_lookup",
+            confidence=None,
+        )
+        if show_cache:
+            title = cached.get("title") or item.title
+            year = cached.get("year")
+            year_text = f" ({year})" if year else ""
+            safe_print_fn("Cache hit.", progress)
+            if cached_key == reusable_key:
+                safe_print_fn("Cache type: REUSABLE", progress)
+            else:
+                safe_print_fn("Cache type: FILE-SPECIFIC", progress)
+            safe_print_fn(
+                f"Using cached match for: {rich_escape_fn(item.path.name)} -> {rich_escape_fn(title)}{year_text} [Wikidata]",
+                progress,
+            )
+        film = wikidata.WikidataFilm(qid=cached["qid"], title=cached["title"], year=cached.get("year"), is_film=True)
+        results.append(movie_candidate_from_film_fn(item, film))
+        return candidate_page_cls(
+            candidates=results,
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            cache_hit=True,
+            cache_reusable=cached_key == reusable_key,
+        )
+
+    if offline:
+        log_event_fn(
+            logger,
+            "offline_no_cached_match",
+            media_type=item.media_type,
+            path=item.path,
+            title=item.title,
+            query=search_query,
+            selection_mode=None,
+            selection_source="offline",
+            decision_reason="offline_no_cached_match",
+            confidence=None,
+            cache_scope="movie",
+        )
+        return candidate_page_cls(candidates=[], raw_results=[], next_offset=0, has_more=False)
+
+    if raw_results is None:
+        fallback_queries = build_movie_fallback_queries_fn(item.title, None)
+        queries: list[str] = []
+        if search_query and search_query.strip():
+            queries.append(search_query.strip())
+        queries.extend(fallback_queries)
+        if not queries:
+            base_query = make_search_query_fn(item.title) or item.title
+            if base_query:
+                queries.append(base_query)
+        if not queries:
+            queries.append("unknown")
+        deduped_queries: list[str] = []
+        seen_queries: set[str] = set()
+        for query in queries:
+            marker = query.casefold()
+            if marker in seen_queries:
+                continue
+            seen_queries.add(marker)
+            deduped_queries.append(query)
+        queries = deduped_queries
+        query = queries[0]
+        log_event_fn(
+            logger,
+            "candidate_search_started",
+            source="Wikidata",
+            query=query,
+            query_attempts=len(queries),
+            media_type=item.media_type,
+            path=item.path,
+        )
+        safe_print_fn(f"Searching Wikidata for: {rich_escape_fn(query)}", progress)
+        total_started = time.monotonic()
+        attempts = 0
+        raw_results = []
+        for current_query in queries:
+            attempts += 1
+            if attempts > 1:
+                safe_print_fn(f"Retrying Wikidata with simplified query: {rich_escape_fn(current_query)}", progress)
+            started = time.monotonic()
+            attempt_results = wikidata.search(current_query, session=session, limit=10, raise_on_error=interactive)
+            elapsed += time.monotonic() - started
+            query = current_query
+            if attempt_results:
+                raw_results = attempt_results
+                break
+        if not raw_results:
+            total_time = time.monotonic() - total_started
+            safe_print_fn(f"No candidates (api={total_time:.2f}s).", progress)
+            return candidate_page_cls(
+                candidates=[],
+                raw_results=raw_results,
+                next_offset=0,
+                has_more=False,
+                search_time=elapsed,
+                total_time=total_time,
+            )
+        total_time = time.monotonic() - total_started
+        log_event_fn(
+            logger,
+            "candidate_search_finished",
+            source="Wikidata",
+            query=query,
+            query_attempts=attempts,
+            media_type=item.media_type,
+            path=item.path,
+            result_count=len(raw_results),
+            duration_ms=int(total_time * 1000),
+        )
+        total_started = time.monotonic()
+    idx = offset
+    fetch_started = time.monotonic()
+    while idx < len(raw_results) and len(results) < limit:
+        cand = raw_results[idx]
+        idx += 1
+        film = wikidata.fetch_entity(cand.qid, session=session)
+        if not film.is_film:
+            continue
+        results.append(movie_candidate_from_film_fn(item, film, description=cand.description))
+    fetch_time = time.monotonic() - fetch_started
+    results.sort(key=lambda cand: (-cand.confidence, year_distance_fn(item.year, cand.year)))
+    has_more = idx < len(raw_results)
+    if raw_results is not None and offset == 0:
+        best = results[0].confidence if results else 0.0
+        if total_time is None:
+            total_time = elapsed + fetch_time
+        else:
+            total_time = total_time + fetch_time
+        safe_print_fn(
+            f"Found {len(results)} candidates (best confidence {best:.2f}, "
+            f"api={elapsed:.2f}s, fetch={fetch_time:.2f}s, total={total_time:.2f}s).",
+            progress,
+        )
+    return candidate_page_cls(
+        candidates=results,
+        raw_results=raw_results,
+        next_offset=idx,
+        has_more=has_more,
+        search_time=elapsed,
+        fetch_time=fetch_time,
+        total_time=total_time,
+    )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import requests
 
 from plexify import cli
@@ -2339,7 +2340,7 @@ def test_music_mismatch_reprompts_and_filename_fallback_restores_album(monkeypat
 
     planned = captured["plans"]
     assert planned
-    assert any("Music\\Eminem\\Curtain Call\\" in str(plan.destination) for plan in planned)
+    assert any("Music/Eminem/Curtain Call/" in str(plan.destination).replace("\\", "/") for plan in planned)
     assert not any("Curtain Call 2" in str(plan.destination) for plan in planned)
     assert len(prompt_calls) == 2
 
@@ -2407,8 +2408,8 @@ def test_music_mismatch_filename_titles_keeps_mb_album_artist(monkeypatch, tmp_p
 
     planned = captured["plans"]
     assert planned
-    assert any("Music\\Mark Ronson\\Version\\" in str(plan.destination) for plan in planned)
-    assert all("Music\\Various Artists\\" not in str(plan.destination) for plan in planned)
+    assert any("Music/Mark Ronson/Version/" in str(plan.destination).replace("\\", "/") for plan in planned)
+    assert all("Music/Various Artists/" not in str(plan.destination).replace("\\", "/") for plan in planned)
 
 
 def test_music_uses_single_session_and_caches_release_tracklists(monkeypatch, tmp_path: Path) -> None:
@@ -2563,9 +2564,9 @@ def test_music_auto_maps_multidisc_without_disc_numbers(monkeypatch, tmp_path: P
 
     planned = captured["plans"]
     assert planned
-    destinations = [str(plan.destination) for plan in planned]
-    assert any("Music\\Artist\\Album Deluxe\\101 - Intro (MB).flac" in destination for destination in destinations)
-    assert any("Music\\Artist\\Album Deluxe\\201 - Finale (MB).flac" in destination for destination in destinations)
+    destinations = [str(plan.destination).replace("\\", "/") for plan in planned]
+    assert any("Music/Artist/Album Deluxe/101 - Intro (MB).flac" in destination for destination in destinations)
+    assert any("Music/Artist/Album Deluxe/201 - Finale (MB).flac" in destination for destination in destinations)
 
 
 def test_music_auto_accepts_top_candidate_and_passes_inferred_year(monkeypatch, tmp_path: Path) -> None:
@@ -2726,7 +2727,7 @@ def test_music_auto_skips_extreme_track_mismatch_without_selection_prompt(monkey
 
     assert fetch_called["value"] is False
     assert captured["plans"]
-    assert all("Music\\Artist\\Album\\" in str(plan.destination) for plan in captured["plans"])
+    assert all("Music/Artist/Album/" in str(plan.destination).replace("\\", "/") for plan in captured["plans"])
 
 
 def test_music_auto_uses_later_exact_match_when_top_is_extreme_mismatch(monkeypatch, tmp_path: Path) -> None:
@@ -2810,7 +2811,62 @@ def test_music_auto_uses_later_exact_match_when_top_is_extreme_mismatch(monkeypa
 
     assert fetch_calls == ["exact-match"]
     assert captured["plans"]
-    assert any("Music\\Artist\\Album\\01 - Song (MB).flac" in str(plan.destination) for plan in captured["plans"])
+    assert any(
+        "Music/Artist/Album/01 - Song (MB).flac" in str(plan.destination).replace("\\", "/")
+        for plan in captured["plans"]
+    )
+
+
+def test_organise_strict_safe_overrides_risky_defaults(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+
+    captured: dict[str, object] = {}
+
+    def _fake_plan_items(**kwargs):
+        captured.update(kwargs)
+        return [], [], cli.PlanStats()
+
+    monkeypatch.setattr(cli, "_plan_items", _fake_plan_items)
+
+    with pytest.raises(cli.typer.Exit) as exc:
+        cli.organise(
+            incoming=incoming,
+            library=library,
+            mode="dry-run",
+            move=False,
+            copy=False,
+            extensions=cli.DEFAULT_EXTENSIONS,
+            min_confidence=0.90,
+            cache=None,
+            report=None,
+            yes=True,
+            limit=None,
+            print_tree=False,
+            interactive=False,
+            no_interactive=True,
+            media_type="auto",
+            no_cache=False,
+            clear_cache=False,
+            offline=False,
+            quiet=True,
+            on_conflict="rename",
+            log_level="WARNING",
+            log_format="text",
+            log_file=None,
+            prune_empty_dirs=False,
+            prune_ignore=cli.DEFAULT_PRUNE_IGNORE,
+            allow_risky_enter_accept=True,
+            strict_safe=True,
+        )
+
+    assert exc.value.exit_code == 1
+    assert captured["auto_accept"] is False
+    assert captured["use_cache"] is False
+    assert captured["allow_risky_enter_accept"] is False
+    assert captured["min_confidence"] == 0.95
 
 
 def test_music_skip_all_remaining_verification_applies_to_later_albums(monkeypatch, tmp_path: Path) -> None:

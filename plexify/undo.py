@@ -11,7 +11,7 @@ logger = get_logger(__name__)
 def _is_within_root(path: Path, root: Path) -> bool:
     try:
         return path.resolve(strict=False).is_relative_to(root.resolve(strict=False))
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return False
 
 
@@ -49,7 +49,7 @@ def undo_report(path: Path, library_root: Path | None = None) -> list[str]:
                     continue
                 src.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(dest, src)
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, shutil.Error, ValueError) as exc:
             logger.exception("undo_operation_failed", extra={"source": src, "destination": dest})
             errors.append(f"{dest}: {exc}")
     return errors

@@ -24,7 +24,7 @@ def _casefold_parts(path: Path) -> tuple[str, ...]:
 def _resolve_for_compare(path: Path) -> Path:
     try:
         return path.resolve(strict=False)
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return path.resolve()
 
 

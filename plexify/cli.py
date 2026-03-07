@@ -230,6 +230,7 @@ class BuildCommandConfig:
     quiet: bool
     prune_ignore: str | None
     allow_risky_enter_accept: bool = False
+    strict_safe: bool = False
 
 
 @dataclass(frozen=True)
@@ -804,199 +805,39 @@ def _tv_candidates(
     interactive: bool = False,
     search_cache: dict[str, list[tvmaze.TVMazeShow]] | None = None,
 ) -> CandidatePage:
-    path_key = cache_key or item.title
-    reusable_safe = _reusable_tv_cache_safe(item)
-    reusable_show_key = tv_show_cache_key(item.title, item.year) if reusable_safe else None
-    reusable_episode_key = None
-    folder_show_key = tv_show_folder_cache_key(item.path, incoming_root)
-    if reusable_safe and item.season is not None and item.episode is not None:
-        reusable_episode_key = tv_episode_cache_key(item.title, item.year, item.season, item.episode)
-    cached = None
-    cached_key = None
-    candidate_keys: list[str] = []
-    if reusable_episode_key:
-        candidate_keys.append(reusable_episode_key)
-    if reusable_show_key:
-        candidate_keys.append(reusable_show_key)
-    if folder_show_key:
-        candidate_keys.append(folder_show_key)
-    candidate_keys.append(path_key)
-
-    for key in candidate_keys:
-        possible = cache.get_show(key)
-        if not possible:
-            continue
-        if not _cache_entry_confirmed_or_auto(possible):
-            continue
-        if not possible.get("manual") and not _cache_entry_compatible(item.year, possible.get("premiered")):
-            continue
-        cached = possible
-        cached_key = key
-        break
-    results: list[Candidate] = []
-    elapsed = 0.0
-    total_time = None
-    if cached:
-        log_event(
-            logger,
-            "cache_hit",
-            cache_scope="tv",
-            cache_key=cached_key,
-            path=item.path,
-            media_type=item.media_type,
-            title=item.title,
-            query=None,
-            selection_mode=None,
-            selection_source="cache",
-            decision_reason="cache_lookup",
-            confidence=None,
-        )
-        if show_cache:
-            name = cached.get("name") or item.title
-            year = cached.get("chosen_year") or cached.get("premiered")
-            year_text = f" ({year})" if year else ""
-            _safe_print("Cache hit.", progress)
-            if cached_key == reusable_show_key:
-                _safe_print("Cache type: REUSABLE", progress)
-                _safe_print(
-                    f"Using cached show match: {name}{year_text} [TVMaze]. Using inferred S/E for this file.",
-                    progress,
-                )
-            elif cached_key == folder_show_key:
-                _safe_print("Cache type: FOLDER", progress)
-                _safe_print(
-                    f"Using cached show match for folder: {name}{year_text} [TVMaze]. Using inferred S/E for this file.",
-                    progress,
-                )
-            else:
-                _safe_print("Cache type: FILE-SPECIFIC", progress)
-                _safe_print(
-                    f"Using cached match for: {rich_escape(item.path.name)} -> {rich_escape(name)}{year_text} [TVMaze]",
-                    progress,
-                )
-        if cached.get("manual"):
-            metadata: dict[str, Any] = {
-                "id": None,
-                "name": cached.get("name") or item.title,
-                "year": cached.get("chosen_year") or cached.get("premiered"),
-                "manual": True,
-            }
-            if cached_key == folder_show_key and cached.get("season") is not None:
-                metadata["season"] = cached.get("season")
-            if cached_key not in {reusable_show_key, folder_show_key}:
-                if "season" in cached:
-                    metadata["season"] = cached.get("season")
-                if "episode" in cached:
-                    metadata["episode"] = cached.get("episode")
-                if "episode_title" in cached:
-                    metadata["episode_title"] = cached.get("episode_title")
-            candidate = Candidate(
-                title=metadata["name"],
-                year=metadata.get("year"),
-                source="Manual",
-                confidence=1.0,
-                metadata=metadata,
-            )
-        else:
-            show = tvmaze.TVMazeShow(id=int(cached["id"]), name=cached["name"], premiered=cached.get("premiered"))
-            candidate = _tv_candidate_from_show(item, show)
-        if cached_key not in {reusable_show_key, folder_show_key}:
-            candidate.metadata["season"] = cached.get("season")
-            candidate.metadata["episode"] = cached.get("episode")
-            candidate.metadata["episode_title"] = cached.get("episode_title")
-        results.append(candidate)
-        return CandidatePage(
-            candidates=results,
-            raw_results=None,
-            next_offset=0,
-            has_more=False,
-            cache_hit=True,
-            cache_reusable=cached_key in {reusable_show_key, reusable_episode_key},
-        )
-
-    if offline:
-        log_event(
-            logger,
-            "offline_no_cached_match",
-            media_type=item.media_type,
-            path=item.path,
-            title=item.title,
-            query=search_query,
-            selection_mode=None,
-            selection_source="offline",
-            decision_reason="offline_no_cached_match",
-            confidence=None,
-            cache_scope="tv",
-        )
-        return CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
-
-    if raw_results is None:
-        query = search_query or make_search_query(item.title) or item.title
-        cache_lookup_key = _tv_search_cache_key(query, item.year)
-        if search_cache is not None and cache_lookup_key in search_cache:
-            raw_results = search_cache[cache_lookup_key]
-            elapsed = 0.0
-            total_time = 0.0
-        else:
-            log_event(
-                logger,
-                "candidate_search_started",
-                source="TVMaze",
-                query=query,
-                media_type=item.media_type,
-                path=item.path,
-            )
-            _safe_print(f"Searching TVMaze for: {rich_escape(query)}", progress)
-            total_started = time.monotonic()
-            started = total_started
-            raw_results = tvmaze.search_shows(query, session=session, raise_on_error=interactive)
-            elapsed = time.monotonic() - started
-            total_time = time.monotonic() - total_started
-            if not raw_results:
-                retry_query = _normalize_tv_retry_query(search_query or item.title)
-                if retry_query and retry_query != query:
-                    _safe_print(f"Retrying TVMaze with normalized query: {rich_escape(retry_query)}", progress)
-                    started_retry = time.monotonic()
-                    raw_results = tvmaze.search_shows(retry_query, session=session, raise_on_error=interactive)
-                    elapsed += time.monotonic() - started_retry
-                    total_time = time.monotonic() - total_started
-                    cache_lookup_key = _tv_search_cache_key(retry_query, item.year)
-            log_event(
-                logger,
-                "candidate_search_finished",
-                source="TVMaze",
-                query=query,
-                media_type=item.media_type,
-                path=item.path,
-                result_count=len(raw_results),
-                duration_ms=int(total_time * 1000),
-            )
-            if search_cache is not None:
-                search_cache[cache_lookup_key] = raw_results
-            if not raw_results:
-                _safe_print(f"No candidates (api={elapsed:.2f}s).", progress)
-                return CandidatePage(
-                    candidates=[],
-                    raw_results=raw_results,
-                    next_offset=0,
-                    has_more=False,
-                    search_time=elapsed,
-                    total_time=total_time,
-                )
-    page = raw_results[offset : offset + limit]
-    for show in page:
-        results.append(_tv_candidate_from_show(item, show))
-    results.sort(key=lambda cand: (-cand.confidence, _year_distance(item.year, cand.year)))
-    next_offset = offset + limit
-    has_more = next_offset < len(raw_results)
-    if raw_results is not None and offset == 0:
-        best = results[0].confidence if results else 0.0
-        total_text = f"{total_time:.2f}s" if total_time is not None else f"{elapsed:.2f}s"
-        _safe_print(
-            f"Found {len(results)} candidates (best confidence {best:.2f}, api={elapsed:.2f}s, total={total_text}).",
-            progress,
-        )
-    return CandidatePage(candidates=results, raw_results=raw_results, next_offset=next_offset, has_more=has_more)
+    return video_flow.tv_candidates(
+        item=item,
+        session=session,
+        cache=cache,
+        show_cache=show_cache,
+        incoming_root=incoming_root,
+        cache_key=cache_key,
+        offset=offset,
+        raw_results=raw_results,
+        search_query=search_query,
+        progress=progress,
+        limit=limit,
+        offline=offline,
+        interactive=interactive,
+        search_cache=search_cache,
+        reusable_tv_cache_safe_fn=_reusable_tv_cache_safe,
+        tv_show_cache_key_fn=tv_show_cache_key,
+        tv_episode_cache_key_fn=tv_episode_cache_key,
+        tv_show_folder_cache_key_fn=tv_show_folder_cache_key,
+        cache_entry_confirmed_or_auto_fn=_cache_entry_confirmed_or_auto,
+        cache_entry_compatible_fn=_cache_entry_compatible,
+        log_event_fn=log_event,
+        logger=logger,
+        safe_print_fn=_safe_print,
+        rich_escape_fn=rich_escape,
+        candidate_cls=Candidate,
+        candidate_page_cls=CandidatePage,
+        tv_candidate_from_show_fn=_tv_candidate_from_show,
+        make_search_query_fn=make_search_query,
+        tv_search_cache_key_fn=_tv_search_cache_key,
+        normalize_tv_retry_query_fn=_normalize_tv_retry_query,
+        year_distance_fn=_year_distance,
+    )
 
 
 def _tv_candidate_from_show(item: InferredItem, show: tvmaze.TVMazeShow) -> Candidate:
@@ -1138,187 +979,32 @@ def _movie_candidates(
     offline: bool = False,
     interactive: bool = False,
 ) -> CandidatePage:
-    path_key = cache_key or item.title
-    reusable_key = movie_cache_key(item.title, item.year)
-    cached = None
-    cached_key = None
-    candidate_keys: list[str] = []
-    if _reusable_movie_cache_safe(item):
-        candidate_keys.append(reusable_key)
-    candidate_keys.append(path_key)
-    for key in candidate_keys:
-        possible = cache.get_movie(key)
-        if not possible:
-            continue
-        if bool(possible.get("manual")):
-            continue
-        if not _cache_entry_confirmed_or_auto(possible):
-            continue
-        if not _cache_entry_compatible(item.year, possible.get("year")):
-            continue
-        cached = possible
-        cached_key = key
-        break
-    results: list[Candidate] = []
-    elapsed = 0.0
-    fetch_time = 0.0
-    total_time = None
-    if cached and not cached.get("manual"):
-        log_event(
-            logger,
-            "cache_hit",
-            cache_scope="movie",
-            cache_key=cached_key,
-            path=item.path,
-            media_type=item.media_type,
-            title=item.title,
-            query=search_query,
-            selection_mode=None,
-            selection_source="cache",
-            decision_reason="cache_lookup",
-            confidence=None,
-        )
-        if show_cache:
-            title = cached.get("title") or item.title
-            year = cached.get("year")
-            year_text = f" ({year})" if year else ""
-            _safe_print("Cache hit.", progress)
-            if cached_key == reusable_key:
-                _safe_print("Cache type: REUSABLE", progress)
-            else:
-                _safe_print("Cache type: FILE-SPECIFIC", progress)
-            _safe_print(
-                f"Using cached match for: {rich_escape(item.path.name)} -> {rich_escape(title)}{year_text} [Wikidata]",
-                progress,
-            )
-        film = wikidata.WikidataFilm(qid=cached["qid"], title=cached["title"], year=cached.get("year"), is_film=True)
-        results.append(_movie_candidate_from_film(item, film))
-        return CandidatePage(
-            candidates=results,
-            raw_results=None,
-            next_offset=0,
-            has_more=False,
-            cache_hit=True,
-            cache_reusable=cached_key == reusable_key,
-        )
-
-    if offline:
-        log_event(
-            logger,
-            "offline_no_cached_match",
-            media_type=item.media_type,
-            path=item.path,
-            title=item.title,
-            query=search_query,
-            selection_mode=None,
-            selection_source="offline",
-            decision_reason="offline_no_cached_match",
-            confidence=None,
-            cache_scope="movie",
-        )
-        return CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
-
-    if raw_results is None:
-        fallback_queries = plan_flow.build_movie_fallback_queries(item.title, None)
-        queries: list[str] = []
-        if search_query and search_query.strip():
-            queries.append(search_query.strip())
-        queries.extend(fallback_queries)
-        if not queries:
-            base_query = make_search_query(item.title) or item.title
-            if base_query:
-                queries.append(base_query)
-        if not queries:
-            queries.append("unknown")
-        deduped_queries: list[str] = []
-        seen_queries: set[str] = set()
-        for query in queries:
-            marker = query.casefold()
-            if marker in seen_queries:
-                continue
-            seen_queries.add(marker)
-            deduped_queries.append(query)
-        queries = deduped_queries
-        query = queries[0]
-        log_event(
-            logger,
-            "candidate_search_started",
-            source="Wikidata",
-            query=query,
-            query_attempts=len(queries),
-            media_type=item.media_type,
-            path=item.path,
-        )
-        _safe_print(f"Searching Wikidata for: {rich_escape(query)}", progress)
-        total_started = time.monotonic()
-        attempts = 0
-        raw_results = []
-        for current_query in queries:
-            attempts += 1
-            if attempts > 1:
-                _safe_print(f"Retrying Wikidata with simplified query: {rich_escape(current_query)}", progress)
-            started = time.monotonic()
-            attempt_results = wikidata.search(current_query, session=session, limit=10, raise_on_error=interactive)
-            elapsed += time.monotonic() - started
-            query = current_query
-            if attempt_results:
-                raw_results = attempt_results
-                break
-        if not raw_results:
-            total_time = time.monotonic() - total_started
-            _safe_print(f"No candidates (api={total_time:.2f}s).", progress)
-            return CandidatePage(
-                candidates=[],
-                raw_results=raw_results,
-                next_offset=0,
-                has_more=False,
-                search_time=elapsed,
-                total_time=total_time,
-            )
-        total_time = time.monotonic() - total_started
-        log_event(
-            logger,
-            "candidate_search_finished",
-            source="Wikidata",
-            query=query,
-            query_attempts=attempts,
-            media_type=item.media_type,
-            path=item.path,
-            result_count=len(raw_results),
-            duration_ms=int(total_time * 1000),
-        )
-        total_started = time.monotonic()
-    idx = offset
-    fetch_started = time.monotonic()
-    while idx < len(raw_results) and len(results) < limit:
-        cand = raw_results[idx]
-        idx += 1
-        film = wikidata.fetch_entity(cand.qid, session=session)
-        if not film.is_film:
-            continue
-        results.append(_movie_candidate_from_film(item, film, description=cand.description))
-    fetch_time = time.monotonic() - fetch_started
-    results.sort(key=lambda cand: (-cand.confidence, _year_distance(item.year, cand.year)))
-    has_more = idx < len(raw_results)
-    if raw_results is not None and offset == 0:
-        best = results[0].confidence if results else 0.0
-        if total_time is None:
-            total_time = elapsed + fetch_time
-        else:
-            total_time = total_time + fetch_time
-        _safe_print(
-            f"Found {len(results)} candidates (best confidence {best:.2f}, "
-            f"api={elapsed:.2f}s, fetch={fetch_time:.2f}s, total={total_time:.2f}s).",
-            progress,
-        )
-    return CandidatePage(
-        candidates=results,
+    return video_flow.movie_candidates(
+        item=item,
+        session=session,
+        cache=cache,
+        show_cache=show_cache,
+        cache_key=cache_key,
+        offset=offset,
         raw_results=raw_results,
-        next_offset=idx,
-        has_more=has_more,
-        search_time=elapsed,
-        fetch_time=fetch_time,
-        total_time=total_time,
+        search_query=search_query,
+        progress=progress,
+        limit=limit,
+        offline=offline,
+        interactive=interactive,
+        movie_cache_key_fn=movie_cache_key,
+        reusable_movie_cache_safe_fn=_reusable_movie_cache_safe,
+        cache_entry_confirmed_or_auto_fn=_cache_entry_confirmed_or_auto,
+        cache_entry_compatible_fn=_cache_entry_compatible,
+        log_event_fn=log_event,
+        logger=logger,
+        safe_print_fn=_safe_print,
+        rich_escape_fn=rich_escape,
+        movie_candidate_from_film_fn=_movie_candidate_from_film,
+        candidate_page_cls=CandidatePage,
+        build_movie_fallback_queries_fn=plan_flow.build_movie_fallback_queries,
+        make_search_query_fn=make_search_query,
+        year_distance_fn=_year_distance,
     )
 
 
@@ -2331,6 +2017,7 @@ def _build_command(config: BuildCommandConfig) -> str:
         quiet=config.quiet,
         prune_ignore=config.prune_ignore,
         allow_risky_enter_accept=config.allow_risky_enter_accept,
+        strict_safe=config.strict_safe,
     )
 
 
@@ -3469,6 +3156,12 @@ def organise(
         help="Allow Enter to accept top match in risky candidate prompts",
         is_flag=True,
     ),
+    strict_safe: bool = typer.Option(
+        False,
+        "--strict-safe",
+        help="Use conservative matching defaults (disable cache reuse, disable auto-accept, higher confidence floor)",
+        is_flag=True,
+    ),
 ) -> None:
     global _cache_save_warning_shown
     _cache_save_warning_shown = False
@@ -3499,6 +3192,12 @@ def organise(
     if on_conflict not in {"rename", "skip", "overwrite"}:
         console.print("Invalid on-conflict policy. Use rename, skip, or overwrite.")
         raise typer.Exit(code=2)
+    if strict_safe:
+        yes = False
+        allow_risky_enter_accept = False
+        no_cache = True
+        min_confidence = max(min_confidence, 0.95)
+        console.print("Strict-safe mode enabled: cache disabled, auto-accept disabled, confidence floor set to 0.95.")
 
     try:
         ensure_non_overlapping_paths(incoming, library, label_source="Incoming", label_library="Library")
@@ -3667,6 +3366,7 @@ def organise(
             quiet=quiet,
             prune_ignore=prune_ignore,
             allow_risky_enter_accept=allow_risky_enter_accept,
+            strict_safe=strict_safe,
         )
         console.print("Apply command:")
         console.print(_build_command(apply_config))
@@ -4735,94 +4435,17 @@ def _prompt_non_overlapping_paths(
     source_default: Path | None,
     library_default: Path | None,
 ) -> tuple[Path, Path]:
-    source_text = _prompt_path(
-        f"{label_source} folder",
-        str(source_default) if source_default is not None else None,
-        directories_only=True,
+    return wizard_flow.prompt_non_overlapping_paths(
+        label_source=label_source,
+        label_library=label_library,
+        source_default=source_default,
+        library_default=library_default,
+        prompt_path_fn=_prompt_path,
+        confirm_fn=_confirm,
+        validate_non_overlapping_fn=validate_non_overlapping,
+        console=console,
+        typer_module=typer,
     )
-    while not source_text.strip():
-        console.print("Please enter a folder path.")
-        source_text = _prompt_path(
-            f"{label_source} folder",
-            str(source_default) if source_default is not None else None,
-            directories_only=True,
-        )
-    source = Path(source_text)
-    while not source.exists() or not source.is_dir():
-        console.print("That path does not exist or is not a folder. Please try again.")
-        source_text = _prompt_path(
-            f"{label_source} folder",
-            str(source_default) if source_default is not None else None,
-            directories_only=True,
-        )
-        while not source_text.strip():
-            console.print("Please enter a folder path.")
-            source_text = _prompt_path(
-                f"{label_source} folder",
-                str(source_default) if source_default is not None else None,
-                directories_only=True,
-            )
-        source = Path(source_text)
-
-    while True:
-        library_text = _prompt_path(
-            f"{label_library} folder",
-            str(library_default) if library_default is not None else None,
-            directories_only=True,
-        )
-        while not library_text.strip():
-            console.print("Please enter a folder path.")
-            library_text = _prompt_path(
-                f"{label_library} folder",
-                str(library_default) if library_default is not None else None,
-                directories_only=True,
-            )
-        library = Path(library_text)
-        if library.exists() and library.is_file():
-            console.print("That path is a file. Please choose a folder path.")
-            continue
-        if not library.exists():
-            if _confirm("That folder does not exist. Create it? [Y/n]", True, None, show_default=False):
-                library.mkdir(parents=True, exist_ok=True)
-            else:
-                console.print("Cancelled. No changes were made.")
-                raise typer.Exit(code=0)
-        ok, reason, suggestion = validate_non_overlapping(source, library)
-        if ok:
-            return source, library
-        console.print(reason)
-        if suggestion is not None:
-            console.print(f"Suggested {label_library}: {suggestion}")
-            library_default = suggestion
-        if _confirm(f"Edit {label_source.lower()} instead? [y/N]", False, None, show_default=False):
-            source_text = _prompt_path(
-                f"{label_source} folder",
-                str(source_default) if source_default is not None else None,
-                directories_only=True,
-            )
-            while not source_text.strip():
-                console.print("Please enter a folder path.")
-                source_text = _prompt_path(
-                    f"{label_source} folder",
-                    str(source_default) if source_default is not None else None,
-                    directories_only=True,
-                )
-            source = Path(source_text)
-            while not source.exists() or not source.is_dir():
-                console.print("That path does not exist or is not a folder. Please try again.")
-                source_text = _prompt_path(
-                    f"{label_source} folder",
-                    str(source_default) if source_default is not None else None,
-                    directories_only=True,
-                )
-                while not source_text.strip():
-                    console.print("Please enter a folder path.")
-                    source_text = _prompt_path(
-                        f"{label_source} folder",
-                        str(source_default) if source_default is not None else None,
-                        directories_only=True,
-                    )
-                source = Path(source_text)
 
 
 def _wizard_video(
@@ -4831,139 +4454,31 @@ def _wizard_video(
     log_format: str = "text",
     log_file: Path | None = None,
 ) -> None:
-    console.print("This will help you organise video files into a Plex-friendly folder layout.")
-    console.print("Tip: for PowerShell tab-complete paths, run organise with --incoming/--library arguments instead.")
-    if COMPLETION_ENABLED:
-        console.print("Tip: run python -m plexify.cli --install-completion to enable shell autocompletion.")
-
-    incoming_default, library_default = _wizard_defaults("video")
-    incoming, library = _prompt_non_overlapping_paths(
-        label_source="Incoming",
-        label_library="Library",
-        source_default=incoming_default,
-        library_default=library_default,
-    )
-    _save_wizard_prefs("video", incoming, library)
-
-    audio_exts = {ext.strip().lstrip(".") for ext in DEFAULT_MUSIC_EXTENSIONS.split(",") if ext.strip()}
-    video_exts = {ext.strip().lstrip(".") for ext in DEFAULT_EXTENSIONS_LIST}
-    has_audio, has_video = _detect_media_in_path(incoming, audio_exts, video_exts)
-    if has_audio and not has_video:
-        if _confirm("This looks like music. Switch to music mode? [Y/n]", True, None, show_default=False):
-            _wizard_music(
-                source_override=incoming,
-                library_override=library,
-                log_level=log_level,
-                log_format=log_format,
-                log_file=log_file,
-            )
-            return
-
-    media_type = _prompt_choice_loop(
-        "Media type (movie/tv/both)",
-        WIZARD_MEDIA_CHOICES,
-        None,
-        allow_empty=True,
-        error="Enter one of: movie, tv, both.",
-        default="movie",
-    )
-
-    mode = _prompt_choice_loop(
-        "Mode (dry-run/apply)",
-        WIZARD_MODE_CHOICES,
-        None,
-        allow_empty=True,
-        error="Enter one of: dry-run, apply.",
-        default="dry-run",
-    )
-
-    copy_mode = True
-    prune_empty_dirs = False
-    if mode == "apply":
-        copy_choice = _prompt_choice_loop(
-            "Copy or move? (copy/move)",
-            WIZARD_COPY_CHOICES,
-            None,
-            allow_empty=True,
-            error="Enter one of: copy, move.",
-            default="copy",
-        )
-        copy_mode = copy_choice == "copy"
-        if not copy_mode:
-            console.print("Warning: move will remove the original files from the incoming folder.")
-            prune_empty_dirs = _confirm("Prune empty folders after move? [y/N]", False, None, show_default=False)
-
-    auto_accept = _confirm("Auto-accept high-confidence matches? [Y/n]", True, None, show_default=False)
-    while True:
-        min_text = _prompt_text("Minimum confidence", str(DEFAULT_MIN_CONFIDENCE), None)
-        try:
-            min_confidence = float(min_text)
-        except ValueError:
-            console.print("Enter a number between 0 and 1.")
-            continue
-        if 0 <= min_confidence <= 1:
-            break
-        console.print("Enter a number between 0 and 1.")
-
-    use_cache = _confirm("Use cache? [Y/n]", True, None, show_default=False)
-    clear_cache = False
-    if use_cache:
-        clear_cache = _confirm("Clear cache before running? [y/N]", False, None, show_default=False)
-
-    interactive = _confirm("Interactive mode? [Y/n]", True, None, show_default=False)
-
-    command_config = BuildCommandConfig(
-        incoming=incoming,
-        library=library,
-        media_type=media_type,
-        mode=mode,
-        copy_mode=copy_mode,
-        extensions=DEFAULT_EXTENSIONS_LIST,
-        min_confidence=min_confidence,
-        limit=None,
-        interactive=interactive,
-        print_tree=False,
-        show_enrichment=False,
-        yes=auto_accept,
-        no_cache=not use_cache,
-        cache_file=None,
-        clear_cache=clear_cache,
-        report=None,
-        on_conflict="rename",
-        prune_empty_dirs=prune_empty_dirs,
-        quiet=False,
-        prune_ignore=DEFAULT_PRUNE_IGNORE,
-    )
-    command = _build_command(command_config)
-    console.print("Running:")
-    console.print(command)
-
-    organise(
-        incoming=incoming,
-        library=library,
-        mode=mode,
-        move=not copy_mode,
-        copy=copy_mode,
-        extensions=DEFAULT_EXTENSIONS,
-        min_confidence=min_confidence,
-        cache=None,
-        report=None,
-        yes=auto_accept,
-        limit=None,
-        print_tree=False,
-        interactive=interactive,
-        no_interactive=not interactive,
-        media_type=media_type,
-        no_cache=not use_cache,
-        clear_cache=clear_cache,
-        offline=False,
-        on_conflict="rename",
+    return wizard_flow.wizard_video(
         log_level=log_level,
         log_format=log_format,
         log_file=log_file,
-        prune_empty_dirs=prune_empty_dirs,
-        prune_ignore=DEFAULT_PRUNE_IGNORE,
-        quiet=False,
+        completion_enabled=COMPLETION_ENABLED,
+        console=console,
+        wizard_defaults_fn=_wizard_defaults,
+        prompt_non_overlapping_paths_fn=_prompt_non_overlapping_paths,
+        save_wizard_prefs_fn=_save_wizard_prefs,
+        detect_media_in_path_fn=_detect_media_in_path,
+        confirm_fn=_confirm,
+        wizard_music_fn=_wizard_music,
+        prompt_choice_loop_fn=_prompt_choice_loop,
+        prompt_text_fn=_prompt_text,
+        build_command_config_cls=BuildCommandConfig,
+        build_command_fn=_build_command,
+        organise_fn=organise,
+        default_music_extensions=DEFAULT_MUSIC_EXTENSIONS,
+        default_extensions_list=DEFAULT_EXTENSIONS_LIST,
+        default_min_confidence=DEFAULT_MIN_CONFIDENCE,
+        wizard_media_choices=WIZARD_MEDIA_CHOICES,
+        wizard_mode_choices=WIZARD_MODE_CHOICES,
+        wizard_copy_choices=WIZARD_COPY_CHOICES,
+        default_extensions=DEFAULT_EXTENSIONS,
+        default_prune_ignore=DEFAULT_PRUNE_IGNORE,
     )
 
 
@@ -4975,116 +4490,29 @@ def _wizard_music(
     log_format: str = "text",
     log_file: Path | None = None,
 ) -> None:
-    console.print("This will help you organise music into a Plex-friendly folder layout.")
-    if COMPLETION_ENABLED:
-        console.print("Tip: run python -m plexify.cli --install-completion to enable shell autocompletion.")
-
-    if source_override or library_override:
-        source_default = source_override
-        library_default = library_override
-    else:
-        source_default, library_default = _wizard_defaults("music")
-    source, library = _prompt_non_overlapping_paths(
-        label_source="Source",
-        label_library="Library",
-        source_default=source_default,
-        library_default=library_default,
-    )
-    _save_wizard_prefs("music", source, library)
-
-    audio_exts = {ext.strip().lstrip(".") for ext in DEFAULT_MUSIC_EXTENSIONS.split(",") if ext.strip()}
-    video_exts = {ext.strip().lstrip(".") for ext in DEFAULT_EXTENSIONS_LIST}
-    has_audio, has_video = _detect_media_in_path(source, audio_exts, video_exts)
-    if has_video and not has_audio:
-        if _confirm("This looks like video. Switch to video mode? [Y/n]", True, None, show_default=False):
-            _wizard_video(
-                log_level=log_level,
-                log_format=log_format,
-                log_file=log_file,
-            )
-            return
-
-    mode = _prompt_choice_loop(
-        "Mode (dry-run/apply)",
-        WIZARD_MODE_CHOICES,
-        None,
-        allow_empty=True,
-        error="Enter one of: dry-run, apply.",
-        default="dry-run",
-    )
-
-    copy_mode = False
-    cleanup_empty_dirs = False
-    cleanup_unknown_files = False
-    if mode == "apply":
-        copy_choice = _prompt_choice_loop(
-            "Copy or move? (copy/move)",
-            WIZARD_COPY_CHOICES,
-            None,
-            allow_empty=True,
-            error="Enter one of: copy, move.",
-            default="move",
-        )
-        copy_mode = copy_choice == "copy"
-        if not copy_mode:
-            console.print("Warning: move will remove the original files from the source folder.")
-            cleanup_empty_dirs = _confirm("Clean up empty folders after move? [y/N]", False, None, show_default=False)
-            if cleanup_empty_dirs:
-                cleanup_unknown_files = _confirm(
-                    "Remove unknown leftover files to help prune source folders? [y/N]",
-                    False,
-                    None,
-                    show_default=False,
-                )
-
-    verify = _confirm("Verify albums with MusicBrainz? [Y/n]", True, None, show_default=False)
-    keep_art = _confirm("Keep album artwork? [Y/n]", True, None, show_default=False)
-    keep_cue = _confirm("Keep .cue sidecars? [y/N]", False, None, show_default=False)
-    keep_log = _confirm("Keep .log sidecars? [y/N]", False, None, show_default=False)
-    mismatch_policy = _prompt_choice_loop(
-        "Track mismatch handling (ask/filename/filename-titles/order)",
-        WIZARD_MUSIC_MISMATCH_CHOICES,
-        None,
-        allow_empty=True,
-        error="Enter one of: ask, filename, filename-titles, order.",
-        default="ask",
-    )
-    plan_output = _prompt_choice_loop(
-        "Plan output (summary/preview/full)",
-        WIZARD_MUSIC_PLAN_OUTPUT_CHOICES,
-        None,
-        allow_empty=True,
-        error="Enter one of: summary, preview, full.",
-        default="summary",
-    )
-    verbose_plan = plan_output == "full"
-    plan_preview_tracks = 0
-    if plan_output == "preview":
-        while True:
-            plan_preview_tracks = _prompt_int("Preview tracks per album", 5, None)
-            if plan_preview_tracks > 0:
-                break
-            console.print("Enter a positive number.")
-
-    music(
-        source=source,
-        library=library,
-        apply=mode == "apply",
-        copy=copy_mode,
-        extensions=DEFAULT_MUSIC_EXTENSIONS,
-        verify=verify,
-        keep_art=keep_art,
-        keep_cue=keep_cue,
-        keep_log=keep_log,
-        offline=False,
-        cleanup_empty_dirs=cleanup_empty_dirs,
-        cleanup_unknown_files=cleanup_unknown_files,
-        verbose_plan=verbose_plan,
-        plan_preview_tracks=plan_preview_tracks,
-        mismatch_policy=mismatch_policy,
+    return wizard_flow.wizard_music(
+        source_override=source_override,
+        library_override=library_override,
         log_level=log_level,
         log_format=log_format,
         log_file=log_file,
+        completion_enabled=COMPLETION_ENABLED,
+        console=console,
+        wizard_defaults_fn=_wizard_defaults,
+        prompt_non_overlapping_paths_fn=_prompt_non_overlapping_paths,
+        save_wizard_prefs_fn=_save_wizard_prefs,
+        detect_media_in_path_fn=_detect_media_in_path,
+        confirm_fn=_confirm,
+        wizard_video_fn=_wizard_video,
+        prompt_choice_loop_fn=_prompt_choice_loop,
+        prompt_int_fn=_prompt_int,
+        music_fn=music,
+        default_music_extensions=DEFAULT_MUSIC_EXTENSIONS,
+        default_extensions_list=DEFAULT_EXTENSIONS_LIST,
+        wizard_mode_choices=WIZARD_MODE_CHOICES,
+        wizard_copy_choices=WIZARD_COPY_CHOICES,
+        wizard_music_mismatch_choices=WIZARD_MUSIC_MISMATCH_CHOICES,
+        wizard_music_plan_output_choices=WIZARD_MUSIC_PLAN_OUTPUT_CHOICES,
     )
 
 

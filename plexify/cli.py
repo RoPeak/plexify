@@ -20,9 +20,8 @@ from rich.tree import Tree
 
 from .cache import Cache, NullCache
 from . import music as music_util
-from .commands import confirmations as confirm_cmd
-from .commands import music_flow
-from .commands import plan_flow
+from .commands import candidate_flow, confirmations as confirm_cmd
+from .commands import music_flow, plan_flow, video_flow, wizard_flow
 from .command_builder import build_organise_command
 from .executor import execute_plans
 from .infer import InferredItem, infer_item
@@ -40,7 +39,6 @@ from .ui import format_path, rich_escape
 from .cache_policy import (
     cache_entry_compatible,
     cache_entry_confirmed_or_auto,
-    is_ambiguous_cache_title as cache_is_ambiguous_title,
     promote_reusable_with_conflict_tracking,
     reusable_cache_safe,
     should_promote_to_reusable,
@@ -51,8 +49,6 @@ from .util import (
     MovePlan,
     build_cache_key,
     iter_video_files,
-    json_dump,
-    json_load,
     make_search_query,
     movie_cache_key,
     now_timestamp,
@@ -398,26 +394,6 @@ def _initialise_logging(log_level: str, log_format: str, log_file: Path | None) 
     configure_logging(level=level, fmt=log_format, log_file=log_file)
 
 
-def _prompt_line(
-    *,
-    has_candidates: bool,
-    allow_enter_accept: bool,
-    allow_search: bool,
-    allow_manual: bool,
-    has_more: bool,
-    allow_back: bool,
-) -> str:
-    return prompting_ui.prompt_line(
-        has_candidates=has_candidates,
-        allow_enter_accept=allow_enter_accept,
-        allow_search=allow_search,
-        allow_manual=allow_manual,
-        has_more=has_more,
-        allow_back=allow_back,
-        prompt_base=PROMPT_BASE,
-    )
-
-
 def _build_search_query(title: str, hint: str | None) -> str:
     return plan_flow.build_search_query(title, hint)
 
@@ -494,30 +470,16 @@ def _strip_outer_quotes(value: str) -> str:
 
 
 def _wizard_prefs_path() -> Path:
-    return Path.home() / ".plexify" / "wizard.json"
+    return wizard_flow.wizard_prefs_path()
 
 
 def _load_wizard_prefs() -> dict[str, dict[str, str]]:
-    path = _wizard_prefs_path()
-    try:
-        data = json_load(path)
-    except (OSError, ValueError, TypeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    cleaned: dict[str, dict[str, str]] = {}
-    for key, value in data.items():
-        if not isinstance(value, dict):
-            continue
-        cleaned[key] = {str(k): str(v) for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
-    return cleaned
+    return wizard_flow.load_wizard_prefs()
 
 
 def _save_wizard_prefs(media_key: str, source: Path, library: Path) -> None:
-    prefs = _load_wizard_prefs()
-    prefs[media_key] = {"source": str(source), "library": str(library)}
     try:
-        json_dump(_wizard_prefs_path(), prefs)
+        wizard_flow.save_wizard_prefs(media_key, source, library)
     except OSError:
         log_event(logger, "wizard_prefs_save_failed", level=30, path=_wizard_prefs_path())
 
@@ -555,7 +517,7 @@ def _prompt_path(prompt: str, default: str | None, *, directories_only: bool) ->
         try:
             from prompt_toolkit.completion import PathCompleter
             from prompt_toolkit.shortcuts import prompt as pt_prompt
-        except Exception:  # noqa: BLE001
+        except (ImportError, OSError):
             is_tty = False
         else:
             if not _path_prompt_tip_shown:
@@ -808,7 +770,7 @@ def _select_candidate(
     item: InferredItem | None = None,
     allow_enter_accept: bool = True,
 ) -> Candidate | None | str:
-    return prompting_ui.select_candidate(
+    return candidate_flow.select_candidate(
         media_type=media_type,
         candidates=candidates,
         has_more=has_more,
@@ -817,17 +779,10 @@ def _select_candidate(
         allow_back=allow_back,
         item=item,
         no_more_results_message=NO_MORE_RESULTS_MESSAGE,
+        prompt_base=PROMPT_BASE,
         prompt_choice=lambda prompt, default: _prompt_choice(prompt, default, progress, show_default=False),
         safe_print=lambda message: _safe_print(message, progress),
         print_candidates_fn=lambda mt, cands, current_item: _print_candidates(mt, cands, progress, item=current_item),
-        prompt_line_fn=lambda has_cands, can_enter, can_search, can_manual, more, can_back: _prompt_line(
-            has_candidates=has_cands,
-            allow_enter_accept=can_enter,
-            allow_search=can_search,
-            allow_manual=can_manual,
-            has_more=more,
-            allow_back=can_back,
-        ),
         allow_enter_accept=allow_enter_accept,
     )
 
@@ -1425,10 +1380,6 @@ def _cache_entry_compatible(inferred_year: int | None, cached_year: int | None) 
     return cache_entry_compatible(inferred_year, cached_year)
 
 
-def _is_ambiguous_cache_title(title: str) -> bool:
-    return cache_is_ambiguous_title(title)
-
-
 def _reusable_cache_safe(title: str, year: int | None) -> bool:
     return reusable_cache_safe(title, year)
 
@@ -1485,11 +1436,7 @@ def _auto_acceptable(
 def _reusable_cache_hit_looks_risky(item: InferredItem, candidates: list[Candidate], min_confidence: float) -> bool:
     if not candidates:
         return False
-    if _is_ambiguous_cache_title(item.title):
-        return True
-    if item.year is None:
-        return True
-    return candidates[0].confidence < min_confidence
+    return video_flow.reusable_cache_hit_looks_risky(item, candidates[0].confidence, min_confidence)
 
 
 def _resolve_destination(
@@ -2918,6 +2865,17 @@ def _process_item(
             outcome = "confirmed"
         _record_stat(stats, outcome)
         _print_choice(selected, progress)
+        log_event(
+            logger,
+            "candidate_selected",
+            media_type="tv",
+            selection_mode=outcome,
+            source=selected.source,
+            path=item.path,
+            title=selected.title,
+            year=selected.year,
+            confidence=selected.confidence,
+        )
         _maybe_fetch_episode_title(item, selected, session_tv, episode_cache, bump_confidence=False)
         metadata = selected.metadata
         confirmed_by_user = outcome in {"confirmed", "manual"}
@@ -3501,6 +3459,17 @@ def _process_item(
         outcome = "confirmed"
     _record_stat(stats, outcome)
     _print_choice(selected, progress)
+    log_event(
+        logger,
+        "candidate_selected",
+        media_type="movie",
+        selection_mode=outcome,
+        source=selected.source,
+        path=item.path,
+        title=selected.title,
+        year=selected.year,
+        confidence=selected.confidence,
+    )
     metadata = selected.metadata
     confirmed_by_user = outcome in {"confirmed", "manual"}
     promote_reusable = _should_promote_to_reusable(selection_mode=outcome, selected=selected, candidates=candidates)

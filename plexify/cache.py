@@ -40,33 +40,37 @@ def _upgrade_cache_data(data: Any) -> dict[str, Any]:
 
 
 class Cache:
+    _MUTABLE_SECTIONS = ("shows", "movies", "enrichment", "music")
+
     def __init__(self, path: Path) -> None:
         self.path = path
         self.data = _upgrade_cache_data(json_load(path))
         self._dirty = False
         self._batch_depth = 0
+        self._pending_set: dict[str, dict[str, dict[str, Any]]] = {
+            section: {} for section in self._MUTABLE_SECTIONS
+        }
+        self._pending_delete: dict[str, set[str]] = {
+            section: set() for section in self._MUTABLE_SECTIONS
+        }
 
     def get_show(self, key: str) -> dict[str, Any] | None:
         return self.data.get("shows", {}).get(key)
 
     def set_show(self, key: str, value: dict[str, Any]) -> None:
-        self.data.setdefault("shows", {})[key] = value
-        self._dirty = True
+        self._mark_set("shows", key, value)
 
     def get_movie(self, key: str) -> dict[str, Any] | None:
         return self.data.get("movies", {}).get(key)
 
     def set_movie(self, key: str, value: dict[str, Any]) -> None:
-        self.data.setdefault("movies", {})[key] = value
-        self._dirty = True
+        self._mark_set("movies", key, value)
 
     def delete_show(self, key: str) -> None:
-        self.data.setdefault("shows", {}).pop(key, None)
-        self._dirty = True
+        self._mark_delete("shows", key)
 
     def delete_movie(self, key: str) -> None:
-        self.data.setdefault("movies", {}).pop(key, None)
-        self._dirty = True
+        self._mark_delete("movies", key)
 
     def _acquire_lock(self) -> Path | None:
         lock_path = Path(str(self.path) + ".lock")
@@ -89,16 +93,74 @@ class Cache:
     def save(self, force: bool = False) -> None:
         self.save_with_status(force=force)
 
+    def _mark_set(self, section: str, key: str, value: dict[str, Any]) -> None:
+        self.data.setdefault(section, {})[key] = value
+        self._pending_set[section][key] = value
+        self._pending_delete[section].discard(key)
+        self._dirty = True
+
+    def _mark_delete(self, section: str, key: str) -> None:
+        self.data.setdefault(section, {}).pop(key, None)
+        self._pending_delete[section].add(key)
+        self._pending_set[section].pop(key, None)
+        self._dirty = True
+
+    def _has_pending_ops(self) -> bool:
+        return any(self._pending_set[section] for section in self._MUTABLE_SECTIONS) or any(
+            self._pending_delete[section] for section in self._MUTABLE_SECTIONS
+        )
+
+    def _clear_pending_ops(self) -> None:
+        for section in self._MUTABLE_SECTIONS:
+            self._pending_set[section].clear()
+            self._pending_delete[section].clear()
+
+    def _merge_pending_ops_into(self, base_data: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+        set_counts: dict[str, int] = {}
+        delete_counts: dict[str, int] = {}
+        for section in self._MUTABLE_SECTIONS:
+            target = base_data.setdefault(section, {})
+            pending_set = self._pending_set[section]
+            pending_delete = self._pending_delete[section]
+            for key in pending_delete:
+                target.pop(key, None)
+            for key, value in pending_set.items():
+                target[key] = value
+            set_counts[section] = len(pending_set)
+            delete_counts[section] = len(pending_delete)
+        base_data["schema_version"] = CACHE_SCHEMA_VERSION
+        return set_counts, delete_counts
+
     def save_with_status(self, force: bool = False) -> bool:
         if self._batch_depth > 0 and not force:
             return True
-        if not self._dirty and not force:
+        if not self._dirty and not force and not self._has_pending_ops():
             return True
         lock_path = self._acquire_lock()
         if lock_path is None:
+            logger.warning("cache_save_skipped_lock_timeout", extra={"path": str(self.path)})
             return False
         try:
-            json_dump(self.path, self.data)
+            if force and not self._has_pending_ops():
+                merged = _upgrade_cache_data(self.data)
+                json_dump(self.path, merged)
+                self.data = merged
+                self._dirty = False
+                return True
+
+            merged = _upgrade_cache_data(json_load(self.path))
+            set_counts, delete_counts = self._merge_pending_ops_into(merged)
+            json_dump(self.path, merged)
+            logger.info(
+                "cache_save_merge_applied",
+                extra={
+                    "path": str(self.path),
+                    "set_counts": set_counts,
+                    "delete_counts": delete_counts,
+                },
+            )
+            self.data = merged
+            self._clear_pending_ops()
             self._dirty = False
             return True
         finally:
@@ -111,19 +173,16 @@ class Cache:
         return self.data.get("enrichment", {}).get(key)
 
     def set_enrichment(self, key: str, value: dict[str, Any]) -> None:
-        self.data.setdefault("enrichment", {})[key] = value
-        self._dirty = True
+        self._mark_set("enrichment", key, value)
 
     def get_music(self, key: str) -> dict[str, Any] | None:
         return self.data.get("music", {}).get(key)
 
     def set_music(self, key: str, value: dict[str, Any]) -> None:
-        self.data.setdefault("music", {})[key] = value
-        self._dirty = True
+        self._mark_set("music", key, value)
 
     def delete_music(self, key: str) -> None:
-        self.data.setdefault("music", {}).pop(key, None)
-        self._dirty = True
+        self._mark_delete("music", key)
 
     @contextmanager
     def batch(self):

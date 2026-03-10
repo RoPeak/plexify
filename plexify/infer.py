@@ -26,11 +26,14 @@ TV_HINT_RE = re.compile(r"\b(?:series|season|seaon|seson|seasn|episode|ep)\b", r
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 YEAR_RANGE_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*[-–]\s*(19\d{2}|20\d{2})(?!\d)")
 LEADING_EPISODE_RE = re.compile(r"^\s*(\d{1,3})\s*[-_. ]+\s*(.+?)\s*$")
-LEADING_EPISODE_RANGE_RE = re.compile(r"^\s*(\d{1,3})\s*[-_. ]+\s*(\d{1,3})(?:\s*[-_. ]+.*)?\s*$")
+LEADING_EPISODE_RANGE_RE = re.compile(
+    r"^\s*(\d{1,3})\s*(?:[-_. ]+|(?:and|&|to)\s+)\s*(\d{1,3})(?:\s*[-_. ]+.*)?\s*$",
+    re.IGNORECASE,
+)
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".mov", ".ts"}
 GENERIC_MOVIE_STEM_RE = re.compile(
     r"^(?:"
-    r"[A-Za-z]\d+[_\-\s]*t\d+"
+    r"[A-Za-z]{1,4}\d+[_\-\s]*t\d+"
     r"|vts[_\-\s]*\d+(?:[_\-\s]*\d+)?"
     r"|disc[_\-\s]*\d+"
     r"|track[_\-\s]*\d+"
@@ -155,6 +158,40 @@ def _starts_with_number(value: str) -> bool:
 
 def _prefer_known_int(value: Optional[int], fallback: Optional[int]) -> Optional[int]:
     return value if value is not None else fallback
+
+
+def _coerce_guess_int(value: object) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            return int(text)
+        return None
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            coerced = _coerce_guess_int(item)
+            if coerced is not None:
+                return coerced
+    return None
+
+
+def _coerce_guess_episode_end(value: object, start: Optional[int]) -> Optional[int]:
+    if start is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        return None
+    episodes: list[int] = []
+    for item in value:
+        coerced = _coerce_guess_int(item)
+        if coerced is not None:
+            episodes.append(coerced)
+    if len(episodes) < 2:
+        return None
+    end = max(episodes)
+    if end <= start:
+        return None
+    return end
 
 
 def _clean_title_from_stem(stem: str) -> str:
@@ -323,6 +360,8 @@ def _extract_episode_title(stem: str, episode: Optional[int]) -> Optional[str]:
             continue
         if lower in {"season", "series", "episode", "ep"}:
             continue
+        if lower in {"and", "to", "&"}:
+            continue
         if re.fullmatch(r"s\d{1,2}e\d{1,3}", lower):
             continue
         if re.fullmatch(r"\d{1,3}", lower):
@@ -454,12 +493,15 @@ def infer_item(path: Path) -> InferredItem:
         media_type = "tv"
 
     if guess.get("type") == "episode":
-        guessed_season = guess.get("season")
-        guessed_episode = guess.get("episode")
+        guessed_season = _coerce_guess_int(guess.get("season"))
+        guessed_episode_raw = guess.get("episode")
+        guessed_episode = _coerce_guess_int(guessed_episode_raw)
         if has_tv_context or has_tv_hint or season is not None or guessed_season is not None or explicit_episode:
             media_type = "tv"
             season = _prefer_known_int(season, guessed_season)
             episode = _prefer_known_int(episode, guessed_episode)
+            if episode_end is None:
+                episode_end = _coerce_guess_episode_end(guessed_episode_raw, episode)
 
     if episode is None and (media_type == "tv" or has_tv_context or has_tv_hint or season is not None):
         episode_candidate = infer_tv_episode_from_stem(stem_for_tv)

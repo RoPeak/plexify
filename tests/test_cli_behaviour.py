@@ -341,6 +341,89 @@ def test_movie_candidates_retries_with_fallback_query(monkeypatch, tmp_path: Pat
     assert page.candidates[0].title == "Jack Reacher: Never Go Back"
 
 
+def test_prompt_search_blank_query_keeps_existing_title(monkeypatch, tmp_path: Path) -> None:
+    answers = iter(["   ", ""])
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: next(answers))
+    item = InferredItem(path=tmp_path / "Wallace.mkv", media_type="movie", title="Wallace and Gromit", year=None)
+    updated, search_query = cli._prompt_search(item, progress=None)
+    assert updated.title == "Wallace and Gromit"
+    assert search_query == "wallace and gromit"
+
+
+def test_movie_candidates_do_not_fallback_to_unknown_when_title_present(monkeypatch, tmp_path: Path) -> None:
+    queries: list[str] = []
+
+    def _fake_search(query: str, *_args, **_kwargs):
+        queries.append(query)
+        return []
+
+    monkeypatch.setattr(cli.plan_flow, "build_movie_fallback_queries", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli.wikidata, "search", _fake_search)
+
+    item = InferredItem(
+        path=tmp_path / "Wallace and Gromit.mkv",
+        media_type="movie",
+        title="Wallace and Gromit",
+        year=None,
+        episode_title=None,
+    )
+    page = cli._movie_candidates(
+        item=item,
+        session=requests.Session(),
+        cache=Cache(tmp_path / "cache.json"),
+        show_cache=False,
+        cache_key="movie|path|wallace-and-gromit|unknown",
+        search_query="",
+    )
+
+    assert queries
+    assert all(query.casefold() != "unknown" for query in queries)
+    assert page.candidates == []
+
+
+def test_movie_candidates_reuse_entity_cache_across_calls(monkeypatch, tmp_path: Path) -> None:
+    fetch_calls = {"count": 0}
+
+    def _fake_search(*_args, **_kwargs):
+        return [cli.wikidata.WikidataCandidate(qid="Q42", label="Movie", description=None)]
+
+    def _fake_fetch_entity(qid: str, *_args, **_kwargs):
+        fetch_calls["count"] += 1
+        return cli.wikidata.WikidataFilm(qid=qid, title="Movie", year=2001, is_film=True)
+
+    monkeypatch.setattr(cli.wikidata, "search", _fake_search)
+    monkeypatch.setattr(cli.wikidata, "fetch_entity", _fake_fetch_entity)
+
+    entity_cache: dict[str, cli.wikidata.WikidataFilm] = {}
+    session = requests.Session()
+    cache = Cache(tmp_path / "cache.json")
+
+    first = InferredItem(path=tmp_path / "A.mkv", media_type="movie", title="Movie", year=None, episode_title=None)
+    second = InferredItem(path=tmp_path / "B.mkv", media_type="movie", title="Movie", year=None, episode_title=None)
+
+    first_page = cli._movie_candidates(
+        item=first,
+        session=session,
+        cache=cache,
+        show_cache=False,
+        cache_key="movie|path|a|unknown",
+        movie_entity_cache=entity_cache,
+    )
+    second_page = cli._movie_candidates(
+        item=second,
+        session=session,
+        cache=cache,
+        show_cache=False,
+        cache_key="movie|path|b|unknown",
+        movie_entity_cache=entity_cache,
+    )
+
+    assert fetch_calls["count"] == 1
+    assert first_page.candidates and second_page.candidates
+    assert first_page.candidates[0].title == "Movie"
+    assert second_page.candidates[0].title == "Movie"
+
+
 def test_reusable_movie_cache_ignored_when_stem_has_extra_tokens(monkeypatch, tmp_path: Path) -> None:
     def _fake_search(*_args, **_kwargs):
         return []

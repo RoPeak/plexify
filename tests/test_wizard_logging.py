@@ -37,7 +37,7 @@ def test_wizard_prompts_logging_and_passes_to_video_flow(monkeypatch) -> None:
     assert captured["log_file"] == Path(".plexify/custom.log")
 
 
-def test_wizard_video_passes_offline_false_to_organise(monkeypatch) -> None:
+def test_wizard_video_passes_safe_defaults_to_runtime_organise(monkeypatch) -> None:
     incoming = Path("plexify")
     library = Path("tests")
 
@@ -59,14 +59,55 @@ def test_wizard_video_passes_offline_false_to_organise(monkeypatch) -> None:
 
     captured: dict[str, object] = {}
 
-    def _fake_organise(**kwargs):
-        captured.update(kwargs)
+    def _fake_run_organise(options: cli.OrganiseOptions):
+        captured["offline"] = options.offline
+        captured["strict_safe"] = options.strict_safe
+        captured["allow_risky_enter_accept"] = options.allow_risky_enter_accept
 
-    monkeypatch.setattr(cli, "organise", _fake_organise)
+    monkeypatch.setattr(cli, "run_organise", _fake_run_organise)
 
     cli._wizard_video(log_level="INFO", log_format="text", log_file=None)
 
     assert captured.get("offline") is False
+    assert captured.get("strict_safe") is False
+    assert captured.get("allow_risky_enter_accept") is False
+
+
+def test_wizard_video_command_and_runtime_flags_stay_aligned(monkeypatch) -> None:
+    incoming = Path("plexify")
+    library = Path("tests")
+
+    monkeypatch.setattr(cli, "_prompt_non_overlapping_paths", lambda **_kwargs: (incoming, library))
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_detect_media_in_path", lambda *_args, **_kwargs: (False, True))
+    monkeypatch.setattr(
+        cli,
+        "_prompt_choice_loop",
+        lambda prompt, *_args, **_kwargs: ("movie" if prompt.startswith("Media type") else "dry-run"),
+    )
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: str(cli.DEFAULT_MIN_CONFIDENCE))
+
+    captured: dict[str, object] = {}
+
+    def _fake_build_command(config: cli.BuildCommandConfig) -> str:
+        captured["command_strict_safe"] = config.strict_safe
+        captured["command_allow_risky_enter_accept"] = config.allow_risky_enter_accept
+        return "python -m plexify.cli organise"
+
+    def _fake_run_organise(options: cli.OrganiseOptions) -> None:
+        captured["runtime_strict_safe"] = options.strict_safe
+        captured["runtime_allow_risky_enter_accept"] = options.allow_risky_enter_accept
+
+    monkeypatch.setattr(cli, "_build_command", _fake_build_command)
+    monkeypatch.setattr(cli, "run_organise", _fake_run_organise)
+
+    cli._wizard_video(log_level="INFO", log_format="text", log_file=None)
+
+    assert captured["command_strict_safe"] is False
+    assert captured["runtime_strict_safe"] is False
+    assert captured["command_allow_risky_enter_accept"] is False
+    assert captured["runtime_allow_risky_enter_accept"] is False
 
 
 def test_wizard_keeps_log_file_none_when_not_enabled(monkeypatch) -> None:

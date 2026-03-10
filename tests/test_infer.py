@@ -99,6 +99,14 @@ def test_infer_movie_generic_stem_uses_parent_folder_title() -> None:
     assert item.year == 2013
 
 
+def test_infer_movie_generic_stem_with_multi_letter_prefix_uses_parent_folder_title() -> None:
+    path = Path("Wallace and Gromit The Curse of the Were-Rabbit (2005)/PC1_t05.mkv")
+    item = infer_item(path)
+    assert item.media_type == "movie"
+    assert item.title == "Wallace and Gromit The Curse of the Were-Rabbit"
+    assert item.year == 2005
+
+
 def test_infer_tv_series_separator_pattern() -> None:
     path = Path("Show/Series_6_-_01.mkv")
     item = infer_item(path)
@@ -312,6 +320,32 @@ def test_infer_tv_episode_range_from_leading_numbers(tmp_path: Path) -> None:
     assert item.episode == 21
     assert item.episode_end == 22
     assert item.episode_title == "Finale"
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_start", "expected_end"),
+    [
+        ("4 and 5.mkv", 4, 5),
+        ("11 & 12.mkv", 11, 12),
+        ("17 to 18.mkv", 17, 18),
+    ],
+)
+def test_infer_tv_episode_range_from_word_or_symbol_separators(
+    tmp_path: Path, filename: str, expected_start: int, expected_end: int
+) -> None:
+    season_dir = tmp_path / "The Office" / "Season 6"
+    season_dir.mkdir(parents=True)
+    (season_dir / "1.mkv").write_text("x", encoding="utf-8")
+    episode_file = season_dir / filename
+    episode_file.write_text("x", encoding="utf-8")
+
+    item = infer_item(episode_file)
+    assert item.media_type == "tv"
+    assert item.title == "The Office"
+    assert item.season == 6
+    assert item.episode == expected_start
+    assert item.episode_end == expected_end
+    assert item.episode_title is None
 
 
 def test_infer_tv_episode_range_from_chained_sxxeyy_token() -> None:

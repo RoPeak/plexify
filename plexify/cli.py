@@ -233,6 +233,35 @@ class BuildCommandConfig:
     strict_safe: bool = False
 
 
+@dataclass
+class OrganiseOptions:
+    incoming: Path
+    library: Path
+    mode: str
+    copy_mode: bool
+    extensions: str
+    min_confidence: float
+    cache: Path | None
+    report: Path | None
+    yes: bool
+    limit: int | None
+    print_tree: bool
+    interactive_mode: bool
+    media_type: str
+    no_cache: bool
+    clear_cache: bool
+    offline: bool
+    on_conflict: str
+    log_level: str
+    log_format: str
+    log_file: Path | None
+    prune_empty_dirs: bool
+    prune_ignore: str
+    quiet: bool
+    allow_risky_enter_accept: bool = False
+    strict_safe: bool = False
+
+
 @dataclass(frozen=True)
 class MusicPlannedTrack:
     source: Path
@@ -978,6 +1007,7 @@ def _movie_candidates(
     limit: int = 5,
     offline: bool = False,
     interactive: bool = False,
+    movie_entity_cache: dict[str, wikidata.WikidataFilm] | None = None,
 ) -> CandidatePage:
     return video_flow.movie_candidates(
         item=item,
@@ -992,6 +1022,7 @@ def _movie_candidates(
         limit=limit,
         offline=offline,
         interactive=interactive,
+        movie_entity_cache=movie_entity_cache,
         movie_cache_key_fn=movie_cache_key,
         reusable_movie_cache_safe_fn=_reusable_movie_cache_safe,
         cache_entry_confirmed_or_auto_fn=_cache_entry_confirmed_or_auto,
@@ -1050,7 +1081,8 @@ def _prompt_manual_movie(item: InferredItem, progress: Progress | None) -> tuple
 
 
 def _prompt_search(item: InferredItem, progress: Progress | None) -> tuple[InferredItem, str]:
-    query = _prompt_text("Search query", item.title, progress)
+    raw_query = _prompt_text("Search query", item.title, progress)
+    query = raw_query.strip() or item.title
     hint = _prompt_text("Hint (optional, director/cast/keyword)", "", progress, show_default=False)
     return _with_title(item, query), _build_search_query(query, hint)
 
@@ -2044,6 +2076,7 @@ def _process_item(
     allow_risky_enter_accept: bool = False,
     media_type_overrides: dict[str, str] | None = None,
     tv_search_cache: dict[str, list[tvmaze.TVMazeShow]] | None = None,
+    movie_entity_cache: dict[str, wikidata.WikidataFilm] | None = None,
 ) -> tuple[MovePlan | None, bool]:
     item, override_key = _resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
     folder_show_key = tv_show_folder_cache_key(item.path, incoming_root) if item.media_type == "tv" else None
@@ -2138,6 +2171,7 @@ def _process_item(
                         allow_risky_enter_accept=allow_risky_enter_accept,
                         media_type_overrides=media_type_overrides,
                         tv_search_cache=tv_search_cache,
+                        movie_entity_cache=movie_entity_cache,
                     )
                 _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
                 empty_choice = _select_candidate(
@@ -2635,6 +2669,7 @@ def _process_item(
             progress=progress,
             offline=offline,
             interactive=interactive,
+            movie_entity_cache=movie_entity_cache,
         ),
         interactive,
         progress,
@@ -2689,6 +2724,7 @@ def _process_item(
                     allow_risky_enter_accept=allow_risky_enter_accept,
                     media_type_overrides=media_type_overrides,
                     tv_search_cache=tv_search_cache,
+                    movie_entity_cache=movie_entity_cache,
                 )
             _safe_print(f"No candidates found for {rich_escape(item.title)}.", progress)
             empty_choice = _select_candidate(
@@ -2719,6 +2755,7 @@ def _process_item(
                         progress=progress,
                         offline=offline,
                         interactive=interactive,
+                        movie_entity_cache=movie_entity_cache,
                     ),
                     interactive,
                     progress,
@@ -2753,6 +2790,7 @@ def _process_item(
                             progress=progress,
                             offline=offline,
                             interactive=interactive,
+                            movie_entity_cache=movie_entity_cache,
                         ),
                         interactive,
                         progress,
@@ -2788,6 +2826,7 @@ def _process_item(
                             progress=progress,
                             offline=offline,
                             interactive=interactive,
+                            movie_entity_cache=movie_entity_cache,
                         ),
                         interactive,
                         progress,
@@ -2903,6 +2942,7 @@ def _process_item(
                     progress=progress,
                     offline=offline,
                     interactive=interactive,
+                    movie_entity_cache=movie_entity_cache,
                 ),
                 interactive,
                 progress,
@@ -2937,6 +2977,7 @@ def _process_item(
                         progress=progress,
                         offline=offline,
                         interactive=interactive,
+                        movie_entity_cache=movie_entity_cache,
                     ),
                     interactive,
                     progress,
@@ -2963,6 +3004,7 @@ def _process_item(
                     progress=progress,
                     offline=offline,
                     interactive=interactive,
+                    movie_entity_cache=movie_entity_cache,
                 ),
                 interactive,
                 progress,
@@ -2996,6 +3038,7 @@ def _process_item(
                         progress=progress,
                         offline=offline,
                         interactive=interactive,
+                        movie_entity_cache=movie_entity_cache,
                     ),
                     interactive,
                     progress,
@@ -3117,52 +3160,60 @@ def _process_item(
     return plan, collision
 
 
-@app.command()
-def organise(
-    incoming: Path = typer.Option(..., exists=True, file_okay=False, dir_okay=True, help="Folder to scan"),
-    library: Path = typer.Option(..., file_okay=False, dir_okay=True, help="Library root"),
-    mode: str = typer.Option("dry-run", help="dry-run or apply"),
-    move: bool = typer.Option(False, "--move", help="Move files (overrides default copy)", is_flag=True),
-    copy: bool = typer.Option(False, "--copy", help="Copy files (default behaviour for apply)", is_flag=True),
-    extensions: str = typer.Option(DEFAULT_EXTENSIONS, help="Comma-separated extensions"),
-    min_confidence: float = typer.Option(DEFAULT_MIN_CONFIDENCE, help="Minimum confidence for auto acceptance"),
-    cache: Path = typer.Option(None, help="Cache path"),
-    report: Path = typer.Option(None, help="Report path"),
-    yes: bool = typer.Option(False, "--yes", help="Auto-accept top result when confidence >= 0.90", is_flag=True),
-    limit: int = typer.Option(None, help="Limit number of files"),
-    print_tree: bool = typer.Option(False, "--print-tree", help="Print planned destination tree", is_flag=True),
-    interactive: bool = typer.Option(False, "--interactive", help="Force interactive mode", is_flag=True),
-    no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive prompts", is_flag=True),
-    media_type: str = typer.Option("auto", "--media-type", help="Filter by media type: auto/movie/tv"),
-    no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes", is_flag=True),
-    clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running", is_flag=True),
-    offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run", is_flag=True),
-    quiet: bool = typer.Option(False, "--quiet", "--batch", help="Reduce per-file output; show errors and summary", is_flag=True),
-    on_conflict: str = typer.Option("rename", "--on-conflict", help="On destination conflict: rename/skip/overwrite"),
-    log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
-    log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
-    log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
-    prune_empty_dirs: bool = typer.Option(
-        False, "--prune-empty-dirs", help="Remove empty folders after move", is_flag=True
-    ),
-    prune_ignore: str = typer.Option(
-        DEFAULT_PRUNE_IGNORE,
-        "--prune-ignore",
-        help="Comma-separated ignorable filenames for prune-empty-dirs",
-    ),
-    allow_risky_enter_accept: bool = typer.Option(
-        False,
-        "--allow-risky-enter-accept",
-        help="Allow Enter to accept top match in risky candidate prompts",
-        is_flag=True,
-    ),
-    strict_safe: bool = typer.Option(
-        False,
-        "--strict-safe",
-        help="Use conservative matching defaults (disable cache reuse, disable auto-accept, higher confidence floor)",
-        is_flag=True,
-    ),
-) -> None:
+def _apply_strict_safe_policy(options: OrganiseOptions) -> None:
+    if not isinstance(options.strict_safe, bool):
+        options.strict_safe = False
+    if not options.strict_safe:
+        return
+    options.yes = False
+    options.allow_risky_enter_accept = False
+    options.no_cache = True
+    options.min_confidence = max(options.min_confidence, 0.95)
+
+
+def _coerce_bool_flag(value: Any, *, default: bool = False) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def run_organise(options: OrganiseOptions) -> None:
+    incoming = options.incoming
+    library = options.library
+    mode = options.mode
+    copy_mode = options.copy_mode
+    extensions = options.extensions
+    min_confidence = options.min_confidence
+    cache = options.cache
+    report = options.report
+    yes = options.yes
+    limit = options.limit
+    print_tree = options.print_tree
+    interactive_mode = options.interactive_mode
+    media_type = options.media_type
+    no_cache = options.no_cache
+    clear_cache = options.clear_cache
+    offline = options.offline
+    quiet = options.quiet
+    on_conflict = options.on_conflict
+    log_level = options.log_level
+    log_format = options.log_format
+    log_file = options.log_file
+    prune_empty_dirs = options.prune_empty_dirs
+    prune_ignore = options.prune_ignore
+    allow_risky_enter_accept = options.allow_risky_enter_accept
+    strict_safe = options.strict_safe
+    yes = _coerce_bool_flag(yes, default=False)
+    print_tree = _coerce_bool_flag(print_tree, default=False)
+    interactive_mode = _coerce_bool_flag(interactive_mode, default=True)
+    no_cache = _coerce_bool_flag(no_cache, default=False)
+    clear_cache = _coerce_bool_flag(clear_cache, default=False)
+    offline = _coerce_bool_flag(offline, default=False)
+    quiet = _coerce_bool_flag(quiet, default=False)
+    prune_empty_dirs = _coerce_bool_flag(prune_empty_dirs, default=False)
+    allow_risky_enter_accept = _coerce_bool_flag(allow_risky_enter_accept, default=False)
+    if not isinstance(min_confidence, (int, float)):
+        min_confidence = DEFAULT_MIN_CONFIDENCE
+    if not isinstance(extensions, str):
+        extensions = DEFAULT_EXTENSIONS
     global _cache_save_warning_shown
     _cache_save_warning_shown = False
     _initialise_logging(log_level, log_format, log_file)
@@ -3177,12 +3228,13 @@ def organise(
         mode=mode,
     )
 
-    if move and copy:
-        console.print("Choose only one of --move or --copy.")
-        raise typer.Exit(code=2)
-    if interactive and no_interactive:
-        console.print("Choose only one of --interactive or --no-interactive.")
-        raise typer.Exit(code=2)
+    _apply_strict_safe_policy(options)
+    yes = _coerce_bool_flag(options.yes, default=False)
+    no_cache = _coerce_bool_flag(options.no_cache, default=False)
+    min_confidence = options.min_confidence if isinstance(options.min_confidence, (int, float)) else DEFAULT_MIN_CONFIDENCE
+    allow_risky_enter_accept = _coerce_bool_flag(options.allow_risky_enter_accept, default=False)
+    strict_safe = _coerce_bool_flag(options.strict_safe, default=False)
+
     if mode not in {"dry-run", "apply"}:
         console.print("Invalid mode. Use dry-run or apply.")
         raise typer.Exit(code=2)
@@ -3193,10 +3245,6 @@ def organise(
         console.print("Invalid on-conflict policy. Use rename, skip, or overwrite.")
         raise typer.Exit(code=2)
     if strict_safe:
-        yes = False
-        allow_risky_enter_accept = False
-        no_cache = True
-        min_confidence = max(min_confidence, 0.95)
         console.print("Strict-safe mode enabled: cache disabled, auto-accept disabled, confidence floor set to 0.95.")
 
     try:
@@ -3205,7 +3253,6 @@ def organise(
         _print_overlap_error(exc)
         raise typer.Exit(code=2)
 
-    interactive_mode = True if interactive else not no_interactive
     if not isinstance(quiet, bool):
         quiet = False
     if not isinstance(prune_ignore, str):
@@ -3215,20 +3262,8 @@ def organise(
     if offline:
         console.print("Offline mode enabled: network lookups disabled.")
         log_event(logger, "offline_mode_enabled", run_id=run_id, command="organise")
-    if mode == "apply":
-        if move:
-            copy_mode = False
-        elif copy:
-            copy_mode = True
-        else:
-            copy_mode = True
-    else:
-        if move:
-            copy_mode = False
-        elif copy:
-            copy_mode = True
-        else:
-            copy_mode = True
+    if not isinstance(copy_mode, bool):
+        copy_mode = True
 
     ignored_prune_files = _parse_prune_ignore(prune_ignore)
     cache_path = cache or library / ".plexify" / "cache.json"
@@ -3417,6 +3452,105 @@ def organise(
         applied=apply_mode,
     )
     raise typer.Exit(code=0)
+
+
+@app.command()
+def organise(
+    incoming: Path = typer.Option(..., exists=True, file_okay=False, dir_okay=True, help="Folder to scan"),
+    library: Path = typer.Option(..., file_okay=False, dir_okay=True, help="Library root"),
+    mode: str = typer.Option("dry-run", help="dry-run or apply"),
+    move: bool = typer.Option(False, "--move", help="Move files (overrides default copy)", is_flag=True),
+    copy: bool = typer.Option(False, "--copy", help="Copy files (default behaviour for apply)", is_flag=True),
+    extensions: str = typer.Option(DEFAULT_EXTENSIONS, help="Comma-separated extensions"),
+    min_confidence: float = typer.Option(DEFAULT_MIN_CONFIDENCE, help="Minimum confidence for auto acceptance"),
+    cache: Path = typer.Option(None, help="Cache path"),
+    report: Path = typer.Option(None, help="Report path"),
+    yes: bool = typer.Option(False, "--yes", help="Auto-accept top result when confidence >= 0.90", is_flag=True),
+    limit: int = typer.Option(None, help="Limit number of files"),
+    print_tree: bool = typer.Option(False, "--print-tree", help="Print planned destination tree", is_flag=True),
+    interactive: bool = typer.Option(False, "--interactive", help="Force interactive mode", is_flag=True),
+    no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive prompts", is_flag=True),
+    media_type: str = typer.Option("auto", "--media-type", help="Filter by media type: auto/movie/tv"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes", is_flag=True),
+    clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running", is_flag=True),
+    offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run", is_flag=True),
+    quiet: bool = typer.Option(False, "--quiet", "--batch", help="Reduce per-file output; show errors and summary", is_flag=True),
+    on_conflict: str = typer.Option("rename", "--on-conflict", help="On destination conflict: rename/skip/overwrite"),
+    log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
+    log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
+    log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
+    prune_empty_dirs: bool = typer.Option(
+        False, "--prune-empty-dirs", help="Remove empty folders after move", is_flag=True
+    ),
+    prune_ignore: str = typer.Option(
+        DEFAULT_PRUNE_IGNORE,
+        "--prune-ignore",
+        help="Comma-separated ignorable filenames for prune-empty-dirs",
+    ),
+    allow_risky_enter_accept: bool = typer.Option(
+        False,
+        "--allow-risky-enter-accept",
+        help="Allow Enter to accept top match in risky candidate prompts",
+        is_flag=True,
+    ),
+    strict_safe: bool = typer.Option(
+        False,
+        "--strict-safe",
+        help="Use conservative matching defaults (disable cache reuse, disable auto-accept, higher confidence floor)",
+        is_flag=True,
+    ),
+) -> None:
+    move = _coerce_bool_flag(move, default=False)
+    copy = _coerce_bool_flag(copy, default=False)
+    interactive = _coerce_bool_flag(interactive, default=False)
+    no_interactive = _coerce_bool_flag(no_interactive, default=False)
+    yes = _coerce_bool_flag(yes, default=False)
+    print_tree = _coerce_bool_flag(print_tree, default=False)
+    no_cache = _coerce_bool_flag(no_cache, default=False)
+    clear_cache = _coerce_bool_flag(clear_cache, default=False)
+    offline = _coerce_bool_flag(offline, default=False)
+    quiet = _coerce_bool_flag(quiet, default=False)
+    prune_empty_dirs = _coerce_bool_flag(prune_empty_dirs, default=False)
+    allow_risky_enter_accept = _coerce_bool_flag(allow_risky_enter_accept, default=False)
+    strict_safe = _coerce_bool_flag(strict_safe, default=False)
+
+    if move and copy:
+        console.print("Choose only one of --move or --copy.")
+        raise typer.Exit(code=2)
+    if interactive and no_interactive:
+        console.print("Choose only one of --interactive or --no-interactive.")
+        raise typer.Exit(code=2)
+
+    copy_mode = False if move else True
+    interactive_mode = True if interactive else not no_interactive
+    options = OrganiseOptions(
+        incoming=incoming,
+        library=library,
+        mode=mode,
+        copy_mode=copy_mode,
+        extensions=extensions,
+        min_confidence=min_confidence,
+        cache=cache,
+        report=report,
+        yes=yes,
+        limit=limit,
+        print_tree=print_tree,
+        interactive_mode=interactive_mode,
+        media_type=media_type,
+        no_cache=no_cache,
+        clear_cache=clear_cache,
+        offline=offline,
+        on_conflict=on_conflict,
+        log_level=log_level,
+        log_format=log_format,
+        log_file=log_file,
+        prune_empty_dirs=prune_empty_dirs,
+        prune_ignore=prune_ignore,
+        quiet=quiet,
+        allow_risky_enter_accept=allow_risky_enter_accept,
+        strict_safe=strict_safe,
+    )
+    run_organise(options)
 
 
 @app.command()
@@ -4470,7 +4604,8 @@ def _wizard_video(
         prompt_text_fn=_prompt_text,
         build_command_config_cls=BuildCommandConfig,
         build_command_fn=_build_command,
-        organise_fn=organise,
+        organise_options_cls=OrganiseOptions,
+        run_organise_fn=run_organise,
         default_music_extensions=DEFAULT_MUSIC_EXTENSIONS,
         default_extensions_list=DEFAULT_EXTENSIONS_LIST,
         default_min_confidence=DEFAULT_MIN_CONFIDENCE,

@@ -20,6 +20,8 @@ $excludePatterns = @(
     ".plexify",
     "__pycache__",
     "*.pyc",
+    "plexify-run.txt",
+    "test-logs",
     "exports",
     "artifacts"
 )

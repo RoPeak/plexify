@@ -149,6 +149,7 @@ def plan_items(
     episode_cache = EpisodeCache()
     media_type_overrides: dict[str, str] = {}
     tv_search_cache: dict[str, list[tvmaze.TVMazeShow]] = {}
+    movie_entity_cache: dict[str, wikidata.WikidataFilm] = {}
 
     with cache_store.batch():
         with progress_cls(
@@ -229,6 +230,7 @@ def plan_items(
                             allow_risky_enter_accept=allow_risky_enter_accept,
                             media_type_overrides=media_type_overrides,
                             tv_search_cache=tv_search_cache,
+                            movie_entity_cache=movie_entity_cache,
                         )
                         if result is None:
                             plan, collision = None, False
@@ -553,6 +555,7 @@ def movie_candidates(
     limit: int = 5,
     offline: bool = False,
     interactive: bool = False,
+    movie_entity_cache: dict[str, wikidata.WikidataFilm] | None = None,
     movie_cache_key_fn: Any = None,
     reusable_movie_cache_safe_fn: Any = None,
     cache_entry_confirmed_or_auto_fn: Any = None,
@@ -657,7 +660,8 @@ def movie_candidates(
             base_query = make_search_query_fn(item.title) or item.title
             if base_query:
                 queries.append(base_query)
-        if not queries:
+        has_meaningful_title = bool((item.title or "").strip())
+        if not queries and not has_meaningful_title:
             queries.append("unknown")
         deduped_queries: list[str] = []
         seen_queries: set[str] = set()
@@ -668,6 +672,15 @@ def movie_candidates(
             seen_queries.add(marker)
             deduped_queries.append(query)
         queries = deduped_queries
+        if not queries:
+            return candidate_page_cls(
+                candidates=[],
+                raw_results=[],
+                next_offset=0,
+                has_more=False,
+                search_time=0.0,
+                total_time=0.0,
+            )
         query = queries[0]
         log_event_fn(
             logger,
@@ -722,7 +735,12 @@ def movie_candidates(
     while idx < len(raw_results) and len(results) < limit:
         cand = raw_results[idx]
         idx += 1
-        film = wikidata.fetch_entity(cand.qid, session=session)
+        if movie_entity_cache is not None and cand.qid in movie_entity_cache:
+            film = movie_entity_cache[cand.qid]
+        else:
+            film = wikidata.fetch_entity(cand.qid, session=session)
+            if movie_entity_cache is not None:
+                movie_entity_cache[cand.qid] = film
         if not film.is_film:
             continue
         results.append(movie_candidate_from_film_fn(item, film, description=cand.description))

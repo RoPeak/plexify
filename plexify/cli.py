@@ -280,6 +280,13 @@ class MusicAutoDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class CandidatePromptPolicy:
+    low_confidence: bool
+    risky_reusable_cache_hit: bool
+    require_explicit_choice: bool
+
+
 class BackRequested(Exception):
     pass
 
@@ -1197,6 +1204,105 @@ def _reusable_cache_hit_looks_risky(item: InferredItem, candidates: list[Candida
     if not candidates:
         return False
     return video_flow.reusable_cache_hit_looks_risky(item, candidates[0].confidence, min_confidence)
+
+
+def _maybe_auto_select_candidate(
+    *,
+    candidates: list[Candidate],
+    auto_accept: bool,
+    min_confidence: float,
+    title: str,
+    search_query: str,
+    target_year: int | None,
+    progress: Progress | None,
+) -> Candidate | None:
+    if not auto_accept or not _auto_acceptable(
+        candidates,
+        min_confidence,
+        title=title,
+        search_query=search_query,
+        target_year=target_year,
+    ):
+        return None
+    year_text = str(candidates[0].year) if candidates[0].year else "Unknown"
+    _safe_print(f"Auto-selected: {candidates[0].title} ({year_text}) [{candidates[0].confidence:.2f}]", progress)
+    return candidates[0]
+
+
+def _candidate_prompt_policy(
+    *,
+    item: InferredItem,
+    candidates: list[Candidate],
+    min_confidence: float,
+    cache_reusable: bool,
+    allow_risky_enter_accept: bool,
+) -> CandidatePromptPolicy:
+    low_confidence = candidates[0].confidence < min_confidence
+    risky_reusable_cache_hit = cache_reusable and _reusable_cache_hit_looks_risky(item, candidates, min_confidence)
+    require_explicit_choice = (low_confidence or risky_reusable_cache_hit) and not allow_risky_enter_accept
+    return CandidatePromptPolicy(
+        low_confidence=low_confidence,
+        risky_reusable_cache_hit=risky_reusable_cache_hit,
+        require_explicit_choice=require_explicit_choice,
+    )
+
+
+def _announce_candidate_prompt_policy(
+    *,
+    media_type: str,
+    item: InferredItem,
+    search_query: str,
+    candidates: list[Candidate],
+    min_confidence: float,
+    cache_reusable: bool,
+    policy: CandidatePromptPolicy,
+    progress: Progress | None,
+) -> None:
+    if policy.low_confidence:
+        _safe_print(
+            f"Low confidence ({candidates[0].confidence:.2f} < {min_confidence:.2f}). "
+            "Choose explicitly with 1-9, or choose s/m/k/q.",
+            progress,
+        )
+    if policy.require_explicit_choice:
+        log_event(
+            logger,
+            "risky_candidate_prompted",
+            media_type=media_type,
+            path=item.path,
+            title=item.title,
+            query=search_query,
+            selection_mode=None,
+            selection_source="interactive",
+            decision_reason="risky_candidate_requires_explicit_choice",
+            cache_reusable=cache_reusable,
+            top_confidence=candidates[0].confidence,
+            min_confidence=min_confidence,
+            confidence=candidates[0].confidence,
+            cache_scope=media_type,
+        )
+
+
+def _log_explicit_risky_candidate_accept(
+    *,
+    media_type: str,
+    item: InferredItem,
+    selected: Candidate,
+    search_query: str,
+) -> None:
+    log_event(
+        logger,
+        "risky_candidate_explicitly_accepted",
+        media_type=media_type,
+        path=item.path,
+        title=item.title,
+        query=search_query,
+        selection_mode="confirmed",
+        selection_source=selected.source,
+        decision_reason="explicit_accept_risky_candidate",
+        confidence=selected.confidence,
+        cache_scope=media_type,
+    )
 
 
 def _resolve_destination(
@@ -2288,49 +2394,38 @@ def _process_item(
                     raise BackRequested
                 continue
             _maybe_fetch_episode_title(item, candidates[0], session_tv, episode_cache, bump_confidence=True)
-            if auto_accept and _auto_acceptable(
-                candidates,
-                min_confidence,
+            selected = _maybe_auto_select_candidate(
+                candidates=candidates,
+                auto_accept=auto_accept,
+                min_confidence=min_confidence,
                 title=item.title,
                 search_query=search_query,
                 target_year=item.year,
-            ):
-                year_text = str(candidates[0].year) if candidates[0].year else "Unknown"
-                _safe_print(f"Auto-selected: {candidates[0].title} ({year_text}) [{candidates[0].confidence:.2f}]", progress)
-                selected = candidates[0]
+                progress=progress,
+            )
+            if selected is not None:
                 outcome = "auto"
                 break
             if not interactive:
                 _record_stat(stats, "skipped")
                 return None, False
-            low_confidence = candidates[0].confidence < min_confidence
-            risky_reusable_cache_hit = page.cache_reusable and _reusable_cache_hit_looks_risky(
-                item, candidates, min_confidence
+            policy = _candidate_prompt_policy(
+                item=item,
+                candidates=candidates,
+                min_confidence=min_confidence,
+                cache_reusable=page.cache_reusable,
+                allow_risky_enter_accept=allow_risky_enter_accept,
             )
-            require_explicit_choice = (low_confidence or risky_reusable_cache_hit) and not allow_risky_enter_accept
-            if low_confidence:
-                _safe_print(
-                    f"Low confidence ({candidates[0].confidence:.2f} < {min_confidence:.2f}). "
-                    "Choose explicitly with 1-9, or choose s/m/k/q.",
-                    progress,
-                )
-            if require_explicit_choice:
-                log_event(
-                    logger,
-                    "risky_candidate_prompted",
-                    media_type="tv",
-                    path=item.path,
-                    title=item.title,
-                    query=search_query,
-                    selection_mode=None,
-                    selection_source="interactive",
-                    decision_reason="risky_candidate_requires_explicit_choice",
-                    cache_reusable=page.cache_reusable,
-                    top_confidence=candidates[0].confidence,
-                    min_confidence=min_confidence,
-                    confidence=candidates[0].confidence,
-                    cache_scope="tv",
-                )
+            _announce_candidate_prompt_policy(
+                media_type="tv",
+                item=item,
+                search_query=search_query,
+                candidates=candidates,
+                min_confidence=min_confidence,
+                cache_reusable=page.cache_reusable,
+                policy=policy,
+                progress=progress,
+            )
             _maybe_enrich_candidates("tv", candidates, session_tv, session_wd, cache, interactive)
             choice = _select_candidate(
                 "tv",
@@ -2341,22 +2436,15 @@ def _process_item(
                 allow_manual=True,
                 allow_back=allow_back,
                 item=item,
-                allow_enter_accept=not require_explicit_choice,
+                allow_enter_accept=not policy.require_explicit_choice,
             )
             if isinstance(choice, Candidate):
-                if require_explicit_choice and choice == candidates[0]:
-                    log_event(
-                        logger,
-                        "risky_candidate_explicitly_accepted",
+                if policy.require_explicit_choice and choice == candidates[0]:
+                    _log_explicit_risky_candidate_accept(
                         media_type="tv",
-                        path=item.path,
-                        title=item.title,
-                        query=search_query,
-                        selection_mode="confirmed",
-                        selection_source=choice.source,
-                        decision_reason="explicit_accept_risky_candidate",
-                        confidence=choice.confidence,
-                        cache_scope="tv",
+                        item=item,
+                        selected=choice,
+                        search_query=search_query,
                     )
                 selected = choice
                 outcome = "confirmed"
@@ -2875,49 +2963,38 @@ def _process_item(
             if empty_choice == "b":
                 raise BackRequested
             continue
-        if auto_accept and _auto_acceptable(
-            candidates,
-            min_confidence,
+        selected = _maybe_auto_select_candidate(
+            candidates=candidates,
+            auto_accept=auto_accept,
+            min_confidence=min_confidence,
             title=item.title,
             search_query=search_query,
             target_year=item.year,
-        ):
-            year_text = str(candidates[0].year) if candidates[0].year else "Unknown"
-            _safe_print(f"Auto-selected: {candidates[0].title} ({year_text}) [{candidates[0].confidence:.2f}]", progress)
-            selected = candidates[0]
+            progress=progress,
+        )
+        if selected is not None:
             outcome = "auto"
             break
         if not interactive:
             _record_stat(stats, "skipped")
             return None, False
-        low_confidence = candidates[0].confidence < min_confidence
-        risky_reusable_cache_hit = page.cache_reusable and _reusable_cache_hit_looks_risky(
-            item, candidates, min_confidence
+        policy = _candidate_prompt_policy(
+            item=item,
+            candidates=candidates,
+            min_confidence=min_confidence,
+            cache_reusable=page.cache_reusable,
+            allow_risky_enter_accept=allow_risky_enter_accept,
         )
-        require_explicit_choice = (low_confidence or risky_reusable_cache_hit) and not allow_risky_enter_accept
-        if low_confidence:
-            _safe_print(
-                f"Low confidence ({candidates[0].confidence:.2f} < {min_confidence:.2f}). "
-                "Choose explicitly with 1-9, or choose s/m/k/q.",
-                progress,
-            )
-        if require_explicit_choice:
-            log_event(
-                logger,
-                "risky_candidate_prompted",
-                media_type="movie",
-                path=item.path,
-                title=item.title,
-                query=search_query,
-                selection_mode=None,
-                selection_source="interactive",
-                decision_reason="risky_candidate_requires_explicit_choice",
-                cache_reusable=page.cache_reusable,
-                top_confidence=candidates[0].confidence,
-                min_confidence=min_confidence,
-                confidence=candidates[0].confidence,
-                cache_scope="movie",
-            )
+        _announce_candidate_prompt_policy(
+            media_type="movie",
+            item=item,
+            search_query=search_query,
+            candidates=candidates,
+            min_confidence=min_confidence,
+            cache_reusable=page.cache_reusable,
+            policy=policy,
+            progress=progress,
+        )
         _maybe_enrich_candidates("movie", candidates, session_tv, session_wd, cache, interactive)
         choice = _select_candidate(
             "movie",
@@ -2928,22 +3005,15 @@ def _process_item(
             allow_manual=True,
             allow_back=allow_back,
             item=item,
-            allow_enter_accept=not require_explicit_choice,
+            allow_enter_accept=not policy.require_explicit_choice,
         )
         if isinstance(choice, Candidate):
-            if require_explicit_choice and choice == candidates[0]:
-                log_event(
-                    logger,
-                    "risky_candidate_explicitly_accepted",
+            if policy.require_explicit_choice and choice == candidates[0]:
+                _log_explicit_risky_candidate_accept(
                     media_type="movie",
-                    path=item.path,
-                    title=item.title,
-                    query=search_query,
-                    selection_mode="confirmed",
-                    selection_source=choice.source,
-                    decision_reason="explicit_accept_risky_candidate",
-                    confidence=choice.confidence,
-                    cache_scope="movie",
+                    item=item,
+                    selected=choice,
+                    search_query=search_query,
                 )
             selected = choice
             outcome = "confirmed"

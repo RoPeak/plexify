@@ -324,6 +324,72 @@ def test_resolve_destination_ignores_oserror_from_exists(monkeypatch, tmp_path: 
     assert changed is False
 
 
+def test_candidate_prompt_policy_requires_explicit_choice_for_low_confidence(tmp_path: Path) -> None:
+    item = InferredItem(
+        path=tmp_path / "Movie.mkv",
+        media_type="movie",
+        title="Movie",
+        year=2001,
+        episode_title=None,
+    )
+    candidates = [
+        cli.Candidate(
+            title="Movie",
+            year=2001,
+            source="Wikidata",
+            confidence=0.65,
+            metadata={"qid": "Q1", "title": "Movie", "year": 2001},
+        )
+    ]
+
+    policy = cli._candidate_prompt_policy(
+        item=item,
+        candidates=candidates,
+        min_confidence=0.90,
+        cache_reusable=False,
+        allow_risky_enter_accept=False,
+    )
+
+    assert policy == cli.CandidatePromptPolicy(
+        low_confidence=True,
+        risky_reusable_cache_hit=False,
+        require_explicit_choice=True,
+    )
+
+
+def test_candidate_prompt_policy_allows_enter_for_safe_candidate(tmp_path: Path) -> None:
+    item = InferredItem(
+        path=tmp_path / "Movie.mkv",
+        media_type="movie",
+        title="Movie",
+        year=2001,
+        episode_title=None,
+    )
+    candidates = [
+        cli.Candidate(
+            title="Movie",
+            year=2001,
+            source="Wikidata",
+            confidence=0.97,
+            metadata={"qid": "Q1", "title": "Movie", "year": 2001},
+        )
+    ]
+
+    policy = cli._candidate_prompt_policy(
+        item=item,
+        candidates=candidates,
+        min_confidence=0.90,
+        cache_reusable=False,
+        allow_risky_enter_accept=False,
+    )
+
+    assert policy == cli.CandidatePromptPolicy(
+        low_confidence=False,
+        risky_reusable_cache_hit=False,
+        require_explicit_choice=False,
+    )
+
+
 def test_organise_dry_run_respects_move_flag(monkeypatch, tmp_path: Path) -> None:
     incoming = tmp_path / "incoming"
     library = tmp_path / "library"

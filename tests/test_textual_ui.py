@@ -160,6 +160,121 @@ def test_music_ui_controller_reuses_cached_decision(monkeypatch) -> None:
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+def test_music_ui_controller_reuses_cached_skip_without_search(monkeypatch) -> None:
+    monkeypatch.setattr(musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(
+        musicbrainz,
+        "search_releases",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("search should be skipped")),
+    )
+
+    workspace = _local_tmp("music-cached-skip")
+    try:
+        source = workspace / "source"
+        library = workspace / "library"
+        album_dir = source / "Artist" / "Album"
+        album_dir.mkdir(parents=True)
+        library.mkdir()
+        (album_dir / "01 - Song One.flac").write_text("x", encoding="utf-8")
+
+        albums, _errors = music_util.discover_albums(source, ["flac"])
+        cache_key = music_util.album_decision_cache_key(albums[0])
+        cache = library / ".plexify" / "cache.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text(
+            f'{{"music":{{"{cache_key}":{{"decision":"skip_album","reason":"cached skip"}}}}}}',
+            encoding="utf-8",
+        )
+
+        controller = MusicUIController(MusicUIConfig(source=source, library=library))
+        controller.scan()
+
+        assert len(controller.albums) == 1
+        assert controller.albums[0].decision == "skip_album"
+        assert controller.albums[0].status_label == "skipped"
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_music_ui_controller_reuses_filename_fallback_when_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(musicbrainz, "is_available", lambda: False)
+
+    workspace = _local_tmp("music-unavailable-fallback")
+    try:
+        source = workspace / "source"
+        library = workspace / "library"
+        album_dir = source / "Artist" / "Album"
+        album_dir.mkdir(parents=True)
+        library.mkdir()
+        (album_dir / "01 - Song One.flac").write_text("x", encoding="utf-8")
+
+        albums, _errors = music_util.discover_albums(source, ["flac"])
+        cache_key = music_util.album_decision_cache_key(albums[0])
+        cache = library / ".plexify" / "cache.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text(
+            f'{{"music":{{"{cache_key}":{{"decision":"filename_fallback","reason":"cached filename fallback"}}}}}}',
+            encoding="utf-8",
+        )
+
+        controller = MusicUIController(MusicUIConfig(source=source, library=library))
+        controller.scan()
+
+        assert len(controller.albums) == 1
+        assert controller.albums[0].decision == "filename_fallback"
+        assert controller.albums[0].cached_reason == "cached filename fallback"
+        assert "unavailable" in (controller.albums[0].warning or "").lower()
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_music_preview_marks_track_mapping_failure_unresolved(monkeypatch) -> None:
+    monkeypatch.setattr(
+        musicbrainz,
+        "search_releases",
+        lambda *_args, **_kwargs: [
+            musicbrainz.ReleaseCandidate(
+                mbid="mb1",
+                title="Album",
+                artist="Artist",
+                year=2001,
+                country="GB",
+                score=1.0,
+                track_count=2,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        musicbrainz,
+        "fetch_release_tracks",
+        lambda *_args, **_kwargs: [
+            musicbrainz.Track(number=1, title="Song One", disc=1),
+            musicbrainz.Track(number=2, title="Song Two", disc=1),
+        ],
+    )
+    monkeypatch.setattr(musicbrainz, "is_available", lambda: True)
+
+    workspace = _local_tmp("music-mapping-failure")
+    try:
+        source = workspace / "source"
+        library = workspace / "library"
+        album_dir = source / "Artist" / "Album"
+        album_dir.mkdir(parents=True)
+        library.mkdir()
+        (album_dir / "01 - Song One.flac").write_text("x", encoding="utf-8")
+
+        controller = MusicUIController(MusicUIConfig(source=source, library=library))
+        controller.scan()
+        controller.select_candidate(0, 0)
+        preview = controller.build_preview()
+
+        assert preview.unresolved_count == 1
+        assert "track mapping failed" in preview.unresolved_items[0]
+        assert not preview.can_apply
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 def test_textual_video_flow_to_result(monkeypatch) -> None:
     monkeypatch.setattr(ui_controller, "load_movie_candidates", _fake_movie_page)
 

@@ -559,6 +559,10 @@ class MusicUIController:
                     offline=self.config.offline,
                     available=available,
                 )
+                if entry.decision == "skip_album":
+                    entry.decision_status = self._music_status(entry)
+                    self.albums.append(entry)
+                    continue
                 if verify and session is not None:
                     candidates = musicbrainz.search_releases(
                         album.artist,

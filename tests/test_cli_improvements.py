@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import requests
 import typer
 
@@ -256,6 +257,71 @@ def test_organise_dry_run_defaults_to_copy_mode(monkeypatch, tmp_path: Path) -> 
         pass
 
     assert captured["copy_mode"] is True
+
+
+def test_prompt_manual_tv_retries_invalid_numeric_fields(monkeypatch, tmp_path: Path) -> None:
+    item = InferredItem(
+        path=tmp_path / "Show.S01E01.mkv",
+        media_type="tv",
+        title="Show",
+        year=2001,
+        season=1,
+        episode=1,
+        episode_title="Pilot",
+    )
+    prompts = iter(["Show", "nope", "2001", "bad", "2", "oops", "3", "Finale"])
+    messages: list[str] = []
+
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: next(prompts))
+    monkeypatch.setattr(cli, "_safe_print", lambda message, _progress=None: messages.append(str(message)))
+
+    candidate = cli._prompt_manual_tv(item, None)
+
+    assert candidate.year == 2001
+    assert candidate.metadata["season"] == 2
+    assert candidate.metadata["episode"] == 3
+    assert messages == [
+        "Please enter a whole number or leave blank.",
+        "Please enter a whole number.",
+        "Please enter a whole number.",
+    ]
+
+
+def test_prompt_manual_movie_retries_invalid_optional_year(monkeypatch, tmp_path: Path) -> None:
+    item = InferredItem(
+        path=tmp_path / "Movie.mkv",
+        media_type="movie",
+        title="Movie",
+        year=None,
+        episode_title=None,
+    )
+    prompts = iter(["Movie", "bad", "", "space"])
+    messages: list[str] = []
+
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: next(prompts))
+    monkeypatch.setattr(cli, "_safe_print", lambda message, _progress=None: messages.append(str(message)))
+
+    candidate, hint = cli._prompt_manual_movie(item, None)
+
+    assert candidate.year is None
+    assert hint == "space"
+    assert messages == ["Please enter a whole number or leave blank."]
+
+
+def test_resolve_destination_ignores_oserror_from_exists(monkeypatch, tmp_path: Path) -> None:
+    destination = tmp_path / "Movie.mkv"
+
+    def _fake_exists(self: Path) -> bool:
+        if self == destination:
+            raise OSError("Path too long")
+        return False
+
+    monkeypatch.setattr(Path, "exists", _fake_exists)
+
+    resolved, changed = cli._resolve_destination(destination, "rename", {}, None)
+
+    assert resolved == destination
+    assert changed is False
 
 
 def test_organise_dry_run_respects_move_flag(monkeypatch, tmp_path: Path) -> None:

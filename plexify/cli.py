@@ -641,6 +641,23 @@ def _prompt_int_or_control(prompt: str, default: int, progress: Progress | None)
             _safe_print("Please enter a whole number.", progress)
 
 
+def _prompt_optional_int(
+    prompt: str,
+    default: str,
+    progress: Progress | None,
+    *,
+    show_default: bool = True,
+) -> int | None:
+    while True:
+        value = _prompt_text(prompt, default, progress, show_default=show_default).strip()
+        if not value:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            _safe_print("Please enter a whole number or leave blank.", progress)
+
+
 def _print_overlap_error(exc: PathOverlapError) -> None:
     issue = exc.issue
     console.print(rich_escape(issue.reason))
@@ -1052,13 +1069,10 @@ def _movie_candidate_from_film(
 
 def _prompt_manual_tv(item: InferredItem, progress: Progress | None) -> Candidate:
     show_name = _prompt_text("Show name", item.title, progress)
-    year_text = _prompt_text("Show year", str(item.year) if item.year else "", progress)
-    season_text = _prompt_text("Season", str(item.season) if item.season else "1", progress)
-    episode_text = _prompt_text("Episode", str(item.episode) if item.episode else "1", progress)
+    year = _prompt_optional_int("Show year", str(item.year) if item.year else "", progress)
+    season = _prompt_int("Season", item.season or 1, progress)
+    episode = _prompt_int("Episode", item.episode or 1, progress)
     episode_title = _prompt_text("Episode title", item.episode_title or "", progress)
-    year = int(year_text) if year_text else None
-    season = int(season_text)
-    episode = int(episode_text)
     metadata = {
         "id": None,
         "name": show_name,
@@ -1073,9 +1087,13 @@ def _prompt_manual_tv(item: InferredItem, progress: Progress | None) -> Candidat
 
 def _prompt_manual_movie(item: InferredItem, progress: Progress | None) -> tuple[Candidate, str]:
     title = _prompt_text("Movie title", item.title, progress)
-    year_text = _prompt_text("Movie year (optional, helps disambiguate)", "", progress, show_default=False)
+    year = _prompt_optional_int(
+        "Movie year (optional, helps disambiguate)",
+        "",
+        progress,
+        show_default=False,
+    )
     hint = _prompt_text("Hint (optional, director/cast/keyword)", "", progress, show_default=False)
-    year = int(year_text) if year_text else None
     metadata = {"qid": None, "title": title, "year": year, "manual": True}
     return Candidate(title=title, year=year, source="Manual", confidence=1.0, metadata=metadata), hint
 
@@ -1187,8 +1205,14 @@ def _resolve_destination(
     planned: dict[str, int] | None,
     progress: Progress | None,
 ) -> tuple[Path | None, bool]:
+    def _path_exists_safe(path: Path) -> bool:
+        try:
+            return path.exists()
+        except OSError:
+            return False
+
     changed = False
-    if destination.exists():
+    if _path_exists_safe(destination):
         if on_conflict == "skip":
             _safe_print(f"Skipping due to existing destination: {format_path(destination)}", progress)
             return None, False

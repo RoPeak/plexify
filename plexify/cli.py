@@ -4565,6 +4565,21 @@ def _infer_library_root_from_report(report: Path) -> Path | None:
 
 
 @app.command()
+def ui(
+    log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
+    log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
+    log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
+) -> None:
+    _initialise_logging(log_level, log_format, log_file)
+    try:
+        from .textual_app import run_textual_ui
+    except ImportError as exc:
+        console.print("Textual UI dependencies are not installed. Install the project dependencies and try again.")
+        raise typer.Exit(code=1) from exc
+    run_textual_ui()
+
+
+@app.command()
 def undo(report: Path = typer.Option(None, help="Report path"), library: Path = typer.Option(None, help="Library root")) -> None:
     if report is None:
         if library is None:

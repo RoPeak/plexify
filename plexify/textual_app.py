@@ -192,6 +192,7 @@ class ReviewScreen(Screen):
                 with Horizontal(classes="button-row"):
                     yield Button("Cand -", id="prev-candidate")
                     yield Button("Cand +", id="next-candidate")
+                    yield Button("More", id="next-page")
                     yield Button("Accept", id="accept", variant="primary")
                     yield Button("Skip", id="skip")
                     yield Button("Preview", id="preview")
@@ -201,6 +202,7 @@ class ReviewScreen(Screen):
                         yield Button("Switch TV/Movie", id="switch")
                         yield Button("Manual", id="manual")
                         yield Button("Apply To Folder", id="folder")
+                        yield Button("Apply To Title", id="title-group")
                     else:
                         yield Button("Filename", id="filename")
                         yield Button("Filename Titles", id="filename-titles")
@@ -255,11 +257,10 @@ class ReviewScreen(Screen):
             marker = ">" if index == self.current_index else " "
             if self.workflow_state.workflow == "video":
                 label = item.item.path.name
-                resolved = item.resolved
+                suffix = f" [{item.status_label}]"
             else:
                 label = item.album.source.name
-                resolved = item.resolved
-            suffix = " [done]" if resolved else ""
+                suffix = f" [{item.status_label}]"
             lines.append(f"{marker} {index + 1}. {label}{suffix}")
         queue.update("\n".join(lines))
         current = items[self.current_index]
@@ -270,9 +271,14 @@ class ReviewScreen(Screen):
                 f"Title: {current.item.title}",
                 f"Season/Episode: {current.item.season}/{current.item.episode}",
                 f"Search: {current.search_query}",
-                f"Cache hit: {current.cache_hit}",
+                f"Status: {current.status_label}",
+                f"Cache: {current.cache_context}",
                 f"Auto-selectable: {current.auto_selectable}",
             ]
+            if current.unresolved_reason:
+                detail_lines.append(f"Unresolved: {current.unresolved_reason}")
+            if current.warning:
+                detail_lines.append(f"Warning: {current.warning}")
             candidate_lines = []
             if current.manual_candidate is not None:
                 candidate_lines.append(f"Manual: {current.manual_candidate.title}")
@@ -288,9 +294,18 @@ class ReviewScreen(Screen):
                 f"Artist: {current.album.artist}",
                 f"Title: {current.album.album}",
                 f"Tracks: {len(current.album.tracks)}",
+                f"Status: {current.status_label}",
                 f"Cached decision: {current.cached_decision or 'none'}",
                 f"Decision: {current.decision or 'pending'}",
             ]
+            if current.cached_reason:
+                detail_lines.append(f"Cached reason: {current.cached_reason}")
+            if current.fallback_reason:
+                detail_lines.append(f"Fallback: {current.fallback_reason}")
+            if current.unresolved_reason:
+                detail_lines.append(f"Unresolved: {current.unresolved_reason}")
+            if current.warning:
+                detail_lines.append(f"Warning: {current.warning}")
             candidate_lines = []
             for index, candidate in enumerate(current.candidate_states):
                 marker = ">" if index == self.current_candidate_index else " "
@@ -341,6 +356,10 @@ class ReviewScreen(Screen):
             if states:
                 self.current_candidate_index = min(len(states) - 1, self.current_candidate_index + 1)
             self.refresh_view()
+        elif button_id == "next-page" and self.workflow_state.workflow == "video":
+            controller.next_page(self.current_index)
+            self.current_candidate_index = 0
+            self.refresh_view()
         elif button_id == "accept":
             self._accept()
         elif button_id == "skip":
@@ -367,6 +386,9 @@ class ReviewScreen(Screen):
             self.refresh_view()
         elif button_id == "folder" and self.workflow_state.workflow == "video":
             controller.apply_choice_to_folder(self.current_index)
+            self.refresh_view()
+        elif button_id == "title-group" and self.workflow_state.workflow == "video":
+            controller.apply_choice_to_title_group(self.current_index)
             self.refresh_view()
         elif button_id == "filename" and self.workflow_state.workflow == "music":
             controller.choose_filename_fallback(self.current_index)
@@ -405,17 +427,48 @@ class PreviewScreen(Screen):
     def on_mount(self) -> None:
         sample = self.preview.plans[:8]
         sample_lines = [f"{format_path(plan.source)} -> {format_path(plan.destination)}" for plan in sample]
+        if self.preview.unresolved_items:
+            sample_lines.append("")
+            sample_lines.append("Unresolved:")
+            sample_lines.extend(self.preview.unresolved_items[:5])
         if self.preview.warnings:
             sample_lines.append("")
             sample_lines.extend(f"Warning: {warning}" for warning in self.preview.warnings[:5])
         self.query_one("#preview-summary", Static).update("\n".join(self.preview.summary_lines))
         self.query_one("#preview-plans", Static).update("\n".join(sample_lines) if sample_lines else "No plans generated.")
+        self.query_one("#apply", Button).disabled = not self.preview.can_apply
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "back":
             self.app.pop_screen()
             return
         if event.button.id == "apply":
+            if self.workflow_state.controller.config.mode == "apply":
+                self.app.push_screen(ConfirmApplyScreen(self.workflow_state, self.preview))
+            else:
+                self.app.push_screen(ApplyScreen(self.workflow_state, self.preview))
+
+
+class ConfirmApplyScreen(Screen):
+    def __init__(self, workflow_state: UIWorkflowState, preview: PreviewState) -> None:
+        super().__init__()
+        self.workflow_state = workflow_state
+        self.preview = preview
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=False)
+        with Vertical(id="preview"):
+            yield Static("Confirm Apply", classes="screen-title")
+            yield Static("This will modify files on disk. Continue?", id="confirm-apply-text")
+            with Horizontal(classes="button-row"):
+                yield Button("Back", id="back")
+                yield Button("Apply Now", id="confirm-apply", variant="error")
+        yield Footer()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "back":
+            self.app.pop_screen()
+        elif event.button.id == "confirm-apply":
             self.app.push_screen(ApplyScreen(self.workflow_state, self.preview))
 
 
@@ -461,8 +514,9 @@ class ResultScreen(Screen):
 
     def on_mount(self) -> None:
         lines = list(self.result.summary_lines)
-        if self.result.apply_report_path is not None:
-            lines.append(f"Apply report path: {format_path(self.result.apply_report_path)}")
+        if self.result.warnings:
+            lines.append("")
+            lines.extend(f"Warning: {warning}" for warning in self.result.warnings[:10])
         if self.result.result.errors:
             lines.append("")
             lines.extend(f"Error: {error}" for error in self.result.result.errors[:10])

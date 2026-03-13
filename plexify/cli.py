@@ -36,6 +36,7 @@ from .sources import musicbrainz, tvmaze, wikidata
 from .tv_episode_cache import EpisodeCache
 from .undo import undo_report
 from .ui import format_path, rich_escape
+from . import ui_services
 from .cache_policy import (
     cache_entry_compatible,
     cache_entry_confirmed_or_auto,
@@ -360,31 +361,7 @@ def _media_override_key(path: Path, incoming_root: Path | None) -> str | None:
 
 
 def _switch_item_media_type(item: InferredItem, target_media_type: str) -> InferredItem:
-    if target_media_type == item.media_type:
-        return item
-    if target_media_type == "tv":
-        fallback_title = item.path.parent.name.strip() if item.path.parent.name else ""
-        switched_title = fallback_title or item.title
-        return InferredItem(
-            path=item.path,
-            media_type="tv",
-            title=switched_title,
-            year=item.year,
-            season=item.season,
-            episode=item.episode,
-            episode_end=item.episode_end,
-            episode_title=item.episode_title,
-        )
-    return InferredItem(
-        path=item.path,
-        media_type="movie",
-        title=item.title,
-        year=item.year,
-        season=None,
-        episode=None,
-        episode_end=None,
-        episode_title=None,
-    )
+    return ui_services.switch_item_media_type(item, target_media_type)
 
 
 def _resolve_media_type_override(
@@ -393,14 +370,7 @@ def _resolve_media_type_override(
     incoming_root: Path | None,
     media_type_overrides: dict[str, str] | None,
 ) -> tuple[InferredItem, str | None]:
-    return plan_flow.resolve_media_type_override(
-        item=item,
-        incoming_root=incoming_root,
-        cache=cache,
-        media_type_overrides=media_type_overrides,
-        media_override_key=_media_override_key,
-        switch_item_media_type=_switch_item_media_type,
-    )
+    return ui_services.resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
 
 
 def _persist_media_type_override(
@@ -432,7 +402,7 @@ def _initialise_logging(log_level: str, log_format: str, log_file: Path | None) 
 
 
 def _build_search_query(title: str, hint: str | None) -> str:
-    return plan_flow.build_search_query(title, hint)
+    return ui_services.build_search_query(title, hint)
 
 
 def _normalize_tv_retry_query(value: str) -> str:
@@ -457,46 +427,11 @@ def _extract_explicit_season_from_path(path: Path) -> int | None:
 
 
 def _apply_tv_folder_season_lock(item: InferredItem, cache: Cache, folder_show_key: str | None) -> InferredItem:
-    if folder_show_key is None or item.media_type != "tv":
-        return item
-    cached = cache.get_show(folder_show_key)
-    if not cached or not cached.get("confirmed_by_user") or not cached.get("manual"):
-        return item
-    locked_season = cached.get("season")
-    if locked_season is None:
-        return item
-    try:
-        locked_season_int = int(locked_season)
-    except (TypeError, ValueError):
-        return item
-    explicit_season = _extract_explicit_season_from_path(item.path)
-    if explicit_season is not None and explicit_season != locked_season_int:
-        return item
-    if item.season not in {None, 1, locked_season_int}:
-        return item
-    return InferredItem(
-        path=item.path,
-        media_type=item.media_type,
-        title=item.title,
-        year=item.year,
-        season=locked_season_int,
-        episode=item.episode,
-        episode_end=item.episode_end,
-        episode_title=item.episode_title,
-    )
+    return ui_services.apply_tv_folder_season_lock(item, cache, folder_show_key)
 
 
 def _with_title(item: InferredItem, title: str) -> InferredItem:
-    return InferredItem(
-        path=item.path,
-        media_type=item.media_type,
-        title=title,
-        year=item.year,
-        season=item.season,
-        episode=item.episode,
-        episode_end=item.episode_end,
-        episode_title=item.episode_title,
-    )
+    return ui_services.with_title(item, title)
 
 
 def _strip_outer_quotes(value: str) -> str:
@@ -1185,19 +1120,7 @@ def _auto_acceptable(
     search_query: str,
     target_year: int | None,
 ) -> bool:
-    if not candidates:
-        return False
-    second_conf = candidates[1].confidence if len(candidates) > 1 else None
-    return movie_matcher.auto_acceptable(
-        top_confidence=candidates[0].confidence,
-        second_confidence=second_conf,
-        top_year=candidates[0].year,
-        min_confidence=min_confidence,
-        title=title,
-        search_query=search_query,
-        target_year=target_year,
-        min_gap=AUTO_ACCEPT_GAP,
-    )
+    return ui_services.auto_acceptable(candidates, min_confidence, title=title, search_query=search_query, target_year=target_year)
 
 
 def _reusable_cache_hit_looks_risky(item: InferredItem, candidates: list[Candidate], min_confidence: float) -> bool:
@@ -1311,24 +1234,10 @@ def _resolve_destination(
     planned: dict[str, int] | None,
     progress: Progress | None,
 ) -> tuple[Path | None, bool]:
-    def _path_exists_safe(path: Path) -> bool:
-        try:
-            return path.exists()
-        except OSError:
-            return False
-
-    changed = False
-    if _path_exists_safe(destination):
-        if on_conflict == "skip":
-            _safe_print(f"Skipping due to existing destination: {format_path(destination)}", progress)
-            return None, False
-        if on_conflict == "rename":
-            destination = unique_path(destination)
-            changed = True
-    if planned is None:
-        planned = {}
-    destination, planned_changed = unique_plan_path(destination, planned)
-    changed = changed or planned_changed
+    original_destination = destination
+    destination, changed = ui_services.resolve_destination(destination, on_conflict, planned)
+    if destination is None and on_conflict == "skip":
+        _safe_print(f"Skipping due to existing destination: {format_path(original_destination)}", progress)
     return destination, changed
 
 
@@ -1350,7 +1259,7 @@ def _rank_music_candidates(
     requested_title: str,
     requested_year: int | None,
 ) -> list[musicbrainz.ReleaseCandidate]:
-    return music_matcher.rank_music_candidates(candidates, track_count, requested_title, requested_year)
+    return ui_services.rank_music_candidates(candidates, track_count, requested_title, requested_year)
 
 
 def _select_music_candidate(
@@ -1370,143 +1279,57 @@ def _music_tracks_from_filenames(
     disc_number: int | None = None,
     multi_disc: bool = False,
 ) -> list[MusicPlannedTrack]:
-    planned: list[MusicPlannedTrack] = []
-    for track in tracks:
-        if track.track_number >= 100:
-            inferred_disc_number = track.track_number // 100
-            track_number_text = music_util.format_track_number(
-                track.track_number,
-                multi_disc=True,
-            )
-            planned_track_number = track.track_number
-        elif multi_disc and disc_number is not None and disc_number > 0:
-            inferred_disc_number = disc_number
-            planned_track_number = disc_number * 100 + track.track_number
-            track_number_text = music_util.format_track_number(
-                track.track_number,
-                disc_number=disc_number,
-                multi_disc=True,
-            )
-        else:
-            inferred_disc_number = None
-            planned_track_number = track.track_number
-            track_number_text = music_util.format_track_number(track.track_number, multi_disc=False)
-        planned.append(
-            MusicPlannedTrack(
-                source=track.source,
-                track_number=planned_track_number,
-                track_number_text=track_number_text,
-                track_title=track.track_title,
-                track_artist=track.track_artist,
-                ext=track.ext,
-                disc_number=inferred_disc_number,
-            )
+    return [
+        MusicPlannedTrack(
+            source=track.source,
+            track_number=track.track_number,
+            track_number_text=track.track_number_text,
+            track_title=track.track_title,
+            track_artist=track.track_artist,
+            ext=track.ext,
+            disc_number=track.disc_number,
         )
-    return planned
+        for track in ui_services.music_tracks_from_filenames(tracks, disc_number=disc_number, multi_disc=multi_disc)
+    ]
 
 
 def _map_musicbrainz_tracks(
     tracks: list[music_util.TrackInfo],
     mb_tracks: list[musicbrainz.Track],
 ) -> tuple[list[MusicPlannedTrack] | None, str | None]:
-    if not tracks or not mb_tracks:
-        return None, "Missing tracks to map"
-    if len(tracks) != len(mb_tracks):
-        return None, "Track count mismatch"
-    disc_numbers = {track.disc for track in mb_tracks}
-    disc_count = len(disc_numbers)
-    has_multiple_discs = disc_count > 1 or any(disc > 1 for disc in disc_numbers)
-    use_disc_numbers = any(track.track_number >= 100 for track in tracks)
-
-    if use_disc_numbers:
-        input_map: dict[tuple[int, int], music_util.TrackInfo] = {}
-        for track in tracks:
-            disc = track.track_number // 100
-            number = track.track_number % 100
-            if disc <= 0 or number <= 0:
-                return None, "Invalid disc-style track numbering"
-            key = (disc, number)
-            if key in input_map:
-                return None, "Duplicate disc-style track numbers"
-            input_map[key] = track
-        mapped: list[MusicPlannedTrack] = []
-        for mb_track in mb_tracks:
-            key = (mb_track.disc, mb_track.number)
-            source_track = input_map.get(key)
-            if source_track is None:
-                return None, "Missing disc/track matches"
-            track_number_text = music_util.format_track_number(
-                mb_track.number,
-                disc_number=mb_track.disc,
-                multi_disc=disc_count > 1,
-            )
-            mapped.append(
-                MusicPlannedTrack(
-                    source=source_track.source,
-                    track_number=mb_track.disc * 100 + mb_track.number if disc_count > 1 else mb_track.number,
-                    track_number_text=track_number_text,
-                    track_title=mb_track.title,
-                    track_artist=source_track.track_artist,
-                    ext=source_track.ext,
-                    disc_number=mb_track.disc,
-                )
-            )
-        return mapped, None
-
-    if has_multiple_discs:
-        return None, "Multi-disc release without disc numbers in filenames"
-
-    input_by_number: dict[int, music_util.TrackInfo] = {}
-    for track in tracks:
-        if track.track_number in input_by_number:
-            return None, "Duplicate track numbers in filenames"
-        input_by_number[track.track_number] = track
-    mapped: list[MusicPlannedTrack] = []
-    for mb_track in mb_tracks:
-        source_track = input_by_number.get(mb_track.number)
-        if source_track is None:
-            return None, "Missing track numbers in filenames"
-        track_number_text = music_util.format_track_number(mb_track.number)
-        mapped.append(
-            MusicPlannedTrack(
-                source=source_track.source,
-                track_number=mb_track.number,
-                track_number_text=track_number_text,
-                track_title=mb_track.title,
-                track_artist=source_track.track_artist,
-                ext=source_track.ext,
-                disc_number=mb_track.disc,
-            )
+    mapped, reason = ui_services.map_musicbrainz_tracks(tracks, mb_tracks)
+    if mapped is None:
+        return None, reason
+    return [
+        MusicPlannedTrack(
+            source=track.source,
+            track_number=track.track_number,
+            track_number_text=track.track_number_text,
+            track_title=track.track_title,
+            track_artist=track.track_artist,
+            ext=track.ext,
+            disc_number=track.disc_number,
         )
-    return mapped, None
+        for track in mapped
+    ], None
 
 
 def _map_musicbrainz_by_order(
     tracks: list[music_util.TrackInfo],
     mb_tracks: list[musicbrainz.Track],
 ) -> list[MusicPlannedTrack]:
-    sorted_tracks = sorted(tracks, key=lambda track: (track.track_number, track.source.name.lower()))
-    sorted_mb = sorted(mb_tracks, key=lambda track: (track.disc, track.number))
-    disc_count = len({track.disc for track in sorted_mb})
-    mapped: list[MusicPlannedTrack] = []
-    for source_track, mb_track in zip(sorted_tracks, sorted_mb, strict=False):
-        track_number_text = music_util.format_track_number(
-            mb_track.number,
-            disc_number=mb_track.disc,
-            multi_disc=disc_count > 1,
+    return [
+        MusicPlannedTrack(
+            source=track.source,
+            track_number=track.track_number,
+            track_number_text=track.track_number_text,
+            track_title=track.track_title,
+            track_artist=track.track_artist,
+            ext=track.ext,
+            disc_number=track.disc_number,
         )
-        mapped.append(
-            MusicPlannedTrack(
-                source=source_track.source,
-                track_number=mb_track.disc * 100 + mb_track.number if disc_count > 1 else mb_track.number,
-                track_number_text=track_number_text,
-                track_title=mb_track.title,
-                track_artist=source_track.track_artist,
-                ext=source_track.ext,
-                disc_number=mb_track.disc,
-            )
-        )
-    return mapped
+        for track in ui_services.map_musicbrainz_by_order(tracks, mb_tracks)
+    ]
 
 
 def _primary_artist_name(value: str) -> str:
@@ -1515,7 +1338,7 @@ def _primary_artist_name(value: str) -> str:
 
 
 def _normalise_artist_key(value: str | None) -> str:
-    return _primary_artist_name(value or "").casefold()
+    return ui_services.normalise_artist_key(value)
 
 
 def _dominant_track_artist_ratio(album: music_util.AlbumGroup) -> float:
@@ -1533,16 +1356,7 @@ def _dominant_track_artist_ratio(album: music_util.AlbumGroup) -> float:
 
 
 def _should_use_various_artists(album: music_util.AlbumGroup, candidate_artist: str | None) -> bool:
-    candidate_key = _normalise_artist_key(candidate_artist)
-    if candidate_key in {"various artists", "va", "various"}:
-        return True
-    album_key = _normalise_artist_key(album.artist)
-    if album_key in {"various artists", "va", "various"}:
-        # Source folder may be generic; treat as single-artist when one artist dominates.
-        return _dominant_track_artist_ratio(album) < 0.8
-    if candidate_key or album_key:
-        return False
-    return _dominant_track_artist_ratio(album) < 0.8
+    return ui_services.should_use_various_artists(album, candidate_artist)
 
 
 def _music_track_count_diff(file_count: int, release_count: int | None) -> int:
@@ -1653,7 +1467,7 @@ def _musicbrainz_skip_or_override(album: music_util.AlbumGroup) -> tuple[bool, s
 
 
 def _normalise_music_decision_entry(entry: dict[str, Any] | None) -> dict[str, Any] | None:
-    return music_flow.normalise_music_decision_entry(entry)
+    return ui_services.normalise_music_decision_entry(entry)
 
 
 def _build_music_decision_payload(

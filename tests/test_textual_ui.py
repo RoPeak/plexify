@@ -6,10 +6,12 @@ import uuid
 from pathlib import Path
 
 from typer.testing import CliRunner
-from textual.widgets import Button, Input
+from textual.widgets import Button, Checkbox, Input, Static
 
-from plexify import cli
+from plexify import cli, ui_services
+from plexify import music as music_util
 from plexify.sources import musicbrainz
+from plexify import ui_controller
 from plexify.textual_app import ConfigScreen, PlexifyTextualApp
 from plexify.ui_controller import MusicUIConfig, MusicUIController, VideoUIConfig, VideoUIController
 
@@ -22,6 +24,23 @@ def _local_tmp(name: str) -> Path:
     return path
 
 
+def _fake_movie_page(*_args, **_kwargs) -> ui_services.UICandidatePage:
+    return ui_services.UICandidatePage(
+        candidates=[
+            ui_services.UICandidate(
+                title="Movie",
+                year=2001,
+                source="Wikidata",
+                confidence=1.0,
+                metadata={"qid": "Q1", "title": "Movie", "year": 2001},
+            )
+        ],
+        raw_results=[],
+        next_offset=0,
+        has_more=False,
+    )
+
+
 def test_cli_help_includes_ui_command() -> None:
     runner = CliRunner()
     result = runner.invoke(cli.app, ["--help"])
@@ -30,17 +49,7 @@ def test_cli_help_includes_ui_command() -> None:
 
 
 def test_video_ui_controller_scans_and_builds_preview(monkeypatch) -> None:
-    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
-        candidate = cli.Candidate(
-            title="Movie",
-            year=2001,
-            source="Wikidata",
-            confidence=1.0,
-            metadata={"qid": "Q1", "title": "Movie", "year": 2001},
-        )
-        return cli.CandidatePage(candidates=[candidate], raw_results=[], next_offset=0, has_more=False)
-
-    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(ui_controller, "load_movie_candidates", _fake_movie_page)
 
     workspace = _local_tmp("video-controller")
     try:
@@ -56,13 +65,55 @@ def test_video_ui_controller_scans_and_builds_preview(monkeypatch) -> None:
         preview = controller.build_preview()
 
         assert len(controller.items) == 1
+        assert controller.items[0].cache_context == "auto-selectable"
         assert len(preview.plans) == 1
-        assert preview.plans[0].media_type == "movie"
+        assert preview.unresolved_count == 0
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
 
-def test_music_ui_controller_scans_and_builds_preview(monkeypatch) -> None:
+def test_video_preview_marks_unresolved_items(monkeypatch) -> None:
+    def _fake_tv_page(*_args, **_kwargs) -> ui_services.UICandidatePage:
+        return ui_services.UICandidatePage(
+            candidates=[
+                ui_services.UICandidate(
+                    title="Series",
+                    year=2008,
+                    source="TVMaze",
+                    confidence=1.0,
+                    metadata={"id": 1, "name": "Series", "year": 2008},
+                )
+            ],
+            raw_results=[],
+            next_offset=0,
+            has_more=False,
+        )
+
+    monkeypatch.setattr(ui_controller, "load_tv_candidates", _fake_tv_page)
+    monkeypatch.setattr(ui_controller, "load_movie_candidates", _fake_movie_page)
+
+    workspace = _local_tmp("video-unresolved")
+    try:
+        incoming = workspace / "incoming" / "Series"
+        library = workspace / "library"
+        incoming.mkdir(parents=True)
+        library.mkdir()
+        (incoming / "Pilot.mkv").write_text("x", encoding="utf-8")
+
+        controller = VideoUIController(VideoUIConfig(incoming=workspace / "incoming", library=library))
+        controller.scan()
+        controller.switch_media_type(0, "tv")
+        controller.accept_candidate(0, 0)
+        preview = controller.build_preview()
+
+        assert preview.unresolved_count == 1
+        assert not preview.can_apply
+        assert "missing season or episode" in preview.unresolved_items[0]
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_music_ui_controller_reuses_cached_decision(monkeypatch) -> None:
     monkeypatch.setattr(
         musicbrainz,
         "search_releases",
@@ -78,12 +129,8 @@ def test_music_ui_controller_scans_and_builds_preview(monkeypatch) -> None:
             )
         ],
     )
-    monkeypatch.setattr(
-        musicbrainz,
-        "fetch_release_tracks",
-        lambda *_args, **_kwargs: [musicbrainz.Track(number=1, title="Song One", disc=1)],
-    )
     monkeypatch.setattr(musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(musicbrainz, "fetch_release_tracks", lambda *_args, **_kwargs: [musicbrainz.Track(number=1, title="Song One", disc=1)])
 
     workspace = _local_tmp("music-controller")
     try:
@@ -94,30 +141,27 @@ def test_music_ui_controller_scans_and_builds_preview(monkeypatch) -> None:
         library.mkdir()
         (album_dir / "01 - Song One.flac").write_text("x", encoding="utf-8")
 
+        albums, _errors = music_util.discover_albums(source, ["flac"])
+        cache_key = music_util.album_decision_cache_key(albums[0])
+        cache = library / ".plexify" / "cache.json"
+        cache.parent.mkdir(parents=True)
+        cache.write_text(
+            f'{{"music":{{"{cache_key}":{{"decision":"selected","chosen_mbid":"mb1","reason":"cached release"}}}}}}',
+            encoding="utf-8",
+        )
+
         controller = MusicUIController(MusicUIConfig(source=source, library=library))
         controller.scan()
-        controller.select_candidate(0, 0)
-        preview = controller.build_preview()
 
         assert len(controller.albums) == 1
-        assert len(preview.plans) == 1
-        assert preview.plans[0].media_type == "music"
+        assert controller.albums[0].cached_decision == "selected"
+        assert controller.albums[0].selected_candidate_index == 0
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 
 
 def test_textual_video_flow_to_result(monkeypatch) -> None:
-    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
-        candidate = cli.Candidate(
-            title="Movie",
-            year=2001,
-            source="Wikidata",
-            confidence=1.0,
-            metadata={"qid": "Q1", "title": "Movie", "year": 2001},
-        )
-        return cli.CandidatePage(candidates=[candidate], raw_results=[], next_offset=0, has_more=False)
-
-    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(ui_controller, "load_movie_candidates", _fake_movie_page)
 
     workspace = _local_tmp("video-app")
     try:
@@ -140,7 +184,6 @@ def test_textual_video_flow_to_result(monkeypatch) -> None:
                     await pilot.pause()
                     if app.screen.__class__.__name__ == "ReviewScreen":
                         break
-                assert app.screen.__class__.__name__ == "ReviewScreen"
                 review = app.screen
                 review.query_one("#accept", Button).press()
                 review.query_one("#preview", Button).press()
@@ -158,57 +201,121 @@ def test_textual_video_flow_to_result(monkeypatch) -> None:
         shutil.rmtree(workspace, ignore_errors=True)
 
 
-def test_textual_music_flow_to_preview(monkeypatch) -> None:
-    monkeypatch.setattr(
-        musicbrainz,
-        "search_releases",
-        lambda *_args, **_kwargs: [
-            musicbrainz.ReleaseCandidate(
-                mbid="mb1",
-                title="Album",
-                artist="Artist",
-                year=2001,
-                country="GB",
-                score=1.0,
-                track_count=1,
-            )
-        ],
-    )
-    monkeypatch.setattr(
-        musicbrainz,
-        "fetch_release_tracks",
-        lambda *_args, **_kwargs: [musicbrainz.Track(number=1, title="Song One", disc=1)],
-    )
-    monkeypatch.setattr(musicbrainz, "is_available", lambda: True)
+def test_textual_apply_mode_uses_confirmation(monkeypatch) -> None:
+    monkeypatch.setattr(ui_controller, "load_movie_candidates", _fake_movie_page)
 
-    workspace = _local_tmp("music-app")
+    workspace = _local_tmp("video-confirm")
     try:
-        source = workspace / "source"
+        incoming = workspace / "incoming"
         library = workspace / "library"
-        album_dir = source / "Artist" / "Album"
-        album_dir.mkdir(parents=True)
+        incoming.mkdir()
         library.mkdir()
-        (album_dir / "01 - Song One.flac").write_text("x", encoding="utf-8")
+        (incoming / "Movie.mkv").write_text("x", encoding="utf-8")
 
         async def _run() -> None:
             app = PlexifyTextualApp()
             async with app.run_test() as pilot:
-                app.push_screen(ConfigScreen("music"))
+                app.push_screen(ConfigScreen("video"))
                 await pilot.pause()
                 screen = app.screen
-                screen.query_one("#path-one", Input).value = str(source)
+                screen.query_one("#path-one", Input).value = str(incoming)
+                screen.query_one("#path-two", Input).value = str(library)
+                screen.query_one("#apply-mode", Checkbox).value = True
+                screen.query_one("#scan", Button).press()
+                for _ in range(20):
+                    await pilot.pause()
+                    if app.screen.__class__.__name__ == "ReviewScreen":
+                        break
+                review = app.screen
+                review.query_one("#accept", Button).press()
+                review.query_one("#preview", Button).press()
+                await pilot.pause()
+                app.screen.query_one("#apply", Button).press()
+                await pilot.pause()
+                assert app.screen.__class__.__name__ == "ConfirmApplyScreen"
+                app.screen.query_one("#confirm-apply", Button).press()
+                for _ in range(20):
+                    await pilot.pause()
+                    if app.screen.__class__.__name__ == "ResultScreen":
+                        break
+                assert app.screen.__class__.__name__ == "ResultScreen"
+
+        asyncio.run(_run())
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_textual_invalid_config_shows_error() -> None:
+    workspace = _local_tmp("invalid-config")
+
+    async def _run() -> None:
+        app = PlexifyTextualApp()
+        async with app.run_test() as pilot:
+            app.push_screen(ConfigScreen("video"))
+            await pilot.pause()
+            screen = app.screen
+            screen.query_one("#path-one", Input).value = str(workspace / "missing")
+            screen.query_one("#path-two", Input).value = str(workspace / "library")
+            screen.query_one("#scan", Button).press()
+            await pilot.pause()
+            assert "must exist" in str(screen.query_one("#config-error", Static).renderable)
+
+    try:
+        asyncio.run(_run())
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_textual_unresolved_preview_disables_apply(monkeypatch) -> None:
+    def _fake_tv_page(*_args, **_kwargs) -> ui_services.UICandidatePage:
+        return ui_services.UICandidatePage(
+            candidates=[
+                ui_services.UICandidate(
+                    title="Series",
+                    year=2008,
+                    source="TVMaze",
+                    confidence=1.0,
+                    metadata={"id": 1, "name": "Series", "year": 2008},
+                )
+            ],
+            raw_results=[],
+            next_offset=0,
+            has_more=False,
+        )
+
+    monkeypatch.setattr(ui_controller, "load_tv_candidates", _fake_tv_page)
+    monkeypatch.setattr(ui_controller, "load_movie_candidates", _fake_movie_page)
+
+    workspace = _local_tmp("video-preview-gate")
+    try:
+        incoming = workspace / "incoming" / "Series"
+        library = workspace / "library"
+        incoming.mkdir(parents=True)
+        library.mkdir()
+        (incoming / "Pilot.mkv").write_text("x", encoding="utf-8")
+
+        async def _run() -> None:
+            app = PlexifyTextualApp()
+            async with app.run_test() as pilot:
+                app.push_screen(ConfigScreen("video"))
+                await pilot.pause()
+                screen = app.screen
+                screen.query_one("#path-one", Input).value = str(workspace / "incoming")
                 screen.query_one("#path-two", Input).value = str(library)
                 screen.query_one("#scan", Button).press()
                 for _ in range(20):
                     await pilot.pause()
                     if app.screen.__class__.__name__ == "ReviewScreen":
                         break
-                assert app.screen.__class__.__name__ == "ReviewScreen"
                 review = app.screen
+                review.query_one("#switch", Button).press()
+                await pilot.pause()
                 review.query_one("#accept", Button).press()
                 review.query_one("#preview", Button).press()
                 await pilot.pause()
-                assert app.screen.__class__.__name__ == "PreviewScreen"
+                preview = app.screen
+                assert preview.query_one("#apply", Button).disabled is True
+                assert "Unresolved:" in str(preview.query_one("#preview-plans", Static).renderable)
 
         asyncio.run(_run())
     finally:

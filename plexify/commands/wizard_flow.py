@@ -246,7 +246,7 @@ def wizard_video(
             console.print("Warning: move will remove the original files from the incoming folder.")
             prune_empty_dirs = confirm_fn("Prune empty folders after move? [y/N]", False, None, show_default=False)
 
-    auto_accept = confirm_fn("Auto-accept high-confidence matches? [Y/n]", True, None, show_default=False)
+    auto_accept = confirm_fn("Auto-accept unambiguous high-confidence matches? [Y/n]", True, None, show_default=False)
     while True:
         min_text = prompt_text_fn("Minimum confidence", str(default_min_confidence), None)
         try:

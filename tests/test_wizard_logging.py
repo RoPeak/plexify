@@ -73,6 +73,35 @@ def test_wizard_video_passes_safe_defaults_to_runtime_organise(monkeypatch) -> N
     assert captured.get("allow_risky_enter_accept") is False
 
 
+def test_wizard_video_uses_unambiguous_auto_accept_prompt(monkeypatch) -> None:
+    incoming = Path("plexify")
+    library = Path("tests")
+
+    monkeypatch.setattr(cli, "_prompt_non_overlapping_paths", lambda **_kwargs: (incoming, library))
+    monkeypatch.setattr(cli, "_save_wizard_prefs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_detect_media_in_path", lambda *_args, **_kwargs: (False, True))
+    monkeypatch.setattr(
+        cli,
+        "_prompt_choice_loop",
+        lambda prompt, *_args, **_kwargs: ("movie" if prompt.startswith("Media type") else "dry-run"),
+    )
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: str(cli.DEFAULT_MIN_CONFIDENCE))
+    monkeypatch.setattr(cli, "_build_command", lambda *_args, **_kwargs: "python -m plexify.cli organise")
+    monkeypatch.setattr(cli, "run_organise", lambda *_args, **_kwargs: None)
+
+    prompts: list[str] = []
+
+    def _fake_confirm(prompt: str, *_args, **_kwargs) -> bool:
+        prompts.append(prompt)
+        return True
+
+    monkeypatch.setattr(cli, "_confirm", _fake_confirm)
+
+    cli._wizard_video(log_level="INFO", log_format="text", log_file=None)
+
+    assert "Auto-accept unambiguous high-confidence matches? [Y/n]" in prompts
+
+
 def test_wizard_video_command_and_runtime_flags_stay_aligned(monkeypatch) -> None:
     incoming = Path("plexify")
     library = Path("tests")

@@ -22,6 +22,10 @@ def test_organise_help():
     assert "--offline" in result.output
     assert "--quiet" in result.output
     assert "--prune-ignore" in result.output
+    assert "Auto-accept unambiguous top" in result.output
+    assert "result when confidence >=" in result.output
+    assert "Minimum confidence for" in result.output
+    assert "unambiguous auto acceptance" in result.output
 
 
 def test_cache_help():

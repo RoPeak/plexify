@@ -2287,6 +2287,10 @@ def organise(
         is_flag=True,
     ),
 ) -> None:
+    """Organise video files for Plex.
+
+    Logging flags: --log-level, --log-format, --log-file.
+    """
     move = _coerce_bool_flag(move, default=False)
     copy = _coerce_bool_flag(copy, default=False)
     interactive = _coerce_bool_flag(interactive, default=False)
@@ -2382,6 +2386,10 @@ def music(
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
 ) -> None:
+    """Organise music files for Plex.
+
+    Logging flags: --log-level, --log-format, --log-file.
+    """
     _initialise_logging(log_level, log_format, log_file)
     if not isinstance(plan_preview_tracks, int):
         plan_preview_tracks = 0
@@ -2971,6 +2979,10 @@ def wizard(
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
 ) -> None:
+    """Run the interactive setup wizard.
+
+    Logging flags: --log-level, --log-format, --log-file.
+    """
     console.print("Plexify wizard")
     console.print("Tip: you can drag-and-drop a folder into the terminal to paste its full path.")
     use_log_file = _confirm(

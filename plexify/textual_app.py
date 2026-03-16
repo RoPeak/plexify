@@ -501,12 +501,13 @@ class ResultScreen(Screen):
     def __init__(self, result: ApplyResultState) -> None:
         super().__init__()
         self.result = result
+        self._result_summary = Static("", id="result-summary")
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Vertical(id="result"):
             yield Static("Run Result", classes="screen-title")
-            yield Static("", id="result-summary")
+            yield self._result_summary
             with Horizontal(classes="button-row"):
                 yield Button("Home", id="home")
                 yield Button("Quit", id="quit")
@@ -520,7 +521,7 @@ class ResultScreen(Screen):
         if self.result.result.errors:
             lines.append("")
             lines.extend(f"Error: {error}" for error in self.result.result.errors[:10])
-        self.query_one("#result-summary", Static).update("\n".join(lines))
+        self._result_summary.update("\n".join(lines))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "home":

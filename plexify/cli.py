@@ -31,7 +31,7 @@ from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_
 from .prompting import _prompt_text
 from . import prompting_ui
 from .report import ReportFormatError, open_report_stream, write_report
-from .services import movie_matcher, music_matcher, tv_matcher
+from .services import movie_matcher, music_matcher, organise_service, selection_policy, tv_matcher
 from .sources import musicbrainz, tvmaze, wikidata
 from .tv_episode_cache import EpisodeCache
 from .undo import undo_report
@@ -186,6 +186,11 @@ class PlanStats:
     user_confirmed: int = 0
     manual: int = 0
     skipped: int = 0
+    filtered_media_type: int = 0
+    no_candidates: int = 0
+    manual_skip: int = 0
+    offline_no_cache: int = 0
+    conflict_skip: int = 0
     errors: int = 0
     cache_hits: int = 0
     elapsed: float = 0.0
@@ -1047,7 +1052,7 @@ def _prompt_search(item: InferredItem, progress: Progress | None) -> tuple[Infer
     return _with_title(item, query), _build_search_query(query, hint)
 
 
-def _record_stat(stats: PlanStats | None, outcome: str) -> None:
+def _record_stat(stats: PlanStats | None, outcome: str, *, reason: str | None = None) -> None:
     if stats is None:
         return
     if outcome == "auto":
@@ -1058,6 +1063,8 @@ def _record_stat(stats: PlanStats | None, outcome: str) -> None:
         stats.manual += 1
     elif outcome == "skipped":
         stats.skipped += 1
+        if reason and hasattr(stats, reason):
+            setattr(stats, reason, int(getattr(stats, reason, 0)) + 1)
 
 
 def _record_cache_hit(stats: PlanStats | None) -> None:
@@ -1072,6 +1079,11 @@ def _snapshot_stats(stats: PlanStats) -> PlanStats:
         user_confirmed=stats.user_confirmed,
         manual=stats.manual,
         skipped=stats.skipped,
+        filtered_media_type=stats.filtered_media_type,
+        no_candidates=stats.no_candidates,
+        manual_skip=stats.manual_skip,
+        offline_no_cache=stats.offline_no_cache,
+        conflict_skip=stats.conflict_skip,
         errors=stats.errors,
         cache_hits=stats.cache_hits,
         elapsed=stats.elapsed,
@@ -1101,7 +1113,7 @@ def _should_promote_to_reusable(
     candidates: list[Candidate],
 ) -> bool:
     top_gap = candidates[0].confidence - candidates[1].confidence if len(candidates) > 1 else 0.0
-    return should_promote_to_reusable(
+    return selection_policy.should_promote_candidate_to_reusable(
         selection_mode=selection_mode,
         manual=bool(selected.metadata.get("manual")),
         confidence=selected.confidence,
@@ -1120,7 +1132,14 @@ def _auto_acceptable(
     search_query: str,
     target_year: int | None,
 ) -> bool:
-    return ui_services.auto_acceptable(candidates, min_confidence, title=title, search_query=search_query, target_year=target_year)
+    return selection_policy.auto_acceptable(
+        candidates,
+        min_confidence,
+        title=title,
+        search_query=search_query,
+        target_year=target_year,
+        auto_acceptable_fn=ui_services.auto_acceptable,
+    )
 
 
 def _reusable_cache_hit_looks_risky(item: InferredItem, candidates: list[Candidate], min_confidence: float) -> bool:
@@ -1162,11 +1181,15 @@ def _candidate_prompt_policy(
 ) -> CandidatePromptPolicy:
     low_confidence = candidates[0].confidence < min_confidence
     risky_reusable_cache_hit = cache_reusable and _reusable_cache_hit_looks_risky(item, candidates, min_confidence)
-    require_explicit_choice = (low_confidence or risky_reusable_cache_hit) and not allow_risky_enter_accept
-    return CandidatePromptPolicy(
+    policy = selection_policy.build_candidate_prompt_policy(
         low_confidence=low_confidence,
         risky_reusable_cache_hit=risky_reusable_cache_hit,
-        require_explicit_choice=require_explicit_choice,
+        allow_risky_enter_accept=allow_risky_enter_accept,
+    )
+    return CandidatePromptPolicy(
+        low_confidence=policy.low_confidence,
+        risky_reusable_cache_hit=policy.risky_reusable_cache_hit,
+        require_explicit_choice=policy.require_explicit_choice,
     )
 
 
@@ -2088,7 +2111,7 @@ def _process_item(
                             path=item.path,
                             title=item.title,
                         )
-                    _record_stat(stats, "skipped")
+                    _record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
                     return None, False
                 if _confirm("No TV candidates. Switch to movie search? [y/N]", False, progress, show_default=False):
                     _persist_media_type_override(cache, override_key, "movie", media_type_overrides, progress)
@@ -2200,7 +2223,7 @@ def _process_item(
                     outcome = "manual"
                     break
                 if empty_choice == "k":
-                    _record_stat(stats, "skipped")
+                    _record_stat(stats, "skipped", reason="manual_skip")
                     return None, False
                 if empty_choice == "q":
                     raise typer.Exit(code=0)
@@ -2221,7 +2244,7 @@ def _process_item(
                 outcome = "auto"
                 break
             if not interactive:
-                _record_stat(stats, "skipped")
+                _record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
                 return None, False
             policy = _candidate_prompt_policy(
                 item=item,
@@ -2365,7 +2388,7 @@ def _process_item(
                 outcome = "manual"
                 break
             if choice == "k":
-                _record_stat(stats, "skipped")
+                _record_stat(stats, "skipped", reason="manual_skip")
                 return None, False
             if choice == "q":
                 raise typer.Exit(code=0)
@@ -2430,7 +2453,7 @@ def _process_item(
                 return None, False
             season_prompt = _prompt_int_or_control("Season", item.season or 1, progress)
             if season_prompt == "k":
-                _record_stat(stats, "skipped")
+                _record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
                 return None, False
             if season_prompt == "q":
                 raise typer.Exit(code=0)
@@ -2545,7 +2568,7 @@ def _process_item(
         )
         destination, collision = _resolve_destination(destination, on_conflict, planned, progress)
         if destination is None:
-            _record_stat(stats, "skipped")
+            _record_stat(stats, "skipped", reason="conflict_skip")
             return None, False
         if len(str(destination)) > 240:
             _safe_print("Warning: destination path is very long and may exceed Windows limits.", progress)
@@ -2580,6 +2603,7 @@ def _process_item(
 
     raw_results_movie: list[wikidata.WikidataCandidate] | None = None
     next_offset = 0
+    movie_page_limit = 1 if auto_accept and not interactive else 5
     search_query = _build_search_query(item.title, None)
     page = _fetch_with_retry(
         "Wikidata",
@@ -2593,6 +2617,7 @@ def _process_item(
             raw_results=raw_results_movie,
             search_query=search_query,
             progress=progress,
+            limit=movie_page_limit,
             offline=offline,
             interactive=interactive,
             movie_entity_cache=movie_entity_cache,
@@ -2623,7 +2648,7 @@ def _process_item(
                         path=item.path,
                         title=item.title,
                     )
-                _record_stat(stats, "skipped")
+                _record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
                 return None, False
             if _confirm("No movie candidates. Switch to TV search? [y/N]", False, progress, show_default=False):
                 _persist_media_type_override(cache, override_key, "tv", media_type_overrides, progress)
@@ -2770,7 +2795,7 @@ def _process_item(
                 outcome = "manual"
                 break
             if empty_choice == "k":
-                _record_stat(stats, "skipped")
+                _record_stat(stats, "skipped", reason="manual_skip")
                 return None, False
             if empty_choice == "q":
                 raise typer.Exit(code=0)
@@ -2964,7 +2989,7 @@ def _process_item(
             outcome = "manual"
             break
         if choice == "k":
-            _record_stat(stats, "skipped")
+            _record_stat(stats, "skipped", reason="manual_skip")
             return None, False
         if choice == "q":
             raise typer.Exit(code=0)
@@ -3044,7 +3069,7 @@ def _process_item(
     destination = plan_movie(library, metadata.get("title") or selected.title, year, item.path.suffix)
     destination, collision = _resolve_destination(destination, on_conflict, planned, progress)
     if destination is None:
-        _record_stat(stats, "skipped")
+        _record_stat(stats, "skipped", reason="conflict_skip")
         return None, False
     if len(str(destination)) > 240:
         _safe_print("Warning: destination path is very long and may exceed Windows limits.", progress)
@@ -3165,6 +3190,7 @@ def run_organise(options: OrganiseOptions) -> None:
         quiet = False
     if not isinstance(prune_ignore, str):
         prune_ignore = DEFAULT_PRUNE_IGNORE
+    options.prune_ignore = prune_ignore
     if mode == "dry-run":
         console.print("DRY-RUN: no files will be moved/copied.")
     if offline:
@@ -3173,193 +3199,40 @@ def run_organise(options: OrganiseOptions) -> None:
     if not isinstance(copy_mode, bool):
         copy_mode = True
 
-    ignored_prune_files = _parse_prune_ignore(prune_ignore)
-    cache_path = cache or library / ".plexify" / "cache.json"
-    report_path = report or library / ".plexify" / "reports" / f"{now_timestamp()}.json"
-    if clear_cache:
-        cache_path.unlink(missing_ok=True)
-
-    media_type_filter = None if media_type == "auto" else media_type
+    options.run_id = run_id
+    options.build_tree_fn = _build_tree
+    options.skip_reason_lines_fn = video_flow.skip_reason_lines
+    options.rich_escape_fn = rich_escape
     global QUIET_OUTPUT
     previous_quiet_output = QUIET_OUTPUT
     QUIET_OUTPUT = quiet and not interactive_mode
     try:
-        plans, errors, stats = _plan_items(
-            incoming=incoming,
-            library=library,
-            mode=mode,
-            copy_mode=copy_mode,
-            interactive=interactive_mode,
-            auto_accept=yes,
-            min_confidence=min_confidence,
-            extensions=extensions,
-            cache_path=cache_path,
-            limit=limit,
-            show_cache=interactive_mode or print_tree,
-            media_type_filter=media_type_filter,
-            use_cache=not no_cache,
-            on_conflict=on_conflict,
-            offline=offline,
-            allow_risky_enter_accept=allow_risky_enter_accept,
+        organise_service.run_video_workflow(
+            options=options,
+            console=console,
+            plan_items_fn=_plan_items,
+            select_preview_plans_fn=_select_preview_plans,
+            preview_spans_multiple_groups_fn=_preview_spans_multiple_groups,
+            confirm_move_fn=_confirm_move,
+            confirm_fn=_confirm,
+            confirm_overwrite_apply_fn=_confirm_overwrite_apply,
+            apply_with_streamed_report_fn=_apply_with_streamed_report,
+            execute_plans_fn=execute_plans,
+            prune_empty_dirs_fn=_prune_empty_dirs,
+            parse_prune_ignore_fn=_parse_prune_ignore,
+            write_report_fn=write_report,
+            print_run_summary_fn=_print_run_summary,
+            build_command_config_cls=BuildCommandConfig,
+            build_command_fn=_build_command,
+            parse_extensions_fn=_parse_extensions,
+            format_path_fn=format_path,
+            now_timestamp_fn=now_timestamp,
+            log_event_fn=log_event,
+            logger=logger,
+            typer_module=typer,
         )
     finally:
         QUIET_OUTPUT = previous_quiet_output
-
-    if print_tree and plans:
-        tree = _build_tree([plan.destination for plan in plans])
-        console.print(tree)
-
-    apply_mode = mode == "apply"
-    if apply_mode and interactive_mode:
-        console.print("Plan summary:")
-        console.print(f"Planned items: {len(plans)}")
-        console.print(f"Skipped: {stats.skipped}")
-        console.print(f"Errors: {stats.errors + len(errors)}")
-        preview = _select_preview_plans(plans, limit=5)
-        if preview:
-            if _preview_spans_multiple_groups(preview):
-                console.print("Preview (sampled across shows/titles):")
-            else:
-                console.print("Preview:")
-            for plan in preview:
-                console.print(f"FROM: {format_path(plan.source)}")
-                console.print(f"TO:   {format_path(plan.destination)}")
-        if not copy_mode:
-            console.print("Warning: move will remove the original files from the incoming folder.")
-            if not _confirm_move(None):
-                console.print("Cancelled. No changes were made.")
-                raise typer.Exit(code=0)
-        else:
-            if not _confirm("Apply this plan now? [y/N]", False, None, show_default=False):
-                console.print("Cancelled. No changes were made.")
-                raise typer.Exit(code=0)
-    if apply_mode and plans and on_conflict == "overwrite":
-        if not interactive_mode and not sys.stdin.isatty():
-            console.print("Overwrite mode requires an interactive confirmation token (OVERWRITE).")
-            raise typer.Exit(code=2)
-        if not _confirm_overwrite_apply(plans, copy_mode):
-            console.print("Cancelled. No changes were made.")
-            raise typer.Exit(code=0)
-    if apply_mode and plans:
-        result = _apply_with_streamed_report(plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=report_path)
-    else:
-        result = execute_plans(plans, apply=apply_mode, copy_mode=copy_mode, on_conflict=on_conflict)
-
-    if prune_empty_dirs and not copy_mode and plans:
-        if apply_mode:
-            _prune_empty_dirs(result.moved, incoming, dry_run=False, ignored_files=ignored_prune_files)
-        else:
-            _prune_empty_dirs(plans, incoming, dry_run=True, ignored_files=ignored_prune_files)
-
-    if not apply_mode:
-        write_report(report_path, plans, mode, copy_mode)
-    elif not plans:
-        write_report(report_path, [], mode, copy_mode)
-    _print_run_summary(
-        stats=stats,
-        plans=plans,
-        errors=errors,
-        result=result,
-        cache_path=None if no_cache else cache_path,
-        report_path=report_path,
-    )
-
-    apply_report_path = None
-    if not apply_mode and interactive_mode and plans:
-        if _confirm("Apply these changes now? [y/N]", False, None, show_default=False):
-            if on_conflict == "overwrite" and not _confirm_overwrite_apply(plans, copy_mode):
-                console.print("Cancelled. No changes were made.")
-            elif not copy_mode:
-                console.print("Warning: move will remove the original files from the incoming folder.")
-                if not _confirm_move(None):
-                    console.print("Cancelled. No changes were made.")
-                else:
-                    apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
-                    result = _apply_with_streamed_report(
-                        plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path
-                    )
-                    if prune_empty_dirs:
-                        _prune_empty_dirs(result.moved, incoming, dry_run=False, ignored_files=ignored_prune_files)
-            else:
-                apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp()}.json"
-                result = _apply_with_streamed_report(
-                    plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path
-                )
-
-    if not apply_mode:
-        apply_config = BuildCommandConfig(
-            incoming=incoming,
-            library=library,
-            media_type=media_type,
-            mode="apply",
-            copy_mode=copy_mode,
-            extensions=_parse_extensions(extensions),
-            min_confidence=min_confidence,
-            limit=limit,
-            interactive=interactive_mode,
-            print_tree=print_tree,
-            show_enrichment=False,
-            yes=yes,
-            no_cache=no_cache,
-            cache_file=cache,
-            clear_cache=clear_cache,
-            report=None,
-            on_conflict=on_conflict,
-            prune_empty_dirs=prune_empty_dirs,
-            quiet=quiet,
-            prune_ignore=prune_ignore,
-            allow_risky_enter_accept=allow_risky_enter_accept,
-            strict_safe=strict_safe,
-        )
-        console.print("Apply command:")
-        console.print(_build_command(apply_config))
-        if apply_report_path is not None:
-            console.print(f"Apply report written: {format_path(apply_report_path)}")
-
-    if result.errors or errors:
-        log_event(
-            logger,
-            "run_finished",
-            run_id=run_id,
-            command="organise",
-            status="error",
-            planned_count=len(plans),
-            skipped_count=stats.skipped,
-            error_count=len(result.errors) + len(errors),
-            elapsed_seconds=stats.elapsed,
-            applied=apply_mode,
-        )
-        console.print("Errors:")
-        for error in result.errors + errors:
-            console.print(f"- {rich_escape(error)}")
-        raise typer.Exit(code=1)
-    if not plans:
-        log_event(
-            logger,
-            "run_finished",
-            run_id=run_id,
-            command="organise",
-            status="empty",
-            planned_count=0,
-            skipped_count=stats.skipped,
-            error_count=0,
-            elapsed_seconds=stats.elapsed,
-            applied=apply_mode,
-        )
-        raise typer.Exit(code=1)
-    log_event(
-        logger,
-        "run_finished",
-        run_id=run_id,
-        command="organise",
-        status="success",
-        planned_count=len(plans),
-        skipped_count=stats.skipped,
-        error_count=0,
-        elapsed_seconds=stats.elapsed,
-        applied=apply_mode,
-    )
-    raise typer.Exit(code=0)
 
 
 @app.command()

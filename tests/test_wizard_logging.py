@@ -53,7 +53,8 @@ def test_wizard_video_passes_safe_defaults_to_runtime_organise(monkeypatch) -> N
             else "dry-run"
         ),
     )
-    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: True)
+    answers = iter([True, False, True, False, True])
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: next(answers))
     monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: str(cli.DEFAULT_MIN_CONFIDENCE))
     monkeypatch.setattr(cli, "_build_command", lambda *_args, **_kwargs: "python -m plexify.cli organise")
 
@@ -99,7 +100,8 @@ def test_wizard_video_uses_unambiguous_auto_accept_prompt(monkeypatch) -> None:
 
     cli._wizard_video(log_level="INFO", log_format="text", log_file=None)
 
-    assert "Auto-accept unambiguous high-confidence matches? [Y/n]" in prompts
+    assert "Automatically accept only clearly unambiguous high-confidence matches? [Y/n]" in prompts
+    assert "Allow Enter to accept the top candidate even in risky prompts? [y/N]" in prompts
 
 
 def test_wizard_video_command_and_runtime_flags_stay_aligned(monkeypatch) -> None:
@@ -114,7 +116,8 @@ def test_wizard_video_command_and_runtime_flags_stay_aligned(monkeypatch) -> Non
         "_prompt_choice_loop",
         lambda prompt, *_args, **_kwargs: ("movie" if prompt.startswith("Media type") else "dry-run"),
     )
-    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: True)
+    answers = iter([True, False, True, False, True])
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: next(answers))
     monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: str(cli.DEFAULT_MIN_CONFIDENCE))
 
     captured: dict[str, object] = {}

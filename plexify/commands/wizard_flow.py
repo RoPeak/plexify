@@ -246,7 +246,18 @@ def wizard_video(
             console.print("Warning: move will remove the original files from the incoming folder.")
             prune_empty_dirs = confirm_fn("Prune empty folders after move? [y/N]", False, None, show_default=False)
 
-    auto_accept = confirm_fn("Auto-accept unambiguous high-confidence matches? [Y/n]", True, None, show_default=False)
+    auto_accept = confirm_fn(
+        "Automatically accept only clearly unambiguous high-confidence matches? [Y/n]",
+        True,
+        None,
+        show_default=False,
+    )
+    allow_risky_enter_accept = confirm_fn(
+        "Allow Enter to accept the top candidate even in risky prompts? [y/N]",
+        False,
+        None,
+        show_default=False,
+    )
     while True:
         min_text = prompt_text_fn("Minimum confidence", str(default_min_confidence), None)
         try:
@@ -286,7 +297,7 @@ def wizard_video(
         prune_empty_dirs=prune_empty_dirs,
         quiet=False,
         prune_ignore=default_prune_ignore,
-        allow_risky_enter_accept=False,
+        allow_risky_enter_accept=allow_risky_enter_accept,
         strict_safe=False,
     )
     command = build_command_fn(command_config)
@@ -318,7 +329,7 @@ def wizard_video(
             prune_empty_dirs=prune_empty_dirs,
             prune_ignore=default_prune_ignore,
             quiet=False,
-            allow_risky_enter_accept=False,
+            allow_risky_enter_accept=allow_risky_enter_accept,
             strict_safe=False,
         )
     )

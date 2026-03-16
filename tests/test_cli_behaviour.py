@@ -112,6 +112,271 @@ def test_plan_items_advances_progress(monkeypatch, tmp_path: Path) -> None:
     assert max(value for value in completed if value is not None) <= 2
 
 
+def test_plan_items_reports_filtered_media_type_reason(monkeypatch) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(cli, "_safe_print", lambda message, _progress=None: messages.append(str(message)))
+    monkeypatch.setattr(cli, "_process_item", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not process")))
+    file_path = Path("C:/Video/Unorganised/Blade_Runner_2049_-__m0012ygz_original.mp4")
+    monkeypatch.setattr(cli.video_flow, "iter_video_files", lambda *_args, **_kwargs: [file_path])
+
+    _plans, _errors, stats = cli._plan_items(
+        incoming=Path("C:/Video/Unorganised"),
+        library=Path("C:/Video/Organised"),
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=False,
+        min_confidence=0.55,
+        extensions=cli.DEFAULT_EXTENSIONS,
+        cache_path=Path("cache.json"),
+        limit=None,
+        show_cache=False,
+        media_type_filter="tv",
+        use_cache=True,
+        on_conflict="rename",
+    )
+
+    assert stats.skipped == 1
+    assert stats.filtered_media_type == 1
+    assert any("inferred as movie" in message for message in messages)
+
+
+def test_skip_reason_lines_include_reason_breakdown() -> None:
+    stats = cli.PlanStats(skipped=3, filtered_media_type=1, manual_skip=2)
+    assert cli.video_flow.skip_reason_lines(stats) == [
+        "Skip reasons: filtered by media type=1, user skipped=2"
+    ]
+
+
+def test_process_item_offline_no_candidates_tracks_offline_reason(monkeypatch) -> None:
+    incoming = Path("C:/Video/Incoming")
+    library = Path("C:/Video/Library")
+    path = incoming / "Movie.mkv"
+    item = InferredItem(path=path, media_type="movie", title="Movie", year=2001, episode_title=None)
+    stats = cli.PlanStats()
+
+    monkeypatch.setattr(
+        cli,
+        "_movie_candidates",
+        lambda *_args, **_kwargs: cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False),
+    )
+    monkeypatch.setattr(cli, "_save_cache", lambda *_args, **_kwargs: None)
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=Cache(Path("cache.json")),
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=False,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        stats=stats,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+        offline=True,
+    )
+
+    assert plan is None
+    assert stats.skipped == 1
+    assert stats.offline_no_cache == 1
+
+
+def test_process_item_manual_skip_tracks_reason(monkeypatch) -> None:
+    incoming = Path("C:/Video/Incoming")
+    library = Path("C:/Video/Library")
+    path = incoming / "Movie.mkv"
+    item = InferredItem(path=path, media_type="movie", title="Movie", year=2001, episode_title=None)
+    stats = cli.PlanStats()
+
+    monkeypatch.setattr(
+        cli,
+        "_movie_candidates",
+        lambda *_args, **_kwargs: cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False),
+    )
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(cli, "_select_candidate", lambda *_args, **_kwargs: "k")
+    monkeypatch.setattr(cli, "_save_cache", lambda *_args, **_kwargs: None)
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=Cache(Path("cache.json")),
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=False,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        stats=stats,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is None
+    assert stats.skipped == 1
+    assert stats.manual_skip == 1
+
+
+def test_process_item_conflict_skip_tracks_reason(monkeypatch) -> None:
+    incoming = Path("C:/Video/Incoming")
+    library = Path("C:/Video/Library")
+    path = incoming / "Movie.mkv"
+    item = InferredItem(path=path, media_type="movie", title="Movie", year=2001, episode_title=None)
+    stats = cli.PlanStats()
+
+    monkeypatch.setattr(
+        cli,
+        "_movie_candidates",
+        lambda *_args, **_kwargs: cli.CandidatePage(
+            candidates=[cli.Candidate("Movie", 2001, "Wikidata", 1.0, {"qid": "Q1", "title": "Movie", "year": 2001})],
+            raw_results=[],
+            next_offset=0,
+            has_more=False,
+        ),
+    )
+    monkeypatch.setattr(cli, "_resolve_destination", lambda *_args, **_kwargs: (None, False))
+    monkeypatch.setattr(cli, "_save_cache", lambda *_args, **_kwargs: None)
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=Cache(Path("cache.json")),
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        stats=stats,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="skip",
+    )
+
+    assert plan is None
+    assert stats.skipped == 1
+    assert stats.conflict_skip == 1
+
+
+def test_movie_candidates_limit_one_fetches_only_top_match(monkeypatch) -> None:
+    item = InferredItem(path=Path("Movie.mkv"), media_type="movie", title="Movie", year=2001, episode_title=None)
+    raw_results = [
+        cli.wikidata.WikidataCandidate(qid="Q1", label="Movie", description="2001 film"),
+        cli.wikidata.WikidataCandidate(qid="Q2", label="Movie 2", description="2002 film"),
+        cli.wikidata.WikidataCandidate(qid="Q3", label="Movie 3", description="2003 film"),
+    ]
+    fetched: list[str] = []
+
+    def _fake_fetch_entity(qid: str, session=None):
+        fetched.append(qid)
+        return cli.wikidata.WikidataFilm(qid=qid, title="Movie", year=2001, is_film=True)
+
+    monkeypatch.setattr(cli.wikidata, "fetch_entity", _fake_fetch_entity)
+
+    page = cli._movie_candidates(
+        item,
+        session=requests.Session(),
+        cache=Cache(Path("cache.json")),
+        show_cache=False,
+        raw_results=raw_results,
+        limit=1,
+        interactive=False,
+        movie_entity_cache={},
+    )
+
+    assert len(page.candidates) == 1
+    assert fetched == ["Q1"]
+
+
+def test_movie_candidates_interactive_fetches_only_current_page(monkeypatch) -> None:
+    item = InferredItem(path=Path("Movie.mkv"), media_type="movie", title="Movie", year=2001, episode_title=None)
+    raw_results = [
+        cli.wikidata.WikidataCandidate(qid="Q1", label="Movie", description="2001 film"),
+        cli.wikidata.WikidataCandidate(qid="Q2", label="Movie Alt", description="2002 film"),
+        cli.wikidata.WikidataCandidate(qid="Q3", label="Movie Else", description="2003 film"),
+    ]
+    fetched: list[str] = []
+
+    def _fake_fetch_entity(qid: str, session=None):
+        fetched.append(qid)
+        return cli.wikidata.WikidataFilm(qid=qid, title=qid, year=2001, is_film=True)
+
+    monkeypatch.setattr(cli.wikidata, "fetch_entity", _fake_fetch_entity)
+
+    page = cli._movie_candidates(
+        item,
+        session=requests.Session(),
+        cache=Cache(Path("cache.json")),
+        show_cache=False,
+        raw_results=raw_results,
+        limit=2,
+        interactive=True,
+        movie_entity_cache={},
+    )
+
+    assert len(page.candidates) == 2
+    assert fetched == ["Q1", "Q2"]
+
+
+def test_movie_candidates_reuses_negative_entity_cache(monkeypatch) -> None:
+    item = InferredItem(path=Path("Movie.mkv"), media_type="movie", title="Movie", year=2001, episode_title=None)
+    raw_results = [
+        cli.wikidata.WikidataCandidate(qid="Q1", label="Movie", description="2001 film"),
+        cli.wikidata.WikidataCandidate(qid="Q2", label="Movie Alt", description="2002 film"),
+    ]
+    fetched: list[str] = []
+
+    def _fake_fetch_entity(qid: str, session=None):
+        fetched.append(qid)
+        if qid == "Q1":
+            return cli.wikidata.WikidataFilm(qid=qid, title="Movie", year=2001, is_film=False)
+        return cli.wikidata.WikidataFilm(qid=qid, title="Movie", year=2001, is_film=True)
+
+    monkeypatch.setattr(cli.wikidata, "fetch_entity", _fake_fetch_entity)
+    cache_store: dict[str, cli.wikidata.WikidataFilm] = {}
+
+    first = cli._movie_candidates(
+        item,
+        session=requests.Session(),
+        cache=Cache(Path("cache.json")),
+        show_cache=False,
+        raw_results=raw_results,
+        limit=1,
+        interactive=False,
+        movie_entity_cache=cache_store,
+    )
+    second = cli._movie_candidates(
+        item,
+        session=requests.Session(),
+        cache=Cache(Path("cache.json")),
+        show_cache=False,
+        raw_results=raw_results,
+        limit=1,
+        interactive=False,
+        movie_entity_cache=cache_store,
+    )
+
+    assert len(first.candidates) == 1
+    assert len(second.candidates) == 1
+    assert fetched == ["Q1", "Q2"]
+
+
 def test_plan_items_progress_rewinds_on_back(monkeypatch, tmp_path: Path) -> None:
     class ProgressStub:
         last = None

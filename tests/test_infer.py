@@ -68,6 +68,30 @@ def test_infer_movie_leading_number_preserved() -> None:
     assert item.title == "28 Days Later"
 
 
+def test_infer_blade_runner_2049_is_not_tv() -> None:
+    item = infer_item(Path("Blade_Runner_2049_-__m0012ygz_original.mp4"))
+    assert item.media_type == "movie"
+    assert item.year == 2049
+    assert item.season is None
+    assert item.episode is None
+
+
+def test_infer_district_9_is_not_tv() -> None:
+    item = infer_item(Path("District_9.mkv"))
+    assert item.media_type == "movie"
+    assert item.year is None
+    assert item.season is None
+    assert item.episode is None
+
+
+def test_infer_studio_54_is_not_tv() -> None:
+    item = infer_item(Path("Studio_54.mkv"))
+    assert item.media_type == "movie"
+    assert item.year is None
+    assert item.season is None
+    assert item.episode is None
+
+
 def test_infer_movie_title_keeps_hyphen_subtitle() -> None:
     path = Path("Bridget Jones - The Edge of Reason (2004).mkv")
     item = infer_item(path)

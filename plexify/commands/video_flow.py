@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+import re
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,9 @@ from ..sources import tvmaze, wikidata
 from ..tv_episode_cache import EpisodeCache
 from ..util import build_cache_key, iter_video_files, movie_cache_key, tv_episode_cache_key, tv_show_cache_key, tv_show_folder_cache_key
 from ..cache_policy import is_ambiguous_cache_title
+
+
+WIKIDATA_DESCRIPTION_YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 
 
 def reusable_cache_hit_looks_risky(item: InferredItem, top_confidence: float, min_confidence: float) -> bool:
@@ -80,6 +84,8 @@ def print_run_summary(
     console.print("Summary:")
     console.print(f"Planned: {len(plans)}")
     console.print(f"Skipped: {stats.skipped}")
+    for line in skip_reason_lines(stats):
+        console.print(line)
     console.print(f"Cache hits: {stats.cache_hits}")
     console.print(f"Manual entries: {stats.manual}")
     console.print(f"Failures: {failures}")
@@ -92,6 +98,22 @@ def print_run_summary(
         console.print(f"Report path: {format_path_fn(report_path)}")
     if apply_report_path is not None:
         console.print(f"Apply report path: {format_path_fn(apply_report_path)}")
+
+
+def skip_reason_lines(stats: Any) -> list[str]:
+    labels = [
+        ("filtered_media_type", "filtered by media type"),
+        ("no_candidates", "no candidates"),
+        ("manual_skip", "user skipped"),
+        ("offline_no_cache", "offline/no cache"),
+        ("conflict_skip", "conflict policy skipped"),
+    ]
+    parts: list[str] = []
+    for attr, label in labels:
+        value = int(getattr(stats, attr, 0) or 0)
+        if value:
+            parts.append(f"{label}={value}")
+    return [f"Skip reasons: {', '.join(parts)}"] if parts else []
 
 
 def plan_items(
@@ -178,6 +200,25 @@ def plan_items(
                             episode=item.episode,
                         )
                         if media_type_filter and item.media_type != media_type_filter:
+                            safe_print_fn(
+                                f"Skipped: {rich_escape_fn(path.name)} inferred as {item.media_type}, "
+                                f"but run is filtered to {media_type_filter}.",
+                                progress,
+                            )
+                            stats.skipped += 1
+                            if hasattr(stats, "filtered_media_type"):
+                                stats.filtered_media_type += 1
+                            record_log_event_fn(
+                                logger,
+                                "file_filtered_by_media_type",
+                                path=path,
+                                inferred_media_type=item.media_type,
+                                requested_media_type=media_type_filter,
+                                title=item.title,
+                                year=item.year,
+                                season=item.season,
+                                episode=item.episode,
+                            )
                             index += 1
                             continue
                         if not quiet_output:
@@ -288,6 +329,11 @@ def plan_items(
                         stats.user_confirmed = entry.stats_snapshot.user_confirmed
                         stats.manual = entry.stats_snapshot.manual
                         stats.skipped = entry.stats_snapshot.skipped
+                        stats.filtered_media_type = getattr(entry.stats_snapshot, "filtered_media_type", 0)
+                        stats.no_candidates = getattr(entry.stats_snapshot, "no_candidates", 0)
+                        stats.manual_skip = getattr(entry.stats_snapshot, "manual_skip", 0)
+                        stats.offline_no_cache = getattr(entry.stats_snapshot, "offline_no_cache", 0)
+                        stats.conflict_skip = getattr(entry.stats_snapshot, "conflict_skip", 0)
                         stats.errors = entry.stats_snapshot.errors
                         stats.cache_hits = entry.stats_snapshot.cache_hits
                         stats.elapsed = entry.stats_snapshot.elapsed
@@ -729,7 +775,22 @@ def movie_candidates(
             result_count=len(raw_results),
             duration_ms=int(total_time * 1000),
         )
-        total_started = time.monotonic()
+    def _candidate_year(candidate: Any) -> int | None:
+        description = candidate.description if isinstance(candidate.description, str) else ""
+        match = WIKIDATA_DESCRIPTION_YEAR_RE.search(description)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _provisional_confidence(candidate: Any) -> tuple[float, int]:
+        year = _candidate_year(candidate)
+        film = wikidata.WikidataFilm(qid=candidate.qid, title=candidate.label, year=year, is_film=True)
+        provisional = movie_candidate_from_film_fn(item, film, description=candidate.description)
+        distance = year_distance_fn(item.year, provisional.year)
+        return provisional.confidence, -distance
+
+    if raw_results is not None:
+        raw_results = sorted(raw_results, key=_provisional_confidence, reverse=True)
     idx = offset
     fetch_started = time.monotonic()
     while idx < len(raw_results) and len(results) < limit:

@@ -496,7 +496,9 @@ def infer_item(path: Path) -> InferredItem:
         guessed_season = _coerce_guess_int(guess.get("season"))
         guessed_episode_raw = guess.get("episode")
         guessed_episode = _coerce_guess_int(guessed_episode_raw)
-        if has_tv_context or has_tv_hint or season is not None or guessed_season is not None or explicit_episode:
+        # Guessit can misread numeric movie titles like "Blade Runner 2049" as season/episode.
+        # Only let guessit flip to TV when some other TV evidence already exists.
+        if has_tv_context or has_tv_hint or season is not None or explicit_episode:
             media_type = "tv"
             season = _prefer_known_int(season, guessed_season)
             episode = _prefer_known_int(episode, guessed_episode)

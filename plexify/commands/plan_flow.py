@@ -19,20 +19,31 @@ def build_search_query(title: str, hint: str | None) -> str:
     return " ".join(part for part in parts if part)
 
 
-def build_movie_fallback_queries(title: str, hint: str | None) -> list[str]:
+def build_movie_fallback_queries(title: str, hint: str | None, year: int | None = None) -> list[str]:
     hint_text = (hint or "").strip()
     base_title = (title or "").strip()
     canonical = build_search_query(base_title, hint_text)
     title_variants: list[str] = [base_title]
+    sequel_markers = {"chapter", "part", "volume", "vol", "episode", "tournament", "returns", "return"}
 
     if ":" in base_title:
         title_variants.append(base_title.split(":", 1)[0].strip())
     if " - " in base_title:
         title_variants.append(base_title.split(" - ", 1)[0].strip())
+    normalized_separators = re.sub(r"[:\-]+", " ", base_title).strip()
+    if normalized_separators and normalized_separators != base_title:
+        title_variants.append(normalized_separators)
 
     stripped_suffix = re.sub(r"\s*[\(\[].*?[\)\]]\s*$", "", base_title).strip()
     if stripped_suffix:
         title_variants.append(stripped_suffix)
+    tokens = base_title.split()
+    for index, token in enumerate(tokens[2:], start=2):
+        if token.casefold() in sequel_markers:
+            trimmed = " ".join(tokens[:index]).strip()
+            if trimmed:
+                title_variants.append(trimmed)
+            break
 
     candidates: list[str] = []
     if canonical:
@@ -45,6 +56,8 @@ def build_movie_fallback_queries(title: str, hint: str | None) -> list[str]:
             candidates.append(normalized)
             if hint_text:
                 candidates.append(f"{normalized} {hint_text}".strip())
+            if year is not None:
+                candidates.append(f"{normalized} {year}".strip())
 
     seen: set[str] = set()
     queries: list[str] = []

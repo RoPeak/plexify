@@ -1,0 +1,1093 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import requests
+from rich.progress import Progress
+
+
+def process_video_item(
+    item: Any,
+    library: Path,
+    cache: Any,
+    mode: str,
+    copy_mode: bool,
+    interactive: bool,
+    auto_accept: bool,
+    min_confidence: float,
+    session_tv: requests.Session,
+    session_wd: requests.Session,
+    episode_cache: Any,
+    progress: Progress | None,
+    show_cache: bool,
+    stats: Any = None,
+    incoming_root: Path | None = None,
+    planned: dict[str, int] | None = None,
+    on_conflict: str = "rename",
+    allow_back: bool = False,
+    offline: bool = False,
+    allow_risky_enter_accept: bool = False,
+    media_type_overrides: dict[str, str] | None = None,
+    tv_search_cache: dict[str, list[Any]] | None = None,
+    movie_entity_cache: dict[str, Any] | None = None,
+    helpers: Any = None,
+    reprocess_item_fn: Any = None,
+) -> tuple[Any | None, bool]:
+    item, override_key = helpers._resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
+    folder_show_key = helpers.tv_show_folder_cache_key(item.path, incoming_root) if item.media_type == "tv" else None
+    item = helpers._apply_tv_folder_season_lock(item, cache, folder_show_key)
+    cache_key = helpers.build_cache_key(item.path, incoming_root, item.media_type, item.year)
+    if item.media_type == "movie" and interactive:
+        if helpers.re.search(r"\b(series|episode)\b", item.path.stem, helpers.re.IGNORECASE):
+            if helpers._confirm("This looks like TV. Treat as TV? [Y/n]", True, progress, show_default=False):
+                item = helpers._switch_item_media_type(item, "tv")
+                helpers._persist_media_type_override(cache, override_key, "tv", media_type_overrides, progress)
+    reusable_movie_key = None
+    reusable_show_key = None
+    reusable_episode_key = None
+    if item.media_type == "tv":
+        reusable_safe = helpers._reusable_tv_cache_safe(item)
+        if reusable_safe:
+            reusable_show_key = helpers.tv_show_cache_key(item.title, item.year)
+        if reusable_safe and item.season is not None and item.episode is not None:
+            reusable_episode_key = helpers.tv_episode_cache_key(item.title, item.year, item.season, item.episode)
+    else:
+        reusable_movie_key = helpers.movie_cache_key(item.title, item.year)
+    collision = False
+    if item.media_type == "tv":
+        raw_results_tv: list[Any] | None = None
+        next_offset = 0
+        search_query = helpers._build_search_query(item.title, None)
+        page = helpers._fetch_with_retry(
+            "TVMaze",
+            lambda: helpers._tv_candidates(
+                item,
+                session_tv,
+                cache,
+                show_cache,
+                incoming_root=incoming_root,
+                cache_key=cache_key,
+                offset=next_offset,
+                raw_results=raw_results_tv,
+                search_query=search_query,
+                progress=progress,
+                offline=offline,
+                interactive=interactive,
+                search_cache=tv_search_cache,
+            ),
+            interactive,
+            progress,
+        )
+        if page is None:
+            return None, False
+        if page.cache_hit:
+            helpers._record_cache_hit(stats)
+        candidates = page.candidates
+        raw_results_tv = page.raw_results
+        next_offset = page.next_offset
+        has_more = page.has_more
+        selected = None
+        outcome = None
+        while True:
+            if not candidates:
+                if not interactive:
+                    if offline:
+                        helpers.log_event(
+                            helpers.logger,
+                            "offline_no_cached_match",
+                            media_type=item.media_type,
+                            path=item.path,
+                            title=item.title,
+                        )
+                    helpers._record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
+                    return None, False
+                if helpers._confirm("No TV candidates. Switch to movie search? [y/N]", False, progress, show_default=False):
+                    helpers._persist_media_type_override(cache, override_key, "movie", media_type_overrides, progress)
+                    return reprocess_item_fn(
+                        item=helpers._switch_item_media_type(item, "movie"),
+                        library=library,
+                        cache=cache,
+                        mode=mode,
+                        copy_mode=copy_mode,
+                        interactive=interactive,
+                        auto_accept=auto_accept,
+                        min_confidence=min_confidence,
+                        session_tv=session_tv,
+                        session_wd=session_wd,
+                        episode_cache=episode_cache,
+                        progress=progress,
+                        show_cache=show_cache,
+                        stats=stats,
+                        incoming_root=incoming_root,
+                        planned=planned,
+                        on_conflict=on_conflict,
+                        allow_back=allow_back,
+                        offline=offline,
+                        allow_risky_enter_accept=allow_risky_enter_accept,
+                        media_type_overrides=media_type_overrides,
+                        tv_search_cache=tv_search_cache,
+                        movie_entity_cache=movie_entity_cache,
+                    )
+                helpers._safe_print(f"No candidates found for {helpers.rich_escape(item.title)}.", progress)
+                empty_choice = helpers._select_candidate(
+                    "tv",
+                    candidates,
+                    progress,
+                    has_more,
+                    allow_search=True,
+                    allow_manual=True,
+                    allow_back=allow_back,
+                    item=item,
+                )
+                if empty_choice == "s":
+                    item, search_query = helpers._prompt_search(item, progress)
+                    raw_results_tv = None
+                    next_offset = 0
+                    page = helpers._fetch_with_retry(
+                        "TVMaze",
+                        lambda: helpers._tv_candidates(
+                            item,
+                            session_tv,
+                            cache,
+                            show_cache,
+                            incoming_root=incoming_root,
+                            cache_key=cache_key,
+                            offset=next_offset,
+                            raw_results=raw_results_tv,
+                            search_query=search_query,
+                            progress=progress,
+                            offline=offline,
+                            interactive=interactive,
+                            search_cache=tv_search_cache,
+                        ),
+                        interactive,
+                        progress,
+                    )
+                    if page is None:
+                        return None, False
+                    if page.cache_hit:
+                        helpers._record_cache_hit(stats)
+                    candidates = page.candidates
+                    raw_results_tv = page.raw_results
+                    next_offset = page.next_offset
+                    has_more = page.has_more
+                    continue
+                if isinstance(empty_choice, str) and empty_choice.startswith("search:"):
+                    query = empty_choice.split("search:", 1)[1].strip()
+                    if query:
+                        item = helpers._with_title(item, query)
+                        search_query = helpers._build_search_query(query, None)
+                        raw_results_tv = None
+                        next_offset = 0
+                        page = helpers._fetch_with_retry(
+                            "TVMaze",
+                            lambda: helpers._tv_candidates(
+                                item,
+                                session_tv,
+                                cache,
+                                show_cache,
+                                incoming_root=incoming_root,
+                                cache_key=cache_key,
+                                offset=next_offset,
+                                raw_results=raw_results_tv,
+                                search_query=search_query,
+                                progress=progress,
+                                offline=offline,
+                                interactive=interactive,
+                                search_cache=tv_search_cache,
+                            ),
+                            interactive,
+                            progress,
+                        )
+                        if page is None:
+                            return None, False
+                        candidates = page.candidates
+                        raw_results_tv = page.raw_results
+                        next_offset = page.next_offset
+                        has_more = page.has_more
+                        continue
+                if empty_choice == "m":
+                    selected = helpers._prompt_manual_tv(item, progress)
+                    outcome = "manual"
+                    break
+                if empty_choice == "k":
+                    helpers._record_stat(stats, "skipped", reason="manual_skip")
+                    return None, False
+                if empty_choice == "q":
+                    raise helpers.typer.Exit(code=0)
+                if empty_choice == "b":
+                    raise helpers.BackRequested
+                continue
+            helpers._maybe_fetch_episode_title(item, candidates[0], session_tv, episode_cache, bump_confidence=True)
+            selected = helpers._maybe_auto_select_candidate(
+                candidates=candidates,
+                auto_accept=auto_accept,
+                min_confidence=min_confidence,
+                title=item.title,
+                search_query=search_query,
+                target_year=item.year,
+                progress=progress,
+            )
+            if selected is not None:
+                outcome = "auto"
+                break
+            if not interactive:
+                helpers._record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
+                return None, False
+            policy = helpers._candidate_prompt_policy(
+                item=item,
+                candidates=candidates,
+                min_confidence=min_confidence,
+                cache_reusable=page.cache_reusable,
+                allow_risky_enter_accept=allow_risky_enter_accept,
+            )
+            helpers._announce_candidate_prompt_policy(
+                media_type="tv",
+                item=item,
+                search_query=search_query,
+                candidates=candidates,
+                auto_accept=auto_accept,
+                allow_risky_enter_accept=allow_risky_enter_accept,
+                min_confidence=min_confidence,
+                cache_reusable=page.cache_reusable,
+                policy=policy,
+                progress=progress,
+            )
+            helpers._maybe_enrich_candidates("tv", candidates, session_tv, session_wd, cache, interactive)
+            choice = helpers._select_candidate(
+                "tv",
+                candidates,
+                progress,
+                has_more,
+                allow_search=True,
+                allow_manual=True,
+                allow_back=allow_back,
+                item=item,
+                allow_enter_accept=not policy.require_explicit_choice,
+            )
+            if isinstance(choice, helpers.Candidate):
+                if policy.require_explicit_choice and choice == candidates[0]:
+                    helpers._log_explicit_risky_candidate_accept(
+                        media_type="tv",
+                        item=item,
+                        selected=choice,
+                        search_query=search_query,
+                    )
+                selected = choice
+                outcome = "confirmed"
+                break
+            if choice == "s":
+                item, search_query = helpers._prompt_search(item, progress)
+                raw_results_tv = None
+                next_offset = 0
+                page = helpers._fetch_with_retry(
+                    "TVMaze",
+                    lambda: helpers._tv_candidates(
+                        item,
+                        session_tv,
+                        cache,
+                        show_cache,
+                        incoming_root=incoming_root,
+                        cache_key=cache_key,
+                        offset=next_offset,
+                        raw_results=raw_results_tv,
+                        search_query=search_query,
+                        progress=progress,
+                        offline=offline,
+                        interactive=interactive,
+                        search_cache=tv_search_cache,
+                    ),
+                    interactive,
+                    progress,
+                )
+                if page is None:
+                    return None, False
+                candidates = page.candidates
+                raw_results_tv = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
+                continue
+            if isinstance(choice, str) and choice.startswith("search:"):
+                query = choice.split("search:", 1)[1].strip()
+                if query:
+                    item = helpers._with_title(item, query)
+                    search_query = helpers._build_search_query(query, None)
+                    raw_results_tv = None
+                    next_offset = 0
+                    page = helpers._fetch_with_retry(
+                        "TVMaze",
+                        lambda: helpers._tv_candidates(
+                            item,
+                            session_tv,
+                            cache,
+                            show_cache,
+                            incoming_root=incoming_root,
+                            cache_key=cache_key,
+                            offset=next_offset,
+                            raw_results=raw_results_tv,
+                            search_query=search_query,
+                            progress=progress,
+                            offline=offline,
+                            interactive=interactive,
+                            search_cache=tv_search_cache,
+                        ),
+                        interactive,
+                        progress,
+                    )
+                    if page is None:
+                        return None, False
+                    if page.cache_hit:
+                        helpers._record_cache_hit(stats)
+                    candidates = page.candidates
+                    raw_results_tv = page.raw_results
+                    next_offset = page.next_offset
+                    has_more = page.has_more
+                    continue
+            if choice == "n":
+                page = helpers._fetch_with_retry(
+                    "TVMaze",
+                    lambda: helpers._tv_candidates(
+                        item,
+                        session_tv,
+                        cache,
+                        show_cache,
+                        incoming_root=incoming_root,
+                        cache_key=cache_key,
+                        offset=next_offset,
+                        raw_results=raw_results_tv,
+                        search_query=search_query,
+                        progress=progress,
+                        offline=offline,
+                        interactive=interactive,
+                        search_cache=tv_search_cache,
+                    ),
+                    interactive,
+                    progress,
+                )
+                if page is None:
+                    return None, False
+                if page.cache_hit:
+                    helpers._record_cache_hit(stats)
+                candidates = page.candidates
+                raw_results_tv = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
+                continue
+            if choice == "m":
+                selected = helpers._prompt_manual_tv(item, progress)
+                outcome = "manual"
+                break
+            if choice == "k":
+                helpers._record_stat(stats, "skipped", reason="manual_skip")
+                return None, False
+            if choice == "q":
+                raise helpers.typer.Exit(code=0)
+            if choice == "b":
+                raise helpers.BackRequested
+        if not selected:
+            helpers._record_stat(stats, "skipped")
+            return None, False
+        if selected.metadata.get("manual"):
+            outcome = "manual"
+        if outcome is None:
+            outcome = "confirmed"
+        helpers._record_stat(stats, outcome)
+        helpers._print_choice(selected, progress)
+        helpers.log_event(
+            helpers.logger,
+            "candidate_selected",
+            media_type="tv",
+            selection_mode=outcome,
+            selection_source=selected.source,
+            decision_reason="user_or_auto_selection",
+            path=item.path,
+            title=selected.title,
+            year=selected.year,
+            query=search_query,
+            confidence=selected.confidence,
+            cache_scope="tv",
+        )
+        helpers._maybe_fetch_episode_title(item, selected, session_tv, episode_cache, bump_confidence=False)
+        metadata = selected.metadata
+        confirmed_by_user = outcome in {"confirmed", "manual"}
+        trusted_auto = outcome == "auto" and not bool(selected.metadata.get("manual"))
+        promote_reusable = helpers._should_promote_to_reusable(selection_mode=outcome, selected=selected, candidates=candidates)
+        season = metadata.get("season") or item.season
+        episode = metadata.get("episode") or item.episode
+        episode_end = metadata.get("episode_end") or item.episode_end
+        episode_title = metadata.get("episode_title") or item.episode_title
+        if episode is not None and int(episode) > helpers.MAX_PLAUSIBLE_EPISODE_NUMBER:
+            auto_resolved = helpers._auto_resolve_episode_from_title(item, metadata.get("id"), session_tv, episode_cache)
+            if auto_resolved is not None:
+                season, episode, resolved_title = auto_resolved
+                episode_title = resolved_title or episode_title
+                metadata["episode_title"] = episode_title
+            else:
+                helpers.log_event(
+                    helpers.logger,
+                    "implausible_episode_number",
+                    level=30,
+                    path=item.path,
+                    title=item.title,
+                    season=season,
+                    episode=episode,
+                )
+        if interactive and (season is None or episode is None) and item.episode_title:
+            resolved = helpers._resolve_episode_from_title(item, metadata.get("id"), session_tv, episode_cache, progress)
+            if resolved:
+                season, episode, resolved_title = resolved
+                episode_title = resolved_title or episode_title
+                metadata["episode_title"] = episode_title
+        if season is None or episode is None:
+            if not interactive:
+                return None, False
+            season_prompt = helpers._prompt_int_or_control("Season", item.season or 1, progress)
+            if season_prompt == "k":
+                helpers._record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
+                return None, False
+            if season_prompt == "q":
+                raise helpers.typer.Exit(code=0)
+            season = season_prompt
+            episode_prompt = helpers._prompt_int_or_control("Episode", item.episode or 1, progress)
+            if episode_prompt == "k":
+                helpers._record_stat(stats, "skipped")
+                return None, False
+            if episode_prompt == "q":
+                raise helpers.typer.Exit(code=0)
+            episode = episode_prompt
+            if not episode_title:
+                episode_title = helpers._prompt_text("Episode title (optional)", item.episode_title or "", progress)
+
+        metadata["episode_title"] = episode_title
+        if selected.metadata.get("manual"):
+            entry = {
+                "id": None,
+                "name": metadata["name"],
+                "premiered": None,
+                "chosen_title": metadata["name"],
+                "chosen_year": metadata.get("year"),
+                "season": season,
+                "episode": episode,
+                "episode_end": episode_end,
+                "episode_title": episode_title,
+                "manual": True,
+                "confirmed_by_user": confirmed_by_user,
+                "selection_mode": outcome,
+                "created_at": helpers.now_timestamp(),
+                "source": "Manual",
+            }
+            show_entry = {
+                "id": None,
+                "name": metadata["name"],
+                "premiered": None,
+                "chosen_title": metadata["name"],
+                "chosen_year": metadata.get("year"),
+                "season": season,
+                "manual": True,
+                "confirmed_by_user": confirmed_by_user,
+                "selection_mode": outcome,
+                "created_at": helpers.now_timestamp(),
+                "source": "Manual",
+            }
+        else:
+            entry = {
+                "id": metadata["id"],
+                "name": selected.title,
+                "premiered": selected.year,
+                "chosen_title": selected.title,
+                "chosen_year": selected.year,
+                "season": season,
+                "episode": episode,
+                "episode_end": episode_end,
+                "episode_title": episode_title,
+                "manual": False,
+                "confirmed_by_user": confirmed_by_user,
+                "selection_mode": outcome,
+                "created_at": helpers.now_timestamp(),
+                "source": selected.source,
+            }
+            show_entry = {
+                "id": metadata["id"],
+                "name": selected.title,
+                "premiered": selected.year,
+                "chosen_title": selected.title,
+                "chosen_year": selected.year,
+                "manual": False,
+                "confirmed_by_user": confirmed_by_user,
+                "selection_mode": outcome,
+                "created_at": helpers.now_timestamp(),
+                "source": selected.source,
+            }
+        cache.set_show(cache_key, entry)
+        if reusable_show_key and promote_reusable:
+            if helpers._reusable_tv_cache_safe(item):
+                helpers._promote_reusable_with_conflict_tracking("tv", cache=cache, key=reusable_show_key, entry=show_entry)
+            else:
+                helpers.log_event(
+                    helpers.logger,
+                    "reusable_cache_blocked_ambiguous_title",
+                    media_type="tv",
+                    title=item.title,
+                    year=item.year,
+                    key=reusable_show_key,
+                )
+        if folder_show_key and (confirmed_by_user or trusted_auto):
+            folder_entry = dict(show_entry)
+            if season is not None:
+                folder_entry["season"] = season
+            cache.set_show(folder_show_key, folder_entry)
+        if reusable_episode_key and promote_reusable:
+            if helpers._reusable_tv_cache_safe(item):
+                cache.set_show(reusable_episode_key, entry)
+            else:
+                helpers.log_event(
+                    helpers.logger,
+                    "reusable_cache_blocked_ambiguous_title",
+                    media_type="tv",
+                    title=item.title,
+                    year=item.year,
+                    key=reusable_episode_key,
+                )
+        helpers._save_cache(cache, progress)
+        destination = helpers.plan_tv_show(
+            library,
+            metadata.get("name") or selected.title,
+            metadata.get("year") or selected.year,
+            int(season),
+            int(episode),
+            int(episode_end) if episode_end is not None else None,
+            metadata.get("episode_title") or episode_title,
+            item.path.suffix,
+        )
+        destination, collision = helpers._resolve_destination(destination, on_conflict, planned, progress)
+        if destination is None:
+            helpers._record_stat(stats, "skipped", reason="conflict_skip")
+            return None, False
+        if len(str(destination)) > 240:
+            helpers._safe_print("Warning: destination path is very long and may exceed Windows limits.", progress)
+        plan = helpers.MovePlan(
+            source=item.path,
+            destination=destination,
+            mode=mode,
+            media_type="tv",
+            metadata={
+                "show": metadata.get("name") or selected.title,
+                "year": metadata.get("year") or selected.year,
+                "season": int(season),
+                "episode": int(episode),
+                "episode_end": int(episode_end) if episode_end is not None else None,
+                "episode_title": metadata.get("episode_title") or episode_title,
+            },
+        )
+        helpers._print_plan(plan, progress)
+        helpers.log_event(
+            helpers.logger,
+            "plan_created",
+            source_path=item.path,
+            destination=destination,
+            media_type="tv",
+            title=metadata.get("name") or selected.title,
+            year=metadata.get("year") or selected.year,
+            season=int(season),
+            episode=int(episode),
+            episode_end=int(episode_end) if episode_end is not None else None,
+        )
+        return plan, collision
+
+    raw_results_movie: list[Any] | None = None
+    next_offset = 0
+    movie_page_limit = 1 if auto_accept and not interactive else 5
+    search_query = helpers._build_search_query(item.title, None)
+    page = helpers._fetch_with_retry(
+        "Wikidata",
+        lambda: helpers._movie_candidates(
+            item,
+            session_wd,
+            cache,
+            show_cache,
+            cache_key=cache_key,
+            offset=next_offset,
+            raw_results=raw_results_movie,
+            search_query=search_query,
+            progress=progress,
+            limit=movie_page_limit,
+            offline=offline,
+            interactive=interactive,
+            movie_entity_cache=movie_entity_cache,
+        ),
+        interactive,
+        progress,
+    )
+    if page is None:
+        return None, False
+    if page.cache_hit:
+        helpers._record_cache_hit(stats)
+    candidates = page.candidates
+    raw_results_movie = page.raw_results
+    next_offset = page.next_offset
+    has_more = page.has_more
+    selected = None
+    manual_fallback: Any | None = None
+    manual_hint = ""
+    outcome = None
+    while True:
+        if not candidates:
+            if not interactive:
+                if offline:
+                    helpers.log_event(
+                        helpers.logger,
+                        "offline_no_cached_match",
+                        media_type=item.media_type,
+                        path=item.path,
+                        title=item.title,
+                    )
+                helpers._record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
+                return None, False
+            if helpers._confirm("No movie candidates. Switch to TV search? [y/N]", False, progress, show_default=False):
+                helpers._persist_media_type_override(cache, override_key, "tv", media_type_overrides, progress)
+                return reprocess_item_fn(
+                    item=helpers._switch_item_media_type(item, "tv"),
+                    library=library,
+                    cache=cache,
+                    mode=mode,
+                    copy_mode=copy_mode,
+                    interactive=interactive,
+                    auto_accept=auto_accept,
+                    min_confidence=min_confidence,
+                    session_tv=session_tv,
+                    session_wd=session_wd,
+                    episode_cache=episode_cache,
+                    progress=progress,
+                    show_cache=show_cache,
+                    stats=stats,
+                    incoming_root=incoming_root,
+                    planned=planned,
+                    on_conflict=on_conflict,
+                    allow_back=allow_back,
+                    offline=offline,
+                    allow_risky_enter_accept=allow_risky_enter_accept,
+                    media_type_overrides=media_type_overrides,
+                    tv_search_cache=tv_search_cache,
+                    movie_entity_cache=movie_entity_cache,
+                )
+            helpers._safe_print(f"No candidates found for {helpers.rich_escape(item.title)}.", progress)
+            empty_choice = helpers._select_candidate(
+                "movie",
+                candidates,
+                progress,
+                has_more,
+                allow_search=True,
+                allow_manual=True,
+                allow_back=allow_back,
+                item=item,
+            )
+            if empty_choice == "s":
+                item, search_query = helpers._prompt_search(item, progress)
+                raw_results_movie = None
+                next_offset = 0
+                page = helpers._fetch_with_retry(
+                    "Wikidata",
+                    lambda: helpers._movie_candidates(
+                        item,
+                        session_wd,
+                        cache,
+                        show_cache,
+                        cache_key=cache_key,
+                        offset=next_offset,
+                        raw_results=raw_results_movie,
+                        search_query=search_query,
+                        progress=progress,
+                        offline=offline,
+                        interactive=interactive,
+                        movie_entity_cache=movie_entity_cache,
+                    ),
+                    interactive,
+                    progress,
+                )
+                if page is None:
+                    return None, False
+                if page.cache_hit:
+                    helpers._record_cache_hit(stats)
+                candidates = page.candidates
+                raw_results_movie = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
+                continue
+            if isinstance(empty_choice, str) and empty_choice.startswith("search:"):
+                query = empty_choice.split("search:", 1)[1].strip()
+                if query:
+                    item = helpers._with_title(item, query)
+                    search_query = helpers._build_search_query(query, None)
+                    raw_results_movie = None
+                    next_offset = 0
+                    page = helpers._fetch_with_retry(
+                        "Wikidata",
+                        lambda: helpers._movie_candidates(
+                            item,
+                            session_wd,
+                            cache,
+                            show_cache,
+                            cache_key=cache_key,
+                            offset=next_offset,
+                            raw_results=raw_results_movie,
+                            search_query=search_query,
+                            progress=progress,
+                            offline=offline,
+                            interactive=interactive,
+                            movie_entity_cache=movie_entity_cache,
+                        ),
+                        interactive,
+                        progress,
+                    )
+                    if page is None:
+                        return None, False
+                    if page.cache_hit:
+                        helpers._record_cache_hit(stats)
+                    candidates = page.candidates
+                    raw_results_movie = page.raw_results
+                    next_offset = page.next_offset
+                    has_more = page.has_more
+                    continue
+            if empty_choice == "m":
+                if manual_fallback is None:
+                    manual_fallback, manual_hint = helpers._prompt_manual_movie(item, progress)
+                if manual_fallback.year is None and interactive:
+                    item = helpers._with_title(item, manual_fallback.title)
+                    search_query = helpers._build_search_query(manual_fallback.title, manual_hint)
+                    raw_results_movie = None
+                    next_offset = 0
+                    page = helpers._fetch_with_retry(
+                        "Wikidata",
+                        lambda: helpers._movie_candidates(
+                            item,
+                            session_wd,
+                            cache,
+                            show_cache,
+                            cache_key=cache_key,
+                            offset=next_offset,
+                            raw_results=raw_results_movie,
+                            search_query=search_query,
+                            progress=progress,
+                            offline=offline,
+                            interactive=interactive,
+                            movie_entity_cache=movie_entity_cache,
+                        ),
+                        interactive,
+                        progress,
+                    )
+                    if page is None:
+                        selected = manual_fallback
+                        outcome = "manual"
+                        break
+                    candidates = page.candidates
+                    raw_results_movie = page.raw_results
+                    next_offset = page.next_offset
+                    has_more = page.has_more
+                    continue
+                selected = manual_fallback
+                outcome = "manual"
+                break
+            if empty_choice == "k":
+                helpers._record_stat(stats, "skipped", reason="manual_skip")
+                return None, False
+            if empty_choice == "q":
+                raise helpers.typer.Exit(code=0)
+            if empty_choice == "b":
+                raise helpers.BackRequested
+            continue
+        selected = helpers._maybe_auto_select_candidate(
+            candidates=candidates,
+            auto_accept=auto_accept,
+            min_confidence=min_confidence,
+            title=item.title,
+            search_query=search_query,
+            target_year=item.year,
+            progress=progress,
+        )
+        if selected is not None:
+            outcome = "auto"
+            break
+        if not interactive:
+            helpers._record_stat(stats, "skipped")
+            return None, False
+        policy = helpers._candidate_prompt_policy(
+            item=item,
+            candidates=candidates,
+            min_confidence=min_confidence,
+            cache_reusable=page.cache_reusable,
+            allow_risky_enter_accept=allow_risky_enter_accept,
+        )
+        helpers._announce_candidate_prompt_policy(
+            media_type="movie",
+            item=item,
+            search_query=search_query,
+            candidates=candidates,
+            auto_accept=auto_accept,
+            allow_risky_enter_accept=allow_risky_enter_accept,
+            min_confidence=min_confidence,
+            cache_reusable=page.cache_reusable,
+            policy=policy,
+            progress=progress,
+        )
+        helpers._maybe_enrich_candidates("movie", candidates, session_tv, session_wd, cache, interactive)
+        choice = helpers._select_candidate(
+            "movie",
+            candidates,
+            progress,
+            has_more,
+            allow_search=True,
+            allow_manual=True,
+            allow_back=allow_back,
+            item=item,
+            allow_enter_accept=not policy.require_explicit_choice,
+        )
+        if isinstance(choice, helpers.Candidate):
+            if policy.require_explicit_choice and choice == candidates[0]:
+                helpers._log_explicit_risky_candidate_accept(
+                    media_type="movie",
+                    item=item,
+                    selected=choice,
+                    search_query=search_query,
+                )
+            selected = choice
+            outcome = "confirmed"
+            break
+        if choice == "s":
+            item, search_query = helpers._prompt_search(item, progress)
+            raw_results_movie = None
+            next_offset = 0
+            page = helpers._fetch_with_retry(
+                "Wikidata",
+                lambda: helpers._movie_candidates(
+                    item,
+                    session_wd,
+                    cache,
+                    show_cache,
+                    cache_key=cache_key,
+                    offset=next_offset,
+                    raw_results=raw_results_movie,
+                    search_query=search_query,
+                    progress=progress,
+                    offline=offline,
+                    interactive=interactive,
+                    movie_entity_cache=movie_entity_cache,
+                ),
+                interactive,
+                progress,
+            )
+            if page is None:
+                return None, False
+            if page.cache_hit:
+                helpers._record_cache_hit(stats)
+            candidates = page.candidates
+            raw_results_movie = page.raw_results
+            next_offset = page.next_offset
+            has_more = page.has_more
+            continue
+        if isinstance(choice, str) and choice.startswith("search:"):
+            query = choice.split("search:", 1)[1].strip()
+            if query:
+                item = helpers._with_title(item, query)
+                search_query = helpers._build_search_query(query, None)
+                raw_results_movie = None
+                next_offset = 0
+                page = helpers._fetch_with_retry(
+                    "Wikidata",
+                    lambda: helpers._movie_candidates(
+                        item,
+                        session_wd,
+                        cache,
+                        show_cache,
+                        cache_key=cache_key,
+                        offset=next_offset,
+                        raw_results=raw_results_movie,
+                        search_query=search_query,
+                        progress=progress,
+                        offline=offline,
+                        interactive=interactive,
+                        movie_entity_cache=movie_entity_cache,
+                    ),
+                    interactive,
+                    progress,
+                )
+                if page is None:
+                    return None, False
+                candidates = page.candidates
+                raw_results_movie = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
+                continue
+        if choice == "n":
+            page = helpers._fetch_with_retry(
+                "Wikidata",
+                lambda: helpers._movie_candidates(
+                    item,
+                    session_wd,
+                    cache,
+                    show_cache,
+                    cache_key=cache_key,
+                    offset=next_offset,
+                    raw_results=raw_results_movie,
+                    search_query=search_query,
+                    progress=progress,
+                    offline=offline,
+                    interactive=interactive,
+                    movie_entity_cache=movie_entity_cache,
+                ),
+                interactive,
+                progress,
+            )
+            if page is None:
+                return None, False
+            candidates = page.candidates
+            raw_results_movie = page.raw_results
+            next_offset = page.next_offset
+            has_more = page.has_more
+            continue
+        if choice == "m":
+            if manual_fallback is None:
+                manual_fallback, manual_hint = helpers._prompt_manual_movie(item, progress)
+            if manual_fallback.year is None and interactive:
+                item = helpers._with_title(item, manual_fallback.title)
+                search_query = helpers._build_search_query(manual_fallback.title, manual_hint)
+                raw_results_movie = None
+                next_offset = 0
+                page = helpers._fetch_with_retry(
+                    "Wikidata",
+                    lambda: helpers._movie_candidates(
+                        item,
+                        session_wd,
+                        cache,
+                        show_cache,
+                        cache_key=cache_key,
+                        offset=next_offset,
+                        raw_results=raw_results_movie,
+                        search_query=search_query,
+                        progress=progress,
+                        offline=offline,
+                        interactive=interactive,
+                        movie_entity_cache=movie_entity_cache,
+                    ),
+                    interactive,
+                    progress,
+                )
+                if page is None:
+                    selected = manual_fallback
+                    outcome = "manual"
+                    break
+                candidates = page.candidates
+                raw_results_movie = page.raw_results
+                next_offset = page.next_offset
+                has_more = page.has_more
+                continue
+            selected = manual_fallback
+            outcome = "manual"
+            break
+        if choice == "k":
+            helpers._record_stat(stats, "skipped", reason="manual_skip")
+            return None, False
+        if choice == "q":
+            raise helpers.typer.Exit(code=0)
+        if choice == "b":
+            raise helpers.BackRequested
+    if not selected:
+        helpers._record_stat(stats, "skipped")
+        return None, False
+    if selected.metadata.get("manual"):
+        outcome = "manual"
+    if outcome is None:
+        outcome = "confirmed"
+    helpers._record_stat(stats, outcome)
+    helpers._print_choice(selected, progress)
+    helpers.log_event(
+        helpers.logger,
+        "candidate_selected",
+        media_type="movie",
+        selection_mode=outcome,
+        selection_source=selected.source,
+        decision_reason="user_or_auto_selection",
+        path=item.path,
+        title=selected.title,
+        year=selected.year,
+        query=search_query,
+        confidence=selected.confidence,
+        cache_scope="movie",
+    )
+    metadata = selected.metadata
+    confirmed_by_user = outcome in {"confirmed", "manual"}
+    promote_reusable = helpers._should_promote_to_reusable(selection_mode=outcome, selected=selected, candidates=candidates)
+    if metadata.get("manual"):
+        entry = {
+            "qid": None,
+            "title": metadata["title"],
+            "year": metadata.get("year"),
+            "chosen_title": metadata["title"],
+            "chosen_year": metadata.get("year"),
+            "manual": True,
+            "confirmed_by_user": confirmed_by_user,
+            "selection_mode": outcome,
+            "created_at": helpers.now_timestamp(),
+            "source": "Manual",
+        }
+    else:
+        entry = {
+            "qid": metadata["qid"],
+            "title": selected.title,
+            "year": selected.year,
+            "chosen_title": selected.title,
+            "chosen_year": selected.year,
+            "manual": False,
+            "confirmed_by_user": confirmed_by_user,
+            "selection_mode": outcome,
+            "created_at": helpers.now_timestamp(),
+            "source": selected.source,
+        }
+    cache.set_movie(cache_key, entry)
+    if reusable_movie_key and promote_reusable:
+        if helpers._reusable_movie_cache_safe(item):
+            helpers._promote_reusable_with_conflict_tracking("movie", cache=cache, key=reusable_movie_key, entry=entry)
+        else:
+            helpers.log_event(
+                helpers.logger,
+                "reusable_cache_blocked_ambiguous_title",
+                media_type="movie",
+                title=item.title,
+                year=item.year,
+                key=reusable_movie_key,
+            )
+    helpers._save_cache(cache, progress)
+
+    year = metadata.get("year") or selected.year
+    if year is None and interactive:
+        year_text = helpers._prompt_text("Movie year (optional, helps disambiguate)", "", progress, show_default=False)
+        year = int(year_text) if year_text else None
+    destination = helpers.plan_movie(library, metadata.get("title") or selected.title, year, item.path.suffix)
+    destination, collision = helpers._resolve_destination(destination, on_conflict, planned, progress)
+    if destination is None:
+        helpers._record_stat(stats, "skipped", reason="conflict_skip")
+        return None, False
+    if len(str(destination)) > 240:
+        helpers._safe_print("Warning: destination path is very long and may exceed Windows limits.", progress)
+    plan = helpers.MovePlan(
+        source=item.path,
+        destination=destination,
+        mode=mode,
+        media_type="movie",
+        metadata={"title": metadata.get("title") or selected.title, "year": year},
+    )
+    helpers._print_plan(plan, progress)
+    helpers.log_event(
+        helpers.logger,
+        "plan_created",
+        source_path=item.path,
+        destination=destination,
+        media_type="movie",
+        title=metadata.get("title") or selected.title,
+        year=year,
+    )
+    return plan, collision
+
+
+
+

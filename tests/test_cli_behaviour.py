@@ -646,6 +646,50 @@ def test_movie_candidates_do_not_fallback_to_unknown_when_title_present(monkeypa
     assert page.candidates == []
 
 
+def test_build_movie_fallback_queries_relaxes_subtitles_and_adds_year() -> None:
+    queries = cli.plan_flow.build_movie_fallback_queries("Spider-Man: Into the Spider-Verse - Alt", None, 2018)
+    assert queries[0] == "spider man into the spider verse alt"
+    assert "spider man into the spider verse 2018" in queries
+    assert "spider man 2018" in queries
+    assert queries == list(dict.fromkeys(queries))
+
+
+def test_movie_candidates_retry_escape_room_tournament_without_manual_search(monkeypatch, tmp_path: Path) -> None:
+    queries: list[str] = []
+
+    def _fake_search(query: str, *_args, **_kwargs):
+        queries.append(query)
+        if query.casefold() == "escape room":
+            return [cli.wikidata.WikidataCandidate(qid="Q1", label="Escape Room", description="2018 film")]
+        return []
+
+    monkeypatch.setattr(cli.wikidata, "search", _fake_search)
+    monkeypatch.setattr(
+        cli.wikidata,
+        "fetch_entity",
+        lambda qid, *_args, **_kwargs: cli.wikidata.WikidataFilm(qid=qid, title="Escape Room", year=2018, is_film=True),
+    )
+
+    item = InferredItem(
+        path=tmp_path / "Escape_Room_Tournament_of_Champions.mkv",
+        media_type="movie",
+        title="Escape Room Tournament of Champions",
+        year=None,
+        episode_title=None,
+    )
+    page = cli._movie_candidates(
+        item=item,
+        session=requests.Session(),
+        cache=Cache(tmp_path / "cache.json"),
+        show_cache=False,
+    )
+
+    assert queries[0] == "escape room tournament of champions"
+    assert "escape room" in queries[1:]
+    assert page.candidates
+    assert page.candidates[0].title == "Escape Room"
+
+
 def test_movie_candidates_reuse_entity_cache_across_calls(monkeypatch, tmp_path: Path) -> None:
     fetch_calls = {"count": 0}
 
@@ -1010,7 +1054,7 @@ def test_reusable_tv_cache_not_written_without_year(monkeypatch, tmp_path: Path)
     assert folder_key is None
 
 
-def test_low_confidence_movie_forces_explicit_selection(monkeypatch, tmp_path: Path) -> None:
+def test_low_confidence_movie_forces_explicit_selection(monkeypatch) -> None:
     def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
         candidate = cli.Candidate(
             title="I Am Legend",
@@ -1028,19 +1072,20 @@ def test_low_confidence_movie_forces_explicit_selection(monkeypatch, tmp_path: P
         seen_allow_enter.append(bool(kwargs.get("allow_enter_accept", True)))
         return args[1][0]
 
+    messages: list[str] = []
     monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
     monkeypatch.setattr(cli, "_select_candidate", _fake_select)
     monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_safe_print", lambda message, _progress=None: messages.append(str(message)))
 
-    incoming = tmp_path / "incoming"
-    library = tmp_path / "library"
-    incoming.mkdir()
-    library.mkdir()
+    monkeypatch.setattr(cli, "_save_cache", lambda *_args, **_kwargs: None)
+
+    incoming = Path("C:/Video/Incoming")
+    library = Path("C:/Video/Library")
     path = incoming / "I Am Legend.mkv"
-    path.write_text("x", encoding="utf-8")
 
     item = InferredItem(path=path, media_type="movie", title="I Am Legend", year=2007, episode_title=None)
-    cache = Cache(library / ".plexify" / "cache.json")
+    cache = Cache(Path("cache.json"))
 
     plan, _collision = cli._process_item(
         item=item,
@@ -1063,6 +1108,62 @@ def test_low_confidence_movie_forces_explicit_selection(monkeypatch, tmp_path: P
 
     assert plan is not None
     assert seen_allow_enter == [False]
+    assert any("Selection policy:" in message for message in messages)
+
+
+def test_low_confidence_movie_allows_enter_when_risky_enter_enabled(monkeypatch) -> None:
+    def _fake_movie_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="I Am Legend",
+            year=2007,
+            source="Wikidata",
+            confidence=0.34,
+            metadata={"qid": "Q1", "title": "I Am Legend", "year": 2007},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    seen_allow_enter: list[bool] = []
+
+    def _fake_select(*args, **kwargs):
+        seen_allow_enter.append(bool(kwargs.get("allow_enter_accept", True)))
+        return args[1][0]
+
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "_select_candidate", _fake_select)
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+
+    monkeypatch.setattr(cli, "_save_cache", lambda *_args, **_kwargs: None)
+
+    incoming = Path("C:/Video/Incoming")
+    library = Path("C:/Video/Library")
+    path = incoming / "I Am Legend.mkv"
+
+    item = InferredItem(path=path, media_type="movie", title="I Am Legend", year=2007, episode_title=None)
+    cache = Cache(Path("cache.json"))
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=False,
+        min_confidence=0.90,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+        allow_risky_enter_accept=True,
+    )
+
+    assert plan is not None
+    assert seen_allow_enter == [True]
 
 
 def test_reusable_movie_cache_hit_with_generic_title_forces_explicit_selection(monkeypatch, tmp_path: Path) -> None:
@@ -1916,7 +2017,7 @@ def test_process_item_uses_folder_manual_season_lock(monkeypatch, tmp_path: Path
     assert plan.metadata["season"] == 5
 
 
-def test_tv_folder_cache_written_on_confirmed_selection(monkeypatch, tmp_path: Path) -> None:
+def test_tv_folder_cache_written_on_confirmed_selection(monkeypatch) -> None:
     def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
         candidate = cli.Candidate(
             title="Show",
@@ -1933,16 +2034,14 @@ def test_tv_folder_cache_written_on_confirmed_selection(monkeypatch, tmp_path: P
     monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
 
-    incoming = tmp_path / "incoming"
-    library = tmp_path / "library"
-    incoming.mkdir()
-    library.mkdir()
+    monkeypatch.setattr(cli, "_save_cache", lambda *_args, **_kwargs: None)
+
+    incoming = Path("C:/Video/Incoming")
+    library = Path("C:/Video/Library")
     path = incoming / "Show" / "Season 1" / "Show.S01E02.mkv"
-    path.parent.mkdir(parents=True)
-    path.write_text("x", encoding="utf-8")
 
     item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=1, episode=2, episode_title=None)
-    cache = Cache(library / ".plexify" / "cache.json")
+    cache = Cache(Path("cache.json"))
 
     plan, _collision = cli._process_item(
         item=item,
@@ -1969,6 +2068,87 @@ def test_tv_folder_cache_written_on_confirmed_selection(monkeypatch, tmp_path: P
     cached = cache.get_show(folder_key)
     assert cached is not None
     assert cached.get("name") == "Show"
+    assert cached.get("season") == 1
+
+
+def test_tv_folder_cache_written_on_trusted_auto_selection(monkeypatch) -> None:
+    def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
+        candidate = cli.Candidate(
+            title="Show",
+            year=2010,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 123, "name": "Show", "year": 2010},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli.tvmaze, "fetch_episodes", lambda *_args, **_kwargs: [])
+
+    monkeypatch.setattr(cli, "_save_cache", lambda *_args, **_kwargs: None)
+
+    incoming = Path("C:/Video/Incoming")
+    library = Path("C:/Video/Library")
+    path = incoming / "Show" / "Season 1" / "Show.S01E02.mkv"
+
+    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=1, episode=2, episode_title=None)
+    cache = Cache(Path("cache.json"))
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+    cached = cache.get_show(folder_key)
+    assert cached is not None
+    assert cached.get("name") == "Show"
+    assert cached.get("season") == 1
+
+
+def test_folder_season_lock_keeps_explicit_conflicting_season() -> None:
+    incoming = Path("C:/Video/Incoming")
+    path = incoming / "Show" / "Season 3" / "Show.S03E02.mkv"
+    cache = Cache(Path("cache.json"))
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+    cache.set_show(folder_key, {"name": "Show", "season": 5, "manual": False, "selection_mode": "auto"})
+
+    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=3, episode=2, episode_title=None)
+    locked = cli._apply_tv_folder_season_lock(item, cache, folder_key)
+
+    assert locked.season == 3
+
+
+def test_folder_season_lock_does_not_clobber_non_default_inferred_season() -> None:
+    incoming = Path("C:/Video/Incoming")
+    path = incoming / "Show" / "Episode.mkv"
+    cache = Cache(Path("cache.json"))
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+    cache.set_show(folder_key, {"name": "Show", "season": 5, "manual": False, "selection_mode": "auto"})
+
+    item = InferredItem(path=path, media_type="tv", title="Show", year=None, season=2, episode=2, episode_title=None)
+    locked = cli._apply_tv_folder_season_lock(item, cache, folder_key)
+
+    assert locked.season == 2
 
 
 def test_backtracking_restores_tv_folder_cache_snapshot(monkeypatch, tmp_path: Path) -> None:

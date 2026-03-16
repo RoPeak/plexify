@@ -89,6 +89,12 @@ def run_video_workflow(
         console.print("Plan summary:")
         console.print(f"Planned items: {len(plans)}")
         console.print(f"Skipped: {stats.skipped}")
+        console.print(
+            "Selection policy: "
+            f"auto_accept={'on' if yes else 'off'}, "
+            f"allow_risky_enter_accept={'on' if allow_risky_enter_accept else 'off'}, "
+            f"min_confidence={min_confidence:.2f}"
+        )
         for line in options.skip_reason_lines_fn(stats):
             console.print(line)
         console.print(f"Errors: {stats.errors + len(errors)}")

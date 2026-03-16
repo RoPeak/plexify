@@ -154,7 +154,10 @@ def apply_tv_folder_season_lock(item: InferredItem, cache: Cache, folder_show_ke
     if folder_show_key is None or item.media_type != "tv":
         return item
     cached = cache.get_show(folder_show_key)
-    if not cached or not cached.get("confirmed_by_user") or not cached.get("manual"):
+    if not cached:
+        return item
+    trusted_auto = str(cached.get("selection_mode") or "").lower() == "auto" and not bool(cached.get("manual"))
+    if not (cached.get("confirmed_by_user") or trusted_auto):
         return item
     locked_season = cached.get("season")
     if locked_season is None:

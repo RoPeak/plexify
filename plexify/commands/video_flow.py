@@ -697,7 +697,7 @@ def movie_candidates(
         return candidate_page_cls(candidates=[], raw_results=[], next_offset=0, has_more=False)
 
     if raw_results is None:
-        fallback_queries = build_movie_fallback_queries_fn(item.title, None)
+        fallback_queries = build_movie_fallback_queries_fn(item.title, None, item.year)
         queries: list[str] = []
         if search_query and search_query.strip():
             queries.append(search_query.strip())

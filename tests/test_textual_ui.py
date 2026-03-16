@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from typer.testing import CliRunner
+from textual.css.query import NoMatches
 from textual.widgets import Button, Checkbox, Input, Static
 
 from plexify import cli, ui_services
@@ -39,6 +40,18 @@ def _fake_movie_page(*_args, **_kwargs) -> ui_services.UICandidatePage:
         next_offset=0,
         has_more=False,
     )
+
+
+async def _wait_for_widget(app: PlexifyTextualApp, pilot, screen_name: str, selector: str, widget_type: type) -> object:
+    for _ in range(30):
+        await pilot.pause()
+        if app.screen.__class__.__name__ != screen_name:
+            continue
+        try:
+            return app.screen.query_one(selector, widget_type)
+        except NoMatches:
+            continue
+    raise AssertionError(f"{selector} was not available on {screen_name}")
 
 
 def test_cli_help_includes_ui_command() -> None:
@@ -295,10 +308,7 @@ def test_textual_video_flow_to_result(monkeypatch) -> None:
                 screen.query_one("#path-one", Input).value = str(incoming)
                 screen.query_one("#path-two", Input).value = str(library)
                 screen.query_one("#scan", Button).press()
-                for _ in range(20):
-                    await pilot.pause()
-                    if app.screen.__class__.__name__ == "ReviewScreen":
-                        break
+                review = await _wait_for_widget(app, pilot, "ReviewScreen", "#accept", Button)
                 review = app.screen
                 review.query_one("#accept", Button).press()
                 review.query_one("#preview", Button).press()
@@ -337,10 +347,7 @@ def test_textual_apply_mode_uses_confirmation(monkeypatch) -> None:
                 screen.query_one("#path-two", Input).value = str(library)
                 screen.query_one("#apply-mode", Checkbox).value = True
                 screen.query_one("#scan", Button).press()
-                for _ in range(20):
-                    await pilot.pause()
-                    if app.screen.__class__.__name__ == "ReviewScreen":
-                        break
+                await _wait_for_widget(app, pilot, "ReviewScreen", "#accept", Button)
                 review = app.screen
                 review.query_one("#accept", Button).press()
                 review.query_one("#preview", Button).press()
@@ -418,10 +425,7 @@ def test_textual_unresolved_preview_disables_apply(monkeypatch) -> None:
                 screen.query_one("#path-one", Input).value = str(workspace / "incoming")
                 screen.query_one("#path-two", Input).value = str(library)
                 screen.query_one("#scan", Button).press()
-                for _ in range(20):
-                    await pilot.pause()
-                    if app.screen.__class__.__name__ == "ReviewScreen":
-                        break
+                await _wait_for_widget(app, pilot, "ReviewScreen", "#switch", Button)
                 review = app.screen
                 review.query_one("#switch", Button).press()
                 await pilot.pause()

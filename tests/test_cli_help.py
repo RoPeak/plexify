@@ -1,6 +1,27 @@
+import re
+
 from typer.testing import CliRunner
 
 from plexify.cli import app
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+HELP_ENV = {"TERM": "dumb", "NO_COLOR": "1", "COLUMNS": "120"}
+
+
+def _normalise_help_output(output: str) -> str:
+    text = ANSI_RE.sub("", output)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n+", "\n", text)
+    return text.casefold()
+
+
+def _invoke_help(*args: str) -> str:
+    runner = CliRunner()
+    result = runner.invoke(app, list(args), env=HELP_ENV)
+    assert result.exit_code == 0
+    return _normalise_help_output(result.output)
 
 
 def test_cli_help():
@@ -13,19 +34,18 @@ def test_cli_help():
 
 
 def test_organise_help():
-    runner = CliRunner()
-    result = runner.invoke(app, ["organise", "--help"])
-    assert result.exit_code == 0
-    assert "--log-level" in result.output
-    assert "--log-format" in result.output
-    assert "--log-file" in result.output
-    assert "--offline" in result.output
-    assert "--quiet" in result.output
-    assert "--prune-ignore" in result.output
-    assert "Auto-accept unambiguous top" in result.output
-    assert "result when confidence >=" in result.output
-    assert "Minimum confidence for" in result.output
-    assert "unambiguous auto acceptance" in result.output
+    output = _invoke_help("organise", "--help")
+    assert "log level" in output
+    assert "log format" in output
+    assert "log file" in output
+    assert "offline" in output
+    assert "quiet" in output
+    assert "prune-empty-dirs" in output
+    assert "ignorable filenames" in output
+    assert "auto-accept unambiguous top" in output
+    assert "result when confidence >=" in output
+    assert "minimum confidence for" in output
+    assert "unambiguous auto acceptance" in output
 
 
 def test_cache_help():
@@ -38,24 +58,20 @@ def test_cache_help():
 
 
 def test_wizard_help():
-    runner = CliRunner()
-    result = runner.invoke(app, ["wizard", "--help"])
-    assert result.exit_code == 0
-    assert "--log-level" in result.output
-    assert "--log-format" in result.output
-    assert "--log-file" in result.output
+    output = _invoke_help("wizard", "--help")
+    assert "log level" in output
+    assert "log format" in output
+    assert "log file" in output
 
 
 def test_music_help():
-    runner = CliRunner()
-    result = runner.invoke(app, ["music", "--help"])
-    assert result.exit_code == 0
-    assert "--log-level" in result.output
-    assert "--log-format" in result.output
-    assert "--log-file" in result.output
-    assert "--offline" in result.output
-    assert "--cleanup-unknown" in result.output
-    assert "Confirmation token" in result.output
+    output = _invoke_help("music", "--help")
+    assert "log level" in output
+    assert "log format" in output
+    assert "log file" in output
+    assert "offline" in output
+    assert "cleanup-unknown-files" in output
+    assert "confirmation token" in output
 
 
 def test_default_callback_invokes_wizard_with_parsed_defaults(monkeypatch) -> None:

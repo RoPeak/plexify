@@ -176,18 +176,22 @@ class ReviewScreen(Screen):
         self.workflow_state = workflow_state
         self.current_index = 0
         self.current_candidate_index = 0
+        self._queue = Static("", id="queue")
+        self._details = Static("", id="details")
+        self._candidates = Static("", id="candidates")
+        self._review_error = Static("", id="review-error")
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Horizontal(id="review"):
             with Vertical(id="queue-pane"):
-                yield Static("", id="queue")
+                yield self._queue
                 with Horizontal(classes="button-row"):
                     yield Button("Prev", id="prev-item")
                     yield Button("Next", id="next-item")
             with Vertical(id="detail-pane"):
-                yield Static("", id="details")
-                yield Static("", id="candidates")
+                yield self._details
+                yield self._candidates
                 yield Input("", id="action-input", placeholder="Search query or manual title (Title or Title (2001))")
                 with Horizontal(classes="button-row"):
                     yield Button("Cand -", id="prev-candidate")
@@ -209,11 +213,11 @@ class ReviewScreen(Screen):
                         yield Button("Order", id="order")
                         yield Button("Skip Album", id="skip-album")
                         yield Button("Skip Remaining", id="skip-remaining")
-                yield Static("", id="review-error")
+                yield self._review_error
         yield Footer()
 
     def on_mount(self) -> None:
-        self.refresh_view()
+        self.call_after_refresh(self.refresh_view)
 
     def action_next_item(self) -> None:
         self._move_item(1)
@@ -243,14 +247,11 @@ class ReviewScreen(Screen):
         return controller.items if self.workflow_state.workflow == "video" else controller.albums
 
     def refresh_view(self) -> None:
-        queue = self.query_one("#queue", Static)
-        details = self.query_one("#details", Static)
-        candidates = self.query_one("#candidates", Static)
         items = self._items()
         if not items:
-            queue.update("No items discovered.")
-            details.update("")
-            candidates.update("")
+            self._queue.update("No items discovered.")
+            self._details.update("")
+            self._candidates.update("")
             return
         lines = []
         for index, item in enumerate(items):
@@ -262,7 +263,7 @@ class ReviewScreen(Screen):
                 label = item.album.source.name
                 suffix = f" [{item.status_label}]"
             lines.append(f"{marker} {index + 1}. {label}{suffix}")
-        queue.update("\n".join(lines))
+        self._queue.update("\n".join(lines))
         current = items[self.current_index]
         if self.workflow_state.workflow == "video":
             detail_lines = [
@@ -315,8 +316,8 @@ class ReviewScreen(Screen):
                 )
             if not candidate_lines:
                 candidate_lines.append("No candidates.")
-        details.update("\n".join(detail_lines))
-        candidates.update("\n".join(candidate_lines))
+        self._details.update("\n".join(detail_lines))
+        self._candidates.update("\n".join(candidate_lines))
 
     def _accept(self) -> None:
         controller = self.workflow_state.controller
@@ -340,8 +341,7 @@ class ReviewScreen(Screen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
-        error = self.query_one("#review-error", Static)
-        error.update("")
+        self._review_error.update("")
         controller = self.workflow_state.controller
         if button_id == "prev-item":
             self._move_item(-1)
@@ -380,7 +380,7 @@ class ReviewScreen(Screen):
         elif button_id == "manual" and self.workflow_state.workflow == "video":
             title, year = _parse_manual_title(self.query_one("#action-input", Input).value)
             if not title:
-                error.update("Enter a manual title first.")
+                self._review_error.update("Enter a manual title first.")
                 return
             controller.manual_select(self.current_index, title=title, year=year)
             self.refresh_view()

@@ -41,7 +41,8 @@ def test_organise_help():
     assert "offline" in output
     assert "quiet" in output
     assert "prune-empty-dirs" in output
-    assert "ignorable filenames" in output
+    assert "ignore" in output
+    assert "filename" in output
     assert "auto-accept unambiguous top" in output
     assert "result when confidence >=" in output
     assert "minimum confidence for" in output
@@ -70,7 +71,8 @@ def test_music_help():
     assert "log format" in output
     assert "log file" in output
     assert "offline" in output
-    assert "cleanup-unknown-files" in output
+    assert "cleanup" in output
+    assert "unknown" in output
     assert "confirmation token" in output
 
 

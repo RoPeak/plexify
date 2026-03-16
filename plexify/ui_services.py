@@ -15,7 +15,7 @@ from .commands import music_flow, plan_flow, video_flow
 from .executor import execute_plans
 from .infer import InferredItem
 from .report import open_report_stream
-from .services import movie_matcher, music_matcher, tv_matcher
+from .services import movie_matcher, music_matcher, selection_policy, tv_matcher
 from .sources import musicbrainz, tvmaze, wikidata
 from .ui import format_path
 from .util import (
@@ -154,11 +154,9 @@ def apply_tv_folder_season_lock(item: InferredItem, cache: Cache, folder_show_ke
     if folder_show_key is None or item.media_type != "tv":
         return item
     cached = cache.get_show(folder_show_key)
-    if not cached:
+    if not selection_policy.folder_show_cache_entry_is_trusted(cached):
         return item
-    trusted_auto = str(cached.get("selection_mode") or "").lower() == "auto" and not bool(cached.get("manual"))
-    if not (cached.get("confirmed_by_user") or trusted_auto):
-        return item
+    assert isinstance(cached, dict)
     locked_season = cached.get("season")
     if locked_season is None:
         return item

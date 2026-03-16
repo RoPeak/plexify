@@ -31,7 +31,15 @@ from .paths import PathOverlapError, ensure_non_overlapping_paths, validate_non_
 from .prompting import _prompt_text
 from . import prompting_ui
 from .report import ReportFormatError, open_report_stream, write_report
-from .services import movie_matcher, music_matcher, organise_service, selection_policy, tv_matcher, video_item_service
+from .services import (
+    movie_matcher,
+    music_matcher,
+    music_workflow,
+    organise_service,
+    selection_policy,
+    tv_matcher,
+    video_item_service,
+)
 from .sources import musicbrainz, tvmaze, wikidata
 from .tv_episode_cache import EpisodeCache
 from .undo import undo_report
@@ -2534,8 +2542,6 @@ def music(
             orig_album_title = album.album
             album_artist = orig_album_artist
             album_title = orig_album_title
-            search_album_artist = album_artist
-            search_album_title = album_title
             album_group_key = (
                 _normalise_artist_key(album.artist),
                 (album.album or "").strip().casefold(),
@@ -2548,368 +2554,35 @@ def music(
                 multi_disc=folder_multidisc,
             )
             music_decision_key = music_util.album_decision_cache_key(album)
-            music_decision_payload: dict[str, Any] | None = None
-            reused_cached_decision = False
             invalid_track_count = int(getattr(album, "invalid_track_count", 0) or 0)
-
-            if verify_remaining:
-                cached_entry = _normalise_music_decision_entry(music_cache.get_music(music_decision_key))
-                if cached_entry is not None:
-                    decision = str(cached_entry.get("decision"))
-                    cached_selection_mode = str(cached_entry.get("selection_mode") or "manual")
-                    cached_artist = cached_entry.get("chosen_artist") or album_artist
-                    cached_album = cached_entry.get("chosen_album") or album_title
-                    cached_mbid = cached_entry.get("chosen_mbid")
-                    if decision == "skip_album":
-                        verification_stats["skipped_album"] += 1
-                        music_decision_payload = _build_music_decision_payload(
-                            selection_mode=cached_selection_mode,
-                            decision="skip_album",
-                            reason=cached_entry.get("reason"),
-                        )
-                        reused_cached_decision = True
-                    elif decision == "filename_fallback":
-                        verification_stats["filename_fallback"] += 1
-                        music_decision_payload = _build_music_decision_payload(
-                            selection_mode=cached_selection_mode,
-                            decision="filename_fallback",
-                            reason=cached_entry.get("reason"),
-                        )
-                        reused_cached_decision = True
-                    elif decision == "filename_titles_fallback":
-                        verification_stats["filename_titles_fallback"] += 1
-                        planned_tracks = _music_tracks_from_filenames(
-                            album.tracks,
-                            disc_number=album.disc_number,
-                            multi_disc=folder_multidisc,
-                        )
-                        album_artist = cached_artist
-                        album_title = cached_album
-                        music_decision_payload = _build_music_decision_payload(
-                            selection_mode=cached_selection_mode,
-                            decision="filename_titles_fallback",
-                            chosen_mbid=cached_mbid if isinstance(cached_mbid, str) else None,
-                            chosen_artist=album_artist,
-                            chosen_album=album_title,
-                            reason=cached_entry.get("reason"),
-                        )
-                        reused_cached_decision = True
-                    elif decision in {"selected", "order_fallback"} and isinstance(cached_mbid, str):
-                        mb_tracks: list[musicbrainz.Track] | None = None
-                        if cached_mbid in release_track_cache:
-                            mb_tracks = release_track_cache[cached_mbid]
-                        elif musicbrainz.is_available():
-                            mb_tracks = musicbrainz.fetch_release_tracks(cached_mbid, session=mb_session)
-                            release_track_cache[cached_mbid] = mb_tracks
-                        if mb_tracks:
-                            if decision == "selected":
-                                mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
-                                if mapped is not None:
-                                    planned_tracks = mapped
-                                    album_artist = cached_artist
-                                    album_title = cached_album
-                                    if cached_selection_mode == "auto":
-                                        verification_stats["auto_selected"] += 1
-                                    else:
-                                        verification_stats["manual_selected"] += 1
-                                    music_decision_payload = _build_music_decision_payload(
-                                        selection_mode=cached_selection_mode,
-                                        decision="selected",
-                                        chosen_mbid=cached_mbid,
-                                        chosen_artist=album_artist,
-                                        chosen_album=album_title,
-                                        reason=cached_entry.get("reason"),
-                                    )
-                                    reused_cached_decision = True
-                            else:
-                                mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                planned_tracks = mapped
-                                album_artist = cached_artist
-                                album_title = cached_album
-                                if cached_selection_mode == "auto":
-                                    verification_stats["auto_selected"] += 1
-                                else:
-                                    verification_stats["manual_selected"] += 1
-                                verification_stats["order_fallback"] += 1
-                                music_decision_payload = _build_music_decision_payload(
-                                    selection_mode=cached_selection_mode,
-                                    decision="order_fallback",
-                                    chosen_mbid=cached_mbid,
-                                    chosen_artist=album_artist,
-                                    chosen_album=album_title,
-                                    reason=cached_entry.get("reason"),
-                                )
-                                reused_cached_decision = True
-                    if reused_cached_decision:
-                        console.print("Reused cached music decision for this album.")
-
-            if verify_remaining and not reused_cached_decision:
-                if not musicbrainz.is_available():
-                    if not mb_disabled_reported:
-                        reason = musicbrainz.unavailable_reason() or "offline"
-                        console.print(f"MusicBrainz disabled: {reason}")
-                        mb_disabled_reported = True
-                    console.print("Skipped MusicBrainz (offline).")
-                else:
-                    skip_musicbrainz, override_artist, override_reason = _musicbrainz_skip_or_override(album)
-                    if override_artist is not None:
-                        search_album_artist = override_artist
-                    if skip_musicbrainz:
-                        verification_stats["skipped_album"] += 1
-                        music_decision_payload = _build_music_decision_payload(
-                            selection_mode="manual",
-                            decision="skip_album",
-                            reason="generic_album_metadata",
-                        )
-                        console.print("Skipping MusicBrainz verification for generic album metadata.")
-                    else:
-                        if override_reason:
-                            console.print(override_reason)
-                        candidates, search_state, final_search_artist, final_search_title = (
-                            _search_musicbrainz_candidates_with_retry(
-                                artist=search_album_artist,
-                                album=search_album_title,
-                                year=album.year,
-                                session=mb_session,
-                            )
-                        )
-                        search_album_artist = final_search_artist
-                        search_album_title = final_search_title
-                        if search_state == "offline":
-                            if not mb_disabled_reported:
-                                reason = musicbrainz.unavailable_reason() or "offline"
-                                console.print(f"MusicBrainz disabled: {reason}")
-                                mb_disabled_reported = True
-                            console.print("Skipped MusicBrainz (offline).")
-                        elif search_state == "skip":
-                            verification_stats["skipped_album"] += 1
-                            music_decision_payload = _build_music_decision_payload(
-                                selection_mode="manual",
-                                decision="skip_album",
-                                reason="user_skip",
-                            )
-                            console.print("Skipping MusicBrainz verification for this album.")
-                        elif search_state == "fallback":
-                            verification_stats["filename_fallback"] += 1
-                            music_decision_payload = _build_music_decision_payload(
-                                selection_mode="manual",
-                                decision="filename_fallback",
-                                reason="no_matches",
-                            )
-                            console.print("No MusicBrainz matches found. Using filename metadata.")
-                        elif not candidates:
-                            console.print("No MusicBrainz matches found. Using filename metadata.")
-                        else:
-                            candidates = _rank_music_candidates(
-                                candidates,
-                                len(album.tracks),
-                                orig_album_title,
-                                album.year,
-                            )
-                            auto_decision = _music_auto_verification_decision(
-                                candidates,
-                                file_track_count=len(album.tracks),
-                            )
-                            if auto_decision is not None and auto_decision.action == "skip":
-                                verification_stats["filename_fallback"] += 1
-                                music_decision_payload = _build_music_decision_payload(
-                                    selection_mode="auto",
-                                    decision="filename_fallback",
-                                    reason=auto_decision.reason,
-                                )
-                                console.print(f"{auto_decision.reason} Using filename metadata.")
-                            else:
-                                auto_candidate = (
-                                    auto_decision.candidate
-                                    if auto_decision is not None and auto_decision.action == "accept"
-                                    else None
-                                )
-                                auto_candidate_used = False
-                                while True:
-                                    selection_mode = "manual"
-                                    if auto_candidate is not None and not auto_candidate_used:
-                                        selection = auto_candidate
-                                        auto_candidate_used = True
-                                        selection_mode = "auto"
-                                        verification_stats["auto_selected"] += 1
-                                        if auto_decision is not None:
-                                            console.print(auto_decision.reason)
-                                    else:
-                                        selection = _select_music_candidate(candidates)
-                                    if selection == "q":
-                                        raise typer.Exit(code=0)
-                                    if selection == "s":
-                                        verification_stats["skipped_album"] += 1
-                                        music_decision_payload = _build_music_decision_payload(
-                                            selection_mode=selection_mode,
-                                            decision="skip_album",
-                                            reason="user_skip",
-                                        )
-                                        console.print("Skipping MusicBrainz verification for this album.")
-                                        break
-                                    if selection == "skip_all":
-                                        verification_stats["skipped_remaining"] += max(0, len(albums) - idx)
-                                        verify_remaining = False
-                                        music_decision_payload = _build_music_decision_payload(
-                                            selection_mode=selection_mode,
-                                            decision="skip_album",
-                                            reason="user_skip_all",
-                                        )
-                                        console.print("Skipping MusicBrainz verification for all remaining albums.")
-                                        break
-                                    if not isinstance(selection, musicbrainz.ReleaseCandidate):
-                                        break
-                                    if selection_mode == "manual":
-                                        verification_stats["manual_selected"] += 1
-                                    selected_album_artist = selection.artist
-                                    selected_album_title = selection.title
-                                    if selection.mbid in release_track_cache:
-                                        mb_tracks = release_track_cache[selection.mbid]
-                                    else:
-                                        mb_tracks = musicbrainz.fetch_release_tracks(selection.mbid, session=mb_session)
-                                        release_track_cache[selection.mbid] = mb_tracks
-                                    if not mb_tracks:
-                                        if not musicbrainz.is_available():
-                                            if not mb_disabled_reported:
-                                                reason = musicbrainz.unavailable_reason() or "offline"
-                                                console.print(f"MusicBrainz disabled: {reason}")
-                                                mb_disabled_reported = True
-                                            console.print("Skipped MusicBrainz (offline).")
-                                        else:
-                                            console.print("No tracklist found. Using filename metadata.")
-                                        break
-
-                                    if len(mb_tracks) != len(album.tracks):
-                                        console.print(
-                                            f"Track count mismatch: files={len(album.tracks)} release={len(mb_tracks)}."
-                                        )
-                                        if selection_mode == "manual" and _music_mismatch_is_extreme(
-                                            len(album.tracks), len(mb_tracks)
-                                        ):
-                                            keep_release = _confirm(
-                                                "Large mismatch for chosen release. Continue with this release? [y/N]",
-                                                False,
-                                                None,
-                                                show_default=False,
-                                            )
-                                            if not keep_release:
-                                                continue
-                                        if selection_mode == "auto" and _music_mismatch_is_extreme(
-                                            len(album.tracks), len(mb_tracks)
-                                        ):
-                                            console.print("Large track-count mismatch after auto-selection. Using filename metadata.")
-                                            album_artist = orig_album_artist
-                                            album_title = orig_album_title
-                                            verification_stats["filename_fallback"] += 1
-                                            music_decision_payload = _build_music_decision_payload(
-                                                selection_mode=selection_mode,
-                                                decision="filename_fallback",
-                                                reason="extreme_mismatch_after_auto",
-                                            )
-                                            break
-                                        choice = _prompt_music_track_mismatch_choice(
-                                            None,
-                                            mismatch_policy=mismatch_policy,
-                                        )
-                                        if choice == "r":
-                                            continue
-                                        if choice == "o":
-                                            mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                            console.print("Using MusicBrainz titles by track order.")
-                                            planned_tracks = mapped
-                                            album_artist = selected_album_artist
-                                            album_title = selected_album_title
-                                            verification_stats["order_fallback"] += 1
-                                            music_decision_payload = _build_music_decision_payload(
-                                                selection_mode=selection_mode,
-                                                decision="order_fallback",
-                                                chosen_mbid=selection.mbid,
-                                                chosen_artist=album_artist,
-                                                chosen_album=album_title,
-                                                reason="track_count_mismatch",
-                                            )
-                                            break
-                                        if choice == "t":
-                                            planned_tracks = _music_tracks_from_filenames(
-                                                album.tracks,
-                                                disc_number=album.disc_number,
-                                                multi_disc=folder_multidisc,
-                                            )
-                                            console.print("Using filename titles while keeping MusicBrainz album metadata.")
-                                            album_artist = selected_album_artist
-                                            album_title = selected_album_title
-                                            verification_stats["filename_titles_fallback"] += 1
-                                            music_decision_payload = _build_music_decision_payload(
-                                                selection_mode=selection_mode,
-                                                decision="filename_titles_fallback",
-                                                chosen_mbid=selection.mbid,
-                                                chosen_artist=album_artist,
-                                                chosen_album=album_title,
-                                                reason="track_count_mismatch_filename_titles",
-                                            )
-                                            break
-                                        console.print("Using filename metadata.")
-                                        album_artist = orig_album_artist
-                                        album_title = orig_album_title
-                                        verification_stats["filename_fallback"] += 1
-                                        music_decision_payload = _build_music_decision_payload(
-                                            selection_mode=selection_mode,
-                                            decision="filename_fallback",
-                                            chosen_mbid=selection.mbid,
-                                            reason="track_count_mismatch",
-                                        )
-                                        break
-
-                                    mapped, reason = _map_musicbrainz_tracks(album.tracks, mb_tracks)
-                                    if reason:
-                                        if reason == "Multi-disc release without disc numbers in filenames":
-                                            mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                            console.print(
-                                                "Warning: Multi-disc release without disc numbers in filenames. "
-                                                "Using MusicBrainz order with disc-prefixed track numbers."
-                                            )
-                                            album_artist = selected_album_artist
-                                            album_title = selected_album_title
-                                        else:
-                                            console.print(f"Warning: {reason}.")
-                                            if _confirm("Fallback to filename titles? [Y/n]", True, None, show_default=False):
-                                                mapped = None
-                                                album_artist = orig_album_artist
-                                                album_title = orig_album_title
-                                                verification_stats["filename_fallback"] += 1
-                                                music_decision_payload = _build_music_decision_payload(
-                                                    selection_mode=selection_mode,
-                                                    decision="filename_fallback",
-                                                    chosen_mbid=selection.mbid,
-                                                    reason=reason,
-                                                )
-                                            else:
-                                                mapped = _map_musicbrainz_by_order(album.tracks, mb_tracks)
-                                                console.print("Using MusicBrainz titles by track order.")
-                                                album_artist = selected_album_artist
-                                                album_title = selected_album_title
-                                                verification_stats["order_fallback"] += 1
-                                                music_decision_payload = _build_music_decision_payload(
-                                                    selection_mode=selection_mode,
-                                                    decision="order_fallback",
-                                                    chosen_mbid=selection.mbid,
-                                                    chosen_artist=album_artist,
-                                                    chosen_album=album_title,
-                                                    reason=reason,
-                                                )
-                                    if mapped is not None:
-                                        planned_tracks = mapped
-                                        album_artist = selected_album_artist
-                                        album_title = selected_album_title
-                                        if music_decision_payload is None:
-                                            music_decision_payload = _build_music_decision_payload(
-                                                selection_mode=selection_mode,
-                                                decision="selected",
-                                                chosen_mbid=selection.mbid,
-                                                chosen_artist=album_artist,
-                                                chosen_album=album_title,
-                                            )
-                                    break
+            verification_result = music_workflow.resolve_album_verification(
+                album=album,
+                albums=albums,
+                idx=idx,
+                orig_album_artist=orig_album_artist,
+                orig_album_title=orig_album_title,
+                album_artist=album_artist,
+                album_title=album_title,
+                planned_tracks=planned_tracks,
+                folder_multidisc=folder_multidisc,
+                verify=verify,
+                verify_remaining=verify_remaining,
+                mismatch_policy=mismatch_policy,
+                music_cache=music_cache,
+                music_decision_key=music_decision_key,
+                release_track_cache=release_track_cache,
+                verification_stats=verification_stats,
+                mb_session=mb_session,
+                mb_disabled_reported=mb_disabled_reported,
+                console=console,
+                helpers=sys.modules[__name__],
+            )
+            planned_tracks = verification_result.planned_tracks
+            album_artist = verification_result.album_artist
+            album_title = verification_result.album_title
+            music_decision_payload = verification_result.music_decision_payload
+            verify_remaining = verification_result.verify_remaining
+            mb_disabled_reported = verification_result.mb_disabled_reported
 
             if verify and music_decision_payload is not None:
                 music_decision_payload["invalid_track_count"] = invalid_track_count

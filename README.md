@@ -1,5 +1,7 @@
 # Plexify
 
+[![CI](https://github.com/RoPeak/plexify/actions/workflows/ci.yml/badge.svg)](https://github.com/RoPeak/plexify/actions/workflows/ci.yml)
+
 Plexify is a small CLI that organises movie and TV files into a Plex-friendly
 folder structure. It is safe by default and asks for confirmation when metadata
 is uncertain.
@@ -26,6 +28,12 @@ After editable install, you can run the console script directly:
 plexify --help
 ```
 
+CI uses the same local verification command:
+
+```powershell
+python -m pytest -q
+```
+
 ## Quick start
 
 Wizard (recommended):
@@ -35,7 +43,7 @@ python -m plexify.cli
 ```
 
 The wizard guides you through incoming/library folders, media type, dry-run vs apply, copy vs move,
-auto-accept settings, confidence threshold, and cache usage. It prints the exact command it runs.
+auto-accept settings, risky Enter acceptance, confidence threshold, and cache usage. It prints the exact command it runs.
 Move mode requires typing MOVE to confirm. During a dry run, it prints a loud warning that no files
 will be moved or copied, and it offers to apply the plan immediately at the end.
 
@@ -103,6 +111,9 @@ Interactive selection shortcuts:
 - `b` go back to the previous file
 - Any other text is treated as a search query
 
+When interactive prompts are shown, Plexify prints the active selection policy so it is clear when low-confidence
+or risky cached matches still require an explicit numeric choice.
+
 Cache control:
 
 ```powershell
@@ -143,7 +154,7 @@ Cache reuse:
 - Movie cache keys are based on normalised title + year (e.g., `Superman II` caches separately from `Superman`).
 - TV show cache keys include show title + year, and episode keys include season + episode when known.
 - TV folder keys are stored as `tvfolder|<relative show folder>` so confirming one episode can reuse the show choice for sibling episodes in the same folder, even when inferred year is unknown.
-- Reuse only applies to entries confirmed by the user (`confirmed_by_user: true`).
+- Folder-key reuse applies to trusted user-confirmed entries and trusted auto selections.
 - TV cache lookup precedence is: episode key -> reusable show key -> folder key -> file-specific key.
 
 Matching notes:
@@ -217,6 +228,12 @@ D:\Media\Music\Alanis Morissette\Jagged Little Pill\01 - All I Really Want.flac
 - Numbered episode folders (e.g., `Pride and Prejudice\1.mkv`, `2.mkv`) are treated as TV when the folder
   contains multiple video files. The show name is taken from the folder name and any year is used as a hint.
 
+## GitHub Actions
+
+- `CI` runs `python -m pytest -q` on Windows and Linux across Python 3.10, 3.11, and 3.12.
+- `Release Artifacts` builds an sdist and wheel on demand or from `v*` tags and stores them as workflow artifacts.
+- This repo does not publish to PyPI or create GitHub Releases automatically in the current setup.
+
 ## Clean project export
 
 To create a shareable archive without local runtime artifacts (`.git`, `.venv`, `.pytest_cache`, `.plexify`, temp folders):
@@ -232,3 +249,9 @@ You can override the destination path:
 ```powershell
 .\scripts\export-clean.ps1 -OutputPath "exports\plexify-YYYYMMDD.zip"
 ```
+
+Recommended sharing flow:
+
+1. Run `python -m pytest -q`.
+2. Run `.\scripts\export-clean.ps1`.
+3. Share the generated archive from `exports\`.

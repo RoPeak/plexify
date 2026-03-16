@@ -1,5 +1,6 @@
 import re
 
+from plexify.services import selection_policy
 from plexify.services.movie_matcher import auto_acceptable, confidence_score, search_lost_sequel_marker
 from plexify.services.music_matcher import rank_music_candidates
 from plexify.services.tv_matcher import normalize_tv_retry_query, tv_confidence_score
@@ -37,6 +38,17 @@ def test_tv_confidence_score_rewards_matching_year() -> None:
 def test_tv_retry_query_removes_explicit_season_tokens() -> None:
     season_re = re.compile(r"(?<![A-Za-z0-9])(?:season|series|seaon|seson|seasn)[-_. ]*(\d{1,2})(?![A-Za-z0-9])", re.IGNORECASE)
     assert normalize_tv_retry_query("The Big Bang Theory Seaon 5 cast", season_re) == "the big bang theory cast"
+
+
+def test_selection_policy_uses_offline_skip_reason() -> None:
+    assert selection_policy.no_match_skip_reason(offline=True) == selection_policy.OFFLINE_NO_CACHE_REASON
+    assert selection_policy.no_match_skip_reason(offline=False) == selection_policy.NO_CANDIDATES_REASON
+
+
+def test_selection_policy_trusts_confirmed_and_auto_folder_cache_entries() -> None:
+    assert selection_policy.folder_show_cache_entry_is_trusted({"confirmed_by_user": True}) is True
+    assert selection_policy.folder_show_cache_entry_is_trusted({"selection_mode": "auto", "manual": False}) is True
+    assert selection_policy.folder_show_cache_entry_is_trusted({"selection_mode": "manual", "manual": False}) is False
 
 
 def test_rank_music_candidates_prefers_track_count_match() -> None:

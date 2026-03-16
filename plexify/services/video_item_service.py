@@ -34,6 +34,90 @@ def process_video_item(
     helpers: Any = None,
     reprocess_item_fn: Any = None,
 ) -> tuple[Any | None, bool]:
+    if item.media_type == "tv":
+        return process_tv_item(
+            item=item,
+            library=library,
+            cache=cache,
+            mode=mode,
+            copy_mode=copy_mode,
+            interactive=interactive,
+            auto_accept=auto_accept,
+            min_confidence=min_confidence,
+            session_tv=session_tv,
+            session_wd=session_wd,
+            episode_cache=episode_cache,
+            progress=progress,
+            show_cache=show_cache,
+            stats=stats,
+            incoming_root=incoming_root,
+            planned=planned,
+            on_conflict=on_conflict,
+            allow_back=allow_back,
+            offline=offline,
+            allow_risky_enter_accept=allow_risky_enter_accept,
+            media_type_overrides=media_type_overrides,
+            tv_search_cache=tv_search_cache,
+            movie_entity_cache=movie_entity_cache,
+            helpers=helpers,
+            reprocess_item_fn=reprocess_item_fn,
+        )
+    return process_movie_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode=mode,
+        copy_mode=copy_mode,
+        interactive=interactive,
+        auto_accept=auto_accept,
+        min_confidence=min_confidence,
+        session_tv=session_tv,
+        session_wd=session_wd,
+        episode_cache=episode_cache,
+        progress=progress,
+        show_cache=show_cache,
+        stats=stats,
+        incoming_root=incoming_root,
+        planned=planned,
+        on_conflict=on_conflict,
+        allow_back=allow_back,
+        offline=offline,
+        allow_risky_enter_accept=allow_risky_enter_accept,
+        media_type_overrides=media_type_overrides,
+        tv_search_cache=tv_search_cache,
+        movie_entity_cache=movie_entity_cache,
+        helpers=helpers,
+        reprocess_item_fn=reprocess_item_fn,
+    )
+
+
+def process_tv_item(
+    item: Any,
+    library: Path,
+    cache: Any,
+    mode: str,
+    copy_mode: bool,
+    interactive: bool,
+    auto_accept: bool,
+    min_confidence: float,
+    session_tv: requests.Session,
+    session_wd: requests.Session,
+    episode_cache: Any,
+    progress: Progress | None,
+    show_cache: bool,
+    stats: Any = None,
+    incoming_root: Path | None = None,
+    planned: dict[str, int] | None = None,
+    on_conflict: str = "rename",
+    allow_back: bool = False,
+    offline: bool = False,
+    allow_risky_enter_accept: bool = False,
+    media_type_overrides: dict[str, str] | None = None,
+    tv_search_cache: dict[str, list[Any]] | None = None,
+    movie_entity_cache: dict[str, Any] | None = None,
+    helpers: Any = None,
+    reprocess_item_fn: Any = None,
+) -> tuple[Any | None, bool]:
     item, override_key = helpers._resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
     folder_show_key = helpers.tv_show_folder_cache_key(item.path, incoming_root) if item.media_type == "tv" else None
     item = helpers._apply_tv_folder_season_lock(item, cache, folder_show_key)
@@ -100,7 +184,11 @@ def process_video_item(
                             path=item.path,
                             title=item.title,
                         )
-                    helpers._record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
+                    helpers._record_stat(
+                        stats,
+                        "skipped",
+                        reason=helpers.selection_policy.no_match_skip_reason(offline=offline),
+                    )
                     return None, False
                 if helpers._confirm("No TV candidates. Switch to movie search? [y/N]", False, progress, show_default=False):
                     helpers._persist_media_type_override(cache, override_key, "movie", media_type_overrides, progress)
@@ -233,7 +321,11 @@ def process_video_item(
                 outcome = "auto"
                 break
             if not interactive:
-                helpers._record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
+                helpers._record_stat(
+                    stats,
+                    "skipped",
+                    reason=helpers.selection_policy.no_match_skip_reason(offline=offline),
+                )
                 return None, False
             policy = helpers._candidate_prompt_policy(
                 item=item,
@@ -444,7 +536,11 @@ def process_video_item(
                 return None, False
             season_prompt = helpers._prompt_int_or_control("Season", item.season or 1, progress)
             if season_prompt == "k":
-                helpers._record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
+                helpers._record_stat(
+                    stats,
+                    "skipped",
+                    reason=helpers.selection_policy.no_match_skip_reason(offline=offline),
+                )
                 return None, False
             if season_prompt == "q":
                 raise helpers.typer.Exit(code=0)
@@ -532,7 +628,11 @@ def process_video_item(
                     year=item.year,
                     key=reusable_show_key,
                 )
-        if folder_show_key and (confirmed_by_user or trusted_auto):
+        if folder_show_key and helpers.selection_policy.should_write_folder_show_cache(
+            confirmed_by_user=confirmed_by_user,
+            selection_mode=outcome,
+            manual=bool(selected.metadata.get("manual")),
+        ):
             folder_entry = dict(show_entry)
             if season is not None:
                 folder_entry["season"] = season
@@ -595,6 +695,72 @@ def process_video_item(
         )
         return plan, collision
 
+def process_movie_item(
+    item: Any,
+    library: Path,
+    cache: Any,
+    mode: str,
+    copy_mode: bool,
+    interactive: bool,
+    auto_accept: bool,
+    min_confidence: float,
+    session_tv: requests.Session,
+    session_wd: requests.Session,
+    episode_cache: Any,
+    progress: Progress | None,
+    show_cache: bool,
+    stats: Any = None,
+    incoming_root: Path | None = None,
+    planned: dict[str, int] | None = None,
+    on_conflict: str = "rename",
+    allow_back: bool = False,
+    offline: bool = False,
+    allow_risky_enter_accept: bool = False,
+    media_type_overrides: dict[str, str] | None = None,
+    tv_search_cache: dict[str, list[Any]] | None = None,
+    movie_entity_cache: dict[str, Any] | None = None,
+    helpers: Any = None,
+    reprocess_item_fn: Any = None,
+) -> tuple[Any | None, bool]:
+    item, override_key = helpers._resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
+    folder_show_key = helpers.tv_show_folder_cache_key(item.path, incoming_root) if item.media_type == "tv" else None
+    item = helpers._apply_tv_folder_season_lock(item, cache, folder_show_key)
+    cache_key = helpers.build_cache_key(item.path, incoming_root, item.media_type, item.year)
+    if item.media_type == "tv":
+        return process_tv_item(
+            item=item,
+            library=library,
+            cache=cache,
+            mode=mode,
+            copy_mode=copy_mode,
+            interactive=interactive,
+            auto_accept=auto_accept,
+            min_confidence=min_confidence,
+            session_tv=session_tv,
+            session_wd=session_wd,
+            episode_cache=episode_cache,
+            progress=progress,
+            show_cache=show_cache,
+            stats=stats,
+            incoming_root=incoming_root,
+            planned=planned,
+            on_conflict=on_conflict,
+            allow_back=allow_back,
+            offline=offline,
+            allow_risky_enter_accept=allow_risky_enter_accept,
+            media_type_overrides=media_type_overrides,
+            tv_search_cache=tv_search_cache,
+            movie_entity_cache=movie_entity_cache,
+            helpers=helpers,
+            reprocess_item_fn=reprocess_item_fn,
+        )
+    if item.media_type == "movie" and interactive:
+        if helpers.re.search(r"\b(series|episode)\b", item.path.stem, helpers.re.IGNORECASE):
+            if helpers._confirm("This looks like TV. Treat as TV? [Y/n]", True, progress, show_default=False):
+                item = helpers._switch_item_media_type(item, "tv")
+                helpers._persist_media_type_override(cache, override_key, "tv", media_type_overrides, progress)
+    reusable_movie_key = helpers.movie_cache_key(item.title, item.year)
+
     raw_results_movie: list[Any] | None = None
     next_offset = 0
     movie_page_limit = 1 if auto_accept and not interactive else 5
@@ -642,7 +808,11 @@ def process_video_item(
                         path=item.path,
                         title=item.title,
                     )
-                helpers._record_stat(stats, "skipped", reason="offline_no_cache" if offline else "no_candidates")
+                helpers._record_stat(
+                    stats,
+                    "skipped",
+                    reason=helpers.selection_policy.no_match_skip_reason(offline=offline),
+                )
                 return None, False
             if helpers._confirm("No movie candidates. Switch to TV search? [y/N]", False, progress, show_default=False):
                 helpers._persist_media_type_override(cache, override_key, "tv", media_type_overrides, progress)

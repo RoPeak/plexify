@@ -312,8 +312,7 @@ def test_textual_video_flow_to_result(monkeypatch) -> None:
                 review = app.screen
                 review.query_one("#accept", Button).press()
                 review.query_one("#preview", Button).press()
-                await pilot.pause()
-                assert app.screen.__class__.__name__ == "PreviewScreen"
+                await _wait_for_widget(app, pilot, "PreviewScreen", "#apply", Button)
                 app.screen.query_one("#apply", Button).press()
                 for _ in range(20):
                     await pilot.pause()
@@ -351,7 +350,7 @@ def test_textual_apply_mode_uses_confirmation(monkeypatch) -> None:
                 review = app.screen
                 review.query_one("#accept", Button).press()
                 review.query_one("#preview", Button).press()
-                await pilot.pause()
+                await _wait_for_widget(app, pilot, "PreviewScreen", "#apply", Button)
                 app.screen.query_one("#apply", Button).press()
                 await pilot.pause()
                 assert app.screen.__class__.__name__ == "ConfirmApplyScreen"

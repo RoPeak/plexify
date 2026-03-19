@@ -7,6 +7,104 @@ import requests
 from rich.progress import Progress
 
 
+def _prepare_item_context(
+    *,
+    item: Any,
+    cache: Any,
+    incoming_root: Path | None,
+    media_type_overrides: dict[str, str] | None,
+    helpers: Any,
+) -> tuple[Any, str | None, str | None]:
+    item, override_key = helpers._resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
+    folder_show_key = helpers.tv_show_folder_cache_key(item.path, incoming_root) if item.media_type == "tv" else None
+    item = helpers._apply_tv_folder_season_lock(item, cache, folder_show_key)
+    return item, override_key, folder_show_key
+
+
+def _load_tv_candidate_page(
+    *,
+    item: Any,
+    session_tv: requests.Session,
+    cache: Any,
+    show_cache: bool,
+    incoming_root: Path | None,
+    cache_key: str,
+    next_offset: int,
+    raw_results_tv: list[Any] | None,
+    search_query: str,
+    progress: Progress | None,
+    offline: bool,
+    interactive: bool,
+    tv_search_cache: dict[str, list[Any]] | None,
+    helpers: Any,
+) -> Any:
+    return helpers._fetch_with_retry(
+        "TVMaze",
+        lambda: helpers._tv_candidates(
+            item,
+            session_tv,
+            cache,
+            show_cache,
+            incoming_root=incoming_root,
+            cache_key=cache_key,
+            offset=next_offset,
+            raw_results=raw_results_tv,
+            search_query=search_query,
+            progress=progress,
+            offline=offline,
+            interactive=interactive,
+            search_cache=tv_search_cache,
+        ),
+        interactive,
+        progress,
+    )
+
+
+def _load_movie_candidate_page(
+    *,
+    item: Any,
+    session_wd: requests.Session,
+    cache: Any,
+    show_cache: bool,
+    cache_key: str,
+    next_offset: int,
+    raw_results_movie: list[Any] | None,
+    search_query: str,
+    progress: Progress | None,
+    limit: int,
+    offline: bool,
+    interactive: bool,
+    movie_entity_cache: dict[str, Any] | None,
+    helpers: Any,
+) -> Any:
+    return helpers._fetch_with_retry(
+        "Wikidata",
+        lambda: helpers._movie_candidates(
+            item,
+            session_wd,
+            cache,
+            show_cache,
+            cache_key=cache_key,
+            offset=next_offset,
+            raw_results=raw_results_movie,
+            search_query=search_query,
+            progress=progress,
+            limit=limit,
+            offline=offline,
+            interactive=interactive,
+            movie_entity_cache=movie_entity_cache,
+        ),
+        interactive,
+        progress,
+    )
+
+
+def _apply_candidate_page(page: Any, stats: Any, helpers: Any) -> tuple[list[Any], Any, int, bool]:
+    if page.cache_hit:
+        helpers._record_cache_hit(stats)
+    return page.candidates, page.raw_results, page.next_offset, page.has_more
+
+
 def process_video_item(
     item: Any,
     library: Path,
@@ -118,9 +216,13 @@ def process_tv_item(
     helpers: Any = None,
     reprocess_item_fn: Any = None,
 ) -> tuple[Any | None, bool]:
-    item, override_key = helpers._resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
-    folder_show_key = helpers.tv_show_folder_cache_key(item.path, incoming_root) if item.media_type == "tv" else None
-    item = helpers._apply_tv_folder_season_lock(item, cache, folder_show_key)
+    item, override_key, folder_show_key = _prepare_item_context(
+        item=item,
+        cache=cache,
+        incoming_root=incoming_root,
+        media_type_overrides=media_type_overrides,
+        helpers=helpers,
+    )
     cache_key = helpers.build_cache_key(item.path, incoming_root, item.media_type, item.year)
     if item.media_type == "movie" and interactive:
         if helpers.re.search(r"\b(series|episode)\b", item.path.stem, helpers.re.IGNORECASE):
@@ -143,34 +245,25 @@ def process_tv_item(
         raw_results_tv: list[Any] | None = None
         next_offset = 0
         search_query = helpers._build_search_query(item.title, None)
-        page = helpers._fetch_with_retry(
-            "TVMaze",
-            lambda: helpers._tv_candidates(
-                item,
-                session_tv,
-                cache,
-                show_cache,
-                incoming_root=incoming_root,
-                cache_key=cache_key,
-                offset=next_offset,
-                raw_results=raw_results_tv,
-                search_query=search_query,
-                progress=progress,
-                offline=offline,
-                interactive=interactive,
-                search_cache=tv_search_cache,
-            ),
-            interactive,
-            progress,
+        page = _load_tv_candidate_page(
+            item=item,
+            session_tv=session_tv,
+            cache=cache,
+            show_cache=show_cache,
+            incoming_root=incoming_root,
+            cache_key=cache_key,
+            next_offset=next_offset,
+            raw_results_tv=raw_results_tv,
+            search_query=search_query,
+            progress=progress,
+            offline=offline,
+            interactive=interactive,
+            tv_search_cache=tv_search_cache,
+            helpers=helpers,
         )
         if page is None:
             return None, False
-        if page.cache_hit:
-            helpers._record_cache_hit(stats)
-        candidates = page.candidates
-        raw_results_tv = page.raw_results
-        next_offset = page.next_offset
-        has_more = page.has_more
+        candidates, raw_results_tv, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
         selected = None
         outcome = None
         while True:
@@ -722,9 +815,13 @@ def process_movie_item(
     helpers: Any = None,
     reprocess_item_fn: Any = None,
 ) -> tuple[Any | None, bool]:
-    item, override_key = helpers._resolve_media_type_override(item, cache, incoming_root, media_type_overrides)
-    folder_show_key = helpers.tv_show_folder_cache_key(item.path, incoming_root) if item.media_type == "tv" else None
-    item = helpers._apply_tv_folder_season_lock(item, cache, folder_show_key)
+    item, override_key, folder_show_key = _prepare_item_context(
+        item=item,
+        cache=cache,
+        incoming_root=incoming_root,
+        media_type_overrides=media_type_overrides,
+        helpers=helpers,
+    )
     cache_key = helpers.build_cache_key(item.path, incoming_root, item.media_type, item.year)
     if item.media_type == "tv":
         return process_tv_item(
@@ -765,34 +862,25 @@ def process_movie_item(
     next_offset = 0
     movie_page_limit = 1 if auto_accept and not interactive else 5
     search_query = helpers._build_search_query(item.title, None)
-    page = helpers._fetch_with_retry(
-        "Wikidata",
-        lambda: helpers._movie_candidates(
-            item,
-            session_wd,
-            cache,
-            show_cache,
-            cache_key=cache_key,
-            offset=next_offset,
-            raw_results=raw_results_movie,
-            search_query=search_query,
-            progress=progress,
-            limit=movie_page_limit,
-            offline=offline,
-            interactive=interactive,
-            movie_entity_cache=movie_entity_cache,
-        ),
-        interactive,
-        progress,
+    page = _load_movie_candidate_page(
+        item=item,
+        session_wd=session_wd,
+        cache=cache,
+        show_cache=show_cache,
+        cache_key=cache_key,
+        next_offset=next_offset,
+        raw_results_movie=raw_results_movie,
+        search_query=search_query,
+        progress=progress,
+        limit=movie_page_limit,
+        offline=offline,
+        interactive=interactive,
+        movie_entity_cache=movie_entity_cache,
+        helpers=helpers,
     )
     if page is None:
         return None, False
-    if page.cache_hit:
-        helpers._record_cache_hit(stats)
-    candidates = page.candidates
-    raw_results_movie = page.raw_results
-    next_offset = page.next_offset
-    has_more = page.has_more
+    candidates, raw_results_movie, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
     selected = None
     manual_fallback: Any | None = None
     manual_hint = ""

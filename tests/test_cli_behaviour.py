@@ -1739,7 +1739,7 @@ def test_tv_episode_cache_not_reused_for_ambiguous_title(monkeypatch, tmp_path: 
     assert page.cache_hit is False
 
 
-def test_tv_cache_precedence_reusable_over_folder_and_file(monkeypatch, tmp_path: Path) -> None:
+def test_tv_cache_precedence_trusted_folder_over_reusable_and_file(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
 
     incoming = tmp_path / "incoming"
@@ -1756,6 +1756,41 @@ def test_tv_cache_precedence_reusable_over_folder_and_file(monkeypatch, tmp_path
 
     cache.set_show(path_key, _tv_cache_entry(id_value=1, name="File Show", premiered=2005, season=8, episode=88))
     cache.set_show(folder_key, _tv_cache_entry(id_value=2, name="Folder Show", premiered=2005))
+    cache.set_show(reusable_show_key, _tv_cache_entry(id_value=3, name="Reusable Show", premiered=2005))
+
+    page = cli._tv_candidates(
+        item,
+        session=requests.Session(),
+        cache=cache,
+        show_cache=False,
+        incoming_root=incoming,
+        cache_key=path_key,
+    )
+
+    assert page.cache_hit is True
+    candidate = page.candidates[0]
+    assert candidate.metadata["name"] == "Folder Show"
+    assert candidate.metadata.get("season") is None
+    assert candidate.metadata.get("episode") is None
+
+
+def test_tv_cache_precedence_reusable_over_untrusted_folder_and_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cli.tvmaze, "search_shows", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no api")))
+
+    incoming = tmp_path / "incoming"
+    path = incoming / "Show" / "Season 1" / "Show.S01E02.mkv"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+    item = InferredItem(path=path, media_type="tv", title="Show", year=2005, season=1, episode=2, episode_title=None)
+    cache = Cache(tmp_path / "cache.json")
+
+    path_key = cli.build_cache_key(path, incoming, "tv", item.year)
+    reusable_show_key = cli.tv_show_cache_key(item.title, item.year)
+    folder_key = tv_show_folder_cache_key(path, incoming)
+    assert folder_key is not None
+
+    cache.set_show(path_key, _tv_cache_entry(id_value=1, name="File Show", premiered=2005, season=8, episode=88))
+    cache.set_show(folder_key, {"id": 2, "name": "Folder Show", "premiered": 2005, "manual": True})
     cache.set_show(reusable_show_key, _tv_cache_entry(id_value=3, name="Reusable Show", premiered=2005))
 
     page = cli._tv_candidates(

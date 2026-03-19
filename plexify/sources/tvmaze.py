@@ -14,6 +14,7 @@ from ..logging_config import get_logger
 _available = True
 _warned = False
 _recover_at: float | None = None
+_unavailable_reason: str | None = None
 logger = get_logger(__name__)
 
 
@@ -26,21 +27,27 @@ def _warn_unavailable(message: str) -> None:
 
 
 def _set_unavailable(message: str, *, cooldown: float = 60.0) -> None:
-    global _available, _recover_at
+    global _available, _recover_at, _unavailable_reason
     if not _available:
         return
     _available = False
     _recover_at = time.monotonic() + cooldown
+    _unavailable_reason = message
     _warn_unavailable(message)
 
 
 def is_available() -> bool:
-    global _available, _recover_at, _warned
+    global _available, _recover_at, _warned, _unavailable_reason
     if not _available and _recover_at is not None and time.monotonic() >= _recover_at:
         _available = True
         _recover_at = None
         _warned = False
+        _unavailable_reason = None
     return _available
+
+
+def unavailable_reason() -> str | None:
+    return _unavailable_reason
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from typing import Callable, Iterable
@@ -8,6 +9,25 @@ from .logging_config import get_logger
 from .util import ExecutionResult, MovePlan, ensure_dir, unique_path
 
 logger = get_logger(__name__)
+
+
+def _overwrite_temp_path(destination: Path) -> Path:
+    return destination.with_name(f"{destination.name}.plexify.tmp")
+
+
+def _replace_destination_atomically(source: Path, destination: Path, *, remove_source_after: bool) -> None:
+    tmp_destination = _overwrite_temp_path(destination)
+    shutil.copy2(source, tmp_destination)
+    try:
+        os.replace(tmp_destination, destination)
+    except Exception:
+        try:
+            tmp_destination.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("overwrite_temp_cleanup_failed", extra={"path": str(tmp_destination)})
+        raise
+    if remove_source_after:
+        source.unlink()
 
 
 def execute_plans(
@@ -48,11 +68,12 @@ def execute_plans(
                         if on_progress:
                             on_progress(completed, total, plan)
                         continue
-                    destination.unlink()
                 elif on_conflict == "rename":
                     destination = unique_path(destination)
             ensure_dir(destination.parent)
-            if copy_mode:
+            if destination.exists() and on_conflict == "overwrite":
+                _replace_destination_atomically(plan.source, destination, remove_source_after=not copy_mode)
+            elif copy_mode:
                 shutil.copy2(plan.source, destination)
             else:
                 shutil.move(plan.source, destination)

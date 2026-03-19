@@ -10,6 +10,7 @@ import requests
 
 from ..cache import Cache, NullCache
 from ..infer import InferredItem
+from ..services import selection_policy
 from ..sources import tvmaze, wikidata
 from ..tv_episode_cache import EpisodeCache
 from ..util import build_cache_key, iter_video_files, movie_cache_key, tv_episode_cache_key, tv_show_cache_key, tv_show_folder_cache_key
@@ -66,6 +67,12 @@ def select_preview_plans(plans: list[Any], limit: int = 5) -> list[Any]:
 def preview_spans_multiple_groups(plans: list[Any]) -> bool:
     groups = {preview_group_key(plan) for plan in plans}
     return len(groups) > 1
+
+
+def _unavailable_search_message(source_name: str, reason: str | None) -> str:
+    if reason:
+        return f"{source_name} unavailable: {reason}"
+    return f"{source_name} unavailable."
 
 
 def print_run_summary(
@@ -399,19 +406,30 @@ def tv_candidates(
     folder_show_key = tv_show_folder_cache_key_fn(item.path, incoming_root)
     if reusable_safe and item.season is not None and item.episode is not None:
         reusable_episode_key = tv_episode_cache_key_fn(item.title, item.year, item.season, item.episode)
+    trusted_folder_entry = None
+    if folder_show_key:
+        trusted_folder_entry = cache.get_show(folder_show_key)
+        if not cache_entry_confirmed_or_auto_fn(trusted_folder_entry):
+            trusted_folder_entry = None
+        elif not trusted_folder_entry.get("manual") and not cache_entry_compatible_fn(item.year, trusted_folder_entry.get("premiered")):
+            trusted_folder_entry = None
+        elif not selection_policy.folder_show_cache_entry_is_trusted(trusted_folder_entry):
+            trusted_folder_entry = None
     cached = None
     cached_key = None
     candidate_keys: list[str] = []
     if reusable_episode_key:
         candidate_keys.append(reusable_episode_key)
+    if trusted_folder_entry and folder_show_key:
+        candidate_keys.append(folder_show_key)
     if reusable_show_key:
         candidate_keys.append(reusable_show_key)
-    if folder_show_key:
+    if folder_show_key and not trusted_folder_entry:
         candidate_keys.append(folder_show_key)
     candidate_keys.append(path_key)
 
     for key in candidate_keys:
-        possible = cache.get_show(key)
+        possible = trusted_folder_entry if key == folder_show_key and trusted_folder_entry is not None else cache.get_show(key)
         if not possible:
             continue
         if not cache_entry_confirmed_or_auto_fn(possible):
@@ -562,6 +580,9 @@ def tv_candidates(
             if search_cache is not None:
                 search_cache[cache_lookup_key] = raw_results
             if not raw_results:
+                reason = tvmaze.unavailable_reason()
+                if reason:
+                    safe_print_fn(_unavailable_search_message("TVMaze", reason), progress)
                 safe_print_fn(f"No candidates (api={elapsed:.2f}s).", progress)
                 return candidate_page_cls(
                     candidates=[],
@@ -754,6 +775,9 @@ def movie_candidates(
                 break
         if not raw_results:
             total_time = time.monotonic() - total_started
+            reason = wikidata.unavailable_reason()
+            if reason:
+                safe_print_fn(_unavailable_search_message("Wikidata", reason), progress)
             safe_print_fn(f"No candidates (api={total_time:.2f}s).", progress)
             return candidate_page_cls(
                 candidates=[],

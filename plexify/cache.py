@@ -14,6 +14,7 @@ CACHE_SCHEMA_VERSION = 3
 MIN_SUPPORTED_SCHEMA_VERSION = 1
 LOCK_TIMEOUT_SECONDS = 1.0
 LOCK_RETRY_DELAY_SECONDS = 0.05
+STALE_LOCK_SECONDS = 300.0
 logger = get_logger(__name__)
 
 
@@ -83,6 +84,8 @@ class Cache:
                     handle.write(str(time.time()))
                 return lock_path
             except FileExistsError:
+                if self._try_reclaim_stale_lock(lock_path):
+                    continue
                 if time.monotonic() >= deadline:
                     logger.warning("cache_lock_timeout", extra={"path": str(lock_path)})
                     return None
@@ -90,6 +93,28 @@ class Cache:
             except OSError as exc:
                 logger.warning("cache_lock_error", extra={"path": str(lock_path), "error": str(exc)})
                 return None
+
+    def _try_reclaim_stale_lock(self, lock_path: Path) -> bool:
+        try:
+            contents = lock_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False
+        stale = False
+        try:
+            created_at = float(contents)
+        except ValueError:
+            stale = True
+        else:
+            stale = (time.time() - created_at) >= STALE_LOCK_SECONDS
+        if not stale:
+            return False
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("cache_stale_lock_cleanup_failed", extra={"path": str(lock_path), "error": str(exc)})
+            return False
+        logger.warning("cache_stale_lock_reclaimed", extra={"path": str(lock_path)})
+        return True
 
     def save(self, force: bool = False) -> None:
         self.save_with_status(force=force)

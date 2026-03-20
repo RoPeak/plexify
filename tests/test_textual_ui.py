@@ -314,10 +314,7 @@ def test_textual_video_flow_to_result(monkeypatch) -> None:
                 review.query_one("#preview", Button).press()
                 await _wait_for_widget(app, pilot, "PreviewScreen", "#apply", Button)
                 app.screen.query_one("#apply", Button).press()
-                for _ in range(20):
-                    await pilot.pause()
-                    if app.screen.__class__.__name__ == "ResultScreen":
-                        break
+                await _wait_for_widget(app, pilot, "ResultScreen", "#result-summary", Static)
                 assert app.screen.__class__.__name__ == "ResultScreen"
 
         asyncio.run(_run())
@@ -352,13 +349,10 @@ def test_textual_apply_mode_uses_confirmation(monkeypatch) -> None:
                 review.query_one("#preview", Button).press()
                 await _wait_for_widget(app, pilot, "PreviewScreen", "#apply", Button)
                 app.screen.query_one("#apply", Button).press()
-                await pilot.pause()
+                await _wait_for_widget(app, pilot, "ConfirmApplyScreen", "#confirm-apply", Button)
                 assert app.screen.__class__.__name__ == "ConfirmApplyScreen"
                 app.screen.query_one("#confirm-apply", Button).press()
-                for _ in range(20):
-                    await pilot.pause()
-                    if app.screen.__class__.__name__ == "ResultScreen":
-                        break
+                await _wait_for_widget(app, pilot, "ResultScreen", "#result-summary", Static)
                 assert app.screen.__class__.__name__ == "ResultScreen"
 
         asyncio.run(_run())

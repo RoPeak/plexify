@@ -15,46 +15,58 @@ from ..logging_config import get_logger
 
 
 BASE_URL = "https://musicbrainz.org/ws/2"
-_available = True
-_warned = False
-_warned_user_agent = False
-_last_request = 0.0
-_unavailable_reason: str | None = None
-_recover_at: float | None = None
+
+
+@dataclass
+class _AvailabilityState:
+    available: bool = True
+    warned: bool = False
+    warned_user_agent: bool = False
+    last_request: float = 0.0
+    unavailable_reason: str | None = None
+    recover_at: float | None = None
+
+
+_state = _AvailabilityState()
 logger = get_logger(__name__)
 
 
 def _warn_unavailable(message: str) -> None:
-    global _warned
-    if _warned:
+    if _state.warned:
         return
-    _warned = True
+    _state.warned = True
     logger.warning(message)
 
 
 def _set_unavailable(message: str, *, cooldown: float = 60.0) -> None:
-    global _available, _recover_at
-    if not _available:
+    if not _state.available:
         return
-    _available = False
-    _recover_at = time.monotonic() + cooldown
-    global _unavailable_reason
-    _unavailable_reason = message
+    _state.available = False
+    _state.recover_at = time.monotonic() + cooldown
+    _state.unavailable_reason = message
     _warn_unavailable(message)
 
 
 def is_available() -> bool:
-    global _available, _recover_at, _warned, _unavailable_reason
-    if not _available and _recover_at is not None and time.monotonic() >= _recover_at:
-        _available = True
-        _recover_at = None
-        _warned = False
-        _unavailable_reason = None
-    return _available
+    if not _state.available and _state.recover_at is not None and time.monotonic() >= _state.recover_at:
+        _state.available = True
+        _state.recover_at = None
+        _state.warned = False
+        _state.unavailable_reason = None
+    return _state.available
 
 
 def unavailable_reason() -> str | None:
-    return _unavailable_reason
+    return _state.unavailable_reason
+
+
+def _reset_state() -> None:
+    _state.available = True
+    _state.warned = False
+    _state.warned_user_agent = False
+    _state.last_request = 0.0
+    _state.unavailable_reason = None
+    _state.recover_at = None
 
 
 @dataclass(frozen=True)
@@ -83,10 +95,9 @@ def _session() -> requests.Session:
     session.mount("https://", HTTPAdapter(max_retries=retries))
     user_agent = os.environ.get("PLEXIFY_USER_AGENT")
     if not user_agent:
-        global _warned_user_agent
-        if not _warned_user_agent:
+        if not _state.warned_user_agent:
             logger.warning("MusicBrainz: set PLEXIFY_USER_AGENT with contact info to avoid throttling.")
-            _warned_user_agent = True
+            _state.warned_user_agent = True
         user_agent = f"plexify/{__version__} (contact: set PLEXIFY_USER_AGENT)"
     session.headers.update(
         {
@@ -101,12 +112,11 @@ def create_session() -> requests.Session:
 
 
 def _rate_limit(delay: float = 1.0) -> None:
-    global _last_request
     now = time.monotonic()
-    elapsed = now - _last_request
+    elapsed = now - _state.last_request
     if elapsed < delay:
         time.sleep(delay - elapsed)
-    _last_request = time.monotonic()
+    _state.last_request = time.monotonic()
 
 
 def _extract_year(value: str | None) -> int | None:

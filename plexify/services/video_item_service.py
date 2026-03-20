@@ -105,6 +105,81 @@ def _apply_candidate_page(page: Any, stats: Any, helpers: Any) -> tuple[list[Any
     return page.candidates, page.raw_results, page.next_offset, page.has_more
 
 
+def _reload_tv_candidate_state(
+    *,
+    item: Any,
+    session_tv: requests.Session,
+    cache: Any,
+    show_cache: bool,
+    incoming_root: Path | None,
+    cache_key: str,
+    search_query: str,
+    progress: Progress | None,
+    offline: bool,
+    interactive: bool,
+    tv_search_cache: dict[str, list[Any]] | None,
+    stats: Any,
+    helpers: Any,
+) -> tuple[Any | None, list[Any], Any, int, bool]:
+    page = _load_tv_candidate_page(
+        item=item,
+        session_tv=session_tv,
+        cache=cache,
+        show_cache=show_cache,
+        incoming_root=incoming_root,
+        cache_key=cache_key,
+        next_offset=0,
+        raw_results_tv=None,
+        search_query=search_query,
+        progress=progress,
+        offline=offline,
+        interactive=interactive,
+        tv_search_cache=tv_search_cache,
+        helpers=helpers,
+    )
+    if page is None:
+        return None, [], None, 0, False
+    candidates, raw_results_tv, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
+    return page, candidates, raw_results_tv, next_offset, has_more
+
+
+def _reload_movie_candidate_state(
+    *,
+    item: Any,
+    session_wd: requests.Session,
+    cache: Any,
+    show_cache: bool,
+    cache_key: str,
+    search_query: str,
+    progress: Progress | None,
+    offline: bool,
+    interactive: bool,
+    movie_entity_cache: dict[str, Any] | None,
+    stats: Any,
+    helpers: Any,
+) -> tuple[Any | None, list[Any], Any, int, bool]:
+    page = _load_movie_candidate_page(
+        item=item,
+        session_wd=session_wd,
+        cache=cache,
+        show_cache=show_cache,
+        cache_key=cache_key,
+        next_offset=0,
+        raw_results_movie=None,
+        search_query=search_query,
+        progress=progress,
+        limit=5,
+        offline=offline,
+        interactive=interactive,
+        movie_entity_cache=movie_entity_cache,
+        helpers=helpers,
+    )
+    if page is None:
+        return None, [], None, 0, False
+    candidates, raw_results_movie, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
+    return page, candidates, raw_results_movie, next_offset, has_more
+
+
 def _finalize_tv_selection(
     *,
     item: Any,
@@ -411,70 +486,46 @@ def process_tv_item(
                 )
                 if empty_choice == "s":
                     item, search_query = helpers._prompt_search(item, progress)
-                    raw_results_tv = None
-                    next_offset = 0
-                    page = helpers._fetch_with_retry(
-                        "TVMaze",
-                        lambda: helpers._tv_candidates(
-                            item,
-                            session_tv,
-                            cache,
-                            show_cache,
-                            incoming_root=incoming_root,
-                            cache_key=cache_key,
-                            offset=next_offset,
-                            raw_results=raw_results_tv,
-                            search_query=search_query,
-                            progress=progress,
-                            offline=offline,
-                            interactive=interactive,
-                            search_cache=tv_search_cache,
-                        ),
-                        interactive,
-                        progress,
+                    page, candidates, raw_results_tv, next_offset, has_more = _reload_tv_candidate_state(
+                        item=item,
+                        session_tv=session_tv,
+                        cache=cache,
+                        show_cache=show_cache,
+                        incoming_root=incoming_root,
+                        cache_key=cache_key,
+                        search_query=search_query,
+                        progress=progress,
+                        offline=offline,
+                        interactive=interactive,
+                        tv_search_cache=tv_search_cache,
+                        stats=stats,
+                        helpers=helpers,
                     )
                     if page is None:
                         return None, False
-                    if page.cache_hit:
-                        helpers._record_cache_hit(stats)
-                    candidates = page.candidates
-                    raw_results_tv = page.raw_results
-                    next_offset = page.next_offset
-                    has_more = page.has_more
                     continue
                 if isinstance(empty_choice, str) and empty_choice.startswith("search:"):
                     query = empty_choice.split("search:", 1)[1].strip()
                     if query:
                         item = helpers._with_title(item, query)
                         search_query = helpers._build_search_query(query, None)
-                        raw_results_tv = None
-                        next_offset = 0
-                        page = helpers._fetch_with_retry(
-                            "TVMaze",
-                            lambda: helpers._tv_candidates(
-                                item,
-                                session_tv,
-                                cache,
-                                show_cache,
-                                incoming_root=incoming_root,
-                                cache_key=cache_key,
-                                offset=next_offset,
-                                raw_results=raw_results_tv,
-                                search_query=search_query,
-                                progress=progress,
-                                offline=offline,
-                                interactive=interactive,
-                                search_cache=tv_search_cache,
-                            ),
-                            interactive,
-                            progress,
+                        page, candidates, raw_results_tv, next_offset, has_more = _reload_tv_candidate_state(
+                            item=item,
+                            session_tv=session_tv,
+                            cache=cache,
+                            show_cache=show_cache,
+                            incoming_root=incoming_root,
+                            cache_key=cache_key,
+                            search_query=search_query,
+                            progress=progress,
+                            offline=offline,
+                            interactive=interactive,
+                            tv_search_cache=tv_search_cache,
+                            stats=stats,
+                            helpers=helpers,
                         )
                         if page is None:
                             return None, False
-                        candidates = page.candidates
-                        raw_results_tv = page.raw_results
-                        next_offset = page.next_offset
-                        has_more = page.has_more
                         continue
                 if empty_choice == "m":
                     selected = helpers._prompt_manual_tv(item, progress)
@@ -552,100 +603,67 @@ def process_tv_item(
                 break
             if choice == "s":
                 item, search_query = helpers._prompt_search(item, progress)
-                raw_results_tv = None
-                next_offset = 0
-                page = helpers._fetch_with_retry(
-                    "TVMaze",
-                    lambda: helpers._tv_candidates(
-                        item,
-                        session_tv,
-                        cache,
-                        show_cache,
-                        incoming_root=incoming_root,
-                        cache_key=cache_key,
-                        offset=next_offset,
-                        raw_results=raw_results_tv,
-                        search_query=search_query,
-                        progress=progress,
-                        offline=offline,
-                        interactive=interactive,
-                        search_cache=tv_search_cache,
-                    ),
-                    interactive,
-                    progress,
+                page, candidates, raw_results_tv, next_offset, has_more = _reload_tv_candidate_state(
+                    item=item,
+                    session_tv=session_tv,
+                    cache=cache,
+                    show_cache=show_cache,
+                    incoming_root=incoming_root,
+                    cache_key=cache_key,
+                    search_query=search_query,
+                    progress=progress,
+                    offline=offline,
+                    interactive=interactive,
+                    tv_search_cache=tv_search_cache,
+                    stats=stats,
+                    helpers=helpers,
                 )
                 if page is None:
                     return None, False
-                candidates = page.candidates
-                raw_results_tv = page.raw_results
-                next_offset = page.next_offset
-                has_more = page.has_more
                 continue
             if isinstance(choice, str) and choice.startswith("search:"):
                 query = choice.split("search:", 1)[1].strip()
                 if query:
                     item = helpers._with_title(item, query)
                     search_query = helpers._build_search_query(query, None)
-                    raw_results_tv = None
-                    next_offset = 0
-                    page = helpers._fetch_with_retry(
-                        "TVMaze",
-                        lambda: helpers._tv_candidates(
-                            item,
-                            session_tv,
-                            cache,
-                            show_cache,
-                            incoming_root=incoming_root,
-                            cache_key=cache_key,
-                            offset=next_offset,
-                            raw_results=raw_results_tv,
-                            search_query=search_query,
-                            progress=progress,
-                            offline=offline,
-                            interactive=interactive,
-                            search_cache=tv_search_cache,
-                        ),
-                        interactive,
-                        progress,
-                    )
-                    if page is None:
-                        return None, False
-                    if page.cache_hit:
-                        helpers._record_cache_hit(stats)
-                    candidates = page.candidates
-                    raw_results_tv = page.raw_results
-                    next_offset = page.next_offset
-                    has_more = page.has_more
-                    continue
-            if choice == "n":
-                page = helpers._fetch_with_retry(
-                    "TVMaze",
-                    lambda: helpers._tv_candidates(
-                        item,
-                        session_tv,
-                        cache,
-                        show_cache,
+                    page, candidates, raw_results_tv, next_offset, has_more = _reload_tv_candidate_state(
+                        item=item,
+                        session_tv=session_tv,
+                        cache=cache,
+                        show_cache=show_cache,
                         incoming_root=incoming_root,
                         cache_key=cache_key,
-                        offset=next_offset,
-                        raw_results=raw_results_tv,
                         search_query=search_query,
                         progress=progress,
                         offline=offline,
                         interactive=interactive,
-                        search_cache=tv_search_cache,
-                    ),
-                    interactive,
-                    progress,
+                        tv_search_cache=tv_search_cache,
+                        stats=stats,
+                        helpers=helpers,
+                    )
+                    if page is None:
+                        return None, False
+                    continue
+            if choice == "n":
+                page = _load_tv_candidate_page(
+                    item=item,
+                    session_tv=session_tv,
+                    cache=cache,
+                    show_cache=show_cache,
+                    incoming_root=incoming_root,
+                    cache_key=cache_key,
+                    next_offset=next_offset,
+                    raw_results_tv=raw_results_tv,
+                    search_query=search_query,
+                    progress=progress,
+                    offline=offline,
+                    interactive=interactive,
+                    tv_search_cache=tv_search_cache,
+                    helpers=helpers,
                 )
                 if page is None:
                     return None, False
-                if page.cache_hit:
-                    helpers._record_cache_hit(stats)
-                candidates = page.candidates
-                raw_results_tv = page.raw_results
-                next_offset = page.next_offset
-                has_more = page.has_more
+                candidates, raw_results_tv, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
                 continue
             if choice == "m":
                 selected = helpers._prompt_manual_tv(item, progress)
@@ -1030,70 +1048,44 @@ def process_movie_item(
             )
             if empty_choice == "s":
                 item, search_query = helpers._prompt_search(item, progress)
-                raw_results_movie = None
-                next_offset = 0
-                page = helpers._fetch_with_retry(
-                    "Wikidata",
-                    lambda: helpers._movie_candidates(
-                        item,
-                        session_wd,
-                        cache,
-                        show_cache,
-                        cache_key=cache_key,
-                        offset=next_offset,
-                        raw_results=raw_results_movie,
-                        search_query=search_query,
-                        progress=progress,
-                        offline=offline,
-                        interactive=interactive,
-                        movie_entity_cache=movie_entity_cache,
-                    ),
-                    interactive,
-                    progress,
+                page, candidates, raw_results_movie, next_offset, has_more = _reload_movie_candidate_state(
+                    item=item,
+                    session_wd=session_wd,
+                    cache=cache,
+                    show_cache=show_cache,
+                    cache_key=cache_key,
+                    search_query=search_query,
+                    progress=progress,
+                    offline=offline,
+                    interactive=interactive,
+                    movie_entity_cache=movie_entity_cache,
+                    stats=stats,
+                    helpers=helpers,
                 )
                 if page is None:
                     return None, False
-                if page.cache_hit:
-                    helpers._record_cache_hit(stats)
-                candidates = page.candidates
-                raw_results_movie = page.raw_results
-                next_offset = page.next_offset
-                has_more = page.has_more
                 continue
             if isinstance(empty_choice, str) and empty_choice.startswith("search:"):
                 query = empty_choice.split("search:", 1)[1].strip()
                 if query:
                     item = helpers._with_title(item, query)
                     search_query = helpers._build_search_query(query, None)
-                    raw_results_movie = None
-                    next_offset = 0
-                    page = helpers._fetch_with_retry(
-                        "Wikidata",
-                        lambda: helpers._movie_candidates(
-                            item,
-                            session_wd,
-                            cache,
-                            show_cache,
-                            cache_key=cache_key,
-                            offset=next_offset,
-                            raw_results=raw_results_movie,
-                            search_query=search_query,
-                            progress=progress,
-                            offline=offline,
-                            interactive=interactive,
-                            movie_entity_cache=movie_entity_cache,
-                        ),
-                        interactive,
-                        progress,
+                    page, candidates, raw_results_movie, next_offset, has_more = _reload_movie_candidate_state(
+                        item=item,
+                        session_wd=session_wd,
+                        cache=cache,
+                        show_cache=show_cache,
+                        cache_key=cache_key,
+                        search_query=search_query,
+                        progress=progress,
+                        offline=offline,
+                        interactive=interactive,
+                        movie_entity_cache=movie_entity_cache,
+                        stats=stats,
+                        helpers=helpers,
                     )
                     if page is None:
                         return None, False
-                    if page.cache_hit:
-                        helpers._record_cache_hit(stats)
-                    candidates = page.candidates
-                    raw_results_movie = page.raw_results
-                    next_offset = page.next_offset
-                    has_more = page.has_more
                     continue
             if empty_choice == "m":
                 if manual_fallback is None:
@@ -1101,35 +1093,24 @@ def process_movie_item(
                 if manual_fallback.year is None and interactive:
                     item = helpers._with_title(item, manual_fallback.title)
                     search_query = helpers._build_search_query(manual_fallback.title, manual_hint)
-                    raw_results_movie = None
-                    next_offset = 0
-                    page = helpers._fetch_with_retry(
-                        "Wikidata",
-                        lambda: helpers._movie_candidates(
-                            item,
-                            session_wd,
-                            cache,
-                            show_cache,
-                            cache_key=cache_key,
-                            offset=next_offset,
-                            raw_results=raw_results_movie,
-                            search_query=search_query,
-                            progress=progress,
-                            offline=offline,
-                            interactive=interactive,
-                            movie_entity_cache=movie_entity_cache,
-                        ),
-                        interactive,
-                        progress,
+                    page, candidates, raw_results_movie, next_offset, has_more = _reload_movie_candidate_state(
+                        item=item,
+                        session_wd=session_wd,
+                        cache=cache,
+                        show_cache=show_cache,
+                        cache_key=cache_key,
+                        search_query=search_query,
+                        progress=progress,
+                        offline=offline,
+                        interactive=interactive,
+                        movie_entity_cache=movie_entity_cache,
+                        stats=stats,
+                        helpers=helpers,
                     )
                     if page is None:
                         selected = manual_fallback
                         outcome = "manual"
                         break
-                    candidates = page.candidates
-                    raw_results_movie = page.raw_results
-                    next_offset = page.next_offset
-                    has_more = page.has_more
                     continue
                 selected = manual_fallback
                 outcome = "manual"
@@ -1201,95 +1182,65 @@ def process_movie_item(
             break
         if choice == "s":
             item, search_query = helpers._prompt_search(item, progress)
-            raw_results_movie = None
-            next_offset = 0
-            page = helpers._fetch_with_retry(
-                "Wikidata",
-                lambda: helpers._movie_candidates(
-                    item,
-                    session_wd,
-                    cache,
-                    show_cache,
-                    cache_key=cache_key,
-                    offset=next_offset,
-                    raw_results=raw_results_movie,
-                    search_query=search_query,
-                    progress=progress,
-                    offline=offline,
-                    interactive=interactive,
-                    movie_entity_cache=movie_entity_cache,
-                ),
-                interactive,
-                progress,
+            page, candidates, raw_results_movie, next_offset, has_more = _reload_movie_candidate_state(
+                item=item,
+                session_wd=session_wd,
+                cache=cache,
+                show_cache=show_cache,
+                cache_key=cache_key,
+                search_query=search_query,
+                progress=progress,
+                offline=offline,
+                interactive=interactive,
+                movie_entity_cache=movie_entity_cache,
+                stats=stats,
+                helpers=helpers,
             )
             if page is None:
                 return None, False
-            if page.cache_hit:
-                helpers._record_cache_hit(stats)
-            candidates = page.candidates
-            raw_results_movie = page.raw_results
-            next_offset = page.next_offset
-            has_more = page.has_more
             continue
         if isinstance(choice, str) and choice.startswith("search:"):
             query = choice.split("search:", 1)[1].strip()
             if query:
                 item = helpers._with_title(item, query)
                 search_query = helpers._build_search_query(query, None)
-                raw_results_movie = None
-                next_offset = 0
-                page = helpers._fetch_with_retry(
-                    "Wikidata",
-                    lambda: helpers._movie_candidates(
-                        item,
-                        session_wd,
-                        cache,
-                        show_cache,
-                        cache_key=cache_key,
-                        offset=next_offset,
-                        raw_results=raw_results_movie,
-                        search_query=search_query,
-                        progress=progress,
-                        offline=offline,
-                        interactive=interactive,
-                        movie_entity_cache=movie_entity_cache,
-                    ),
-                    interactive,
-                    progress,
-                )
-                if page is None:
-                    return None, False
-                candidates = page.candidates
-                raw_results_movie = page.raw_results
-                next_offset = page.next_offset
-                has_more = page.has_more
-                continue
-        if choice == "n":
-            page = helpers._fetch_with_retry(
-                "Wikidata",
-                lambda: helpers._movie_candidates(
-                    item,
-                    session_wd,
-                    cache,
-                    show_cache,
+                page, candidates, raw_results_movie, next_offset, has_more = _reload_movie_candidate_state(
+                    item=item,
+                    session_wd=session_wd,
+                    cache=cache,
+                    show_cache=show_cache,
                     cache_key=cache_key,
-                    offset=next_offset,
-                    raw_results=raw_results_movie,
                     search_query=search_query,
                     progress=progress,
                     offline=offline,
                     interactive=interactive,
                     movie_entity_cache=movie_entity_cache,
-                ),
-                interactive,
-                progress,
+                    stats=stats,
+                    helpers=helpers,
+                )
+                if page is None:
+                    return None, False
+                continue
+        if choice == "n":
+            page = _load_movie_candidate_page(
+                item=item,
+                session_wd=session_wd,
+                cache=cache,
+                show_cache=show_cache,
+                cache_key=cache_key,
+                next_offset=next_offset,
+                raw_results_movie=raw_results_movie,
+                search_query=search_query,
+                progress=progress,
+                limit=5,
+                offline=offline,
+                interactive=interactive,
+                movie_entity_cache=movie_entity_cache,
+                helpers=helpers,
             )
             if page is None:
                 return None, False
-            candidates = page.candidates
-            raw_results_movie = page.raw_results
-            next_offset = page.next_offset
-            has_more = page.has_more
+            candidates, raw_results_movie, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
             continue
         if choice == "m":
             if manual_fallback is None:
@@ -1297,35 +1248,24 @@ def process_movie_item(
             if manual_fallback.year is None and interactive:
                 item = helpers._with_title(item, manual_fallback.title)
                 search_query = helpers._build_search_query(manual_fallback.title, manual_hint)
-                raw_results_movie = None
-                next_offset = 0
-                page = helpers._fetch_with_retry(
-                    "Wikidata",
-                    lambda: helpers._movie_candidates(
-                        item,
-                        session_wd,
-                        cache,
-                        show_cache,
-                        cache_key=cache_key,
-                        offset=next_offset,
-                        raw_results=raw_results_movie,
-                        search_query=search_query,
-                        progress=progress,
-                        offline=offline,
-                        interactive=interactive,
-                        movie_entity_cache=movie_entity_cache,
-                    ),
-                    interactive,
-                    progress,
+                page, candidates, raw_results_movie, next_offset, has_more = _reload_movie_candidate_state(
+                    item=item,
+                    session_wd=session_wd,
+                    cache=cache,
+                    show_cache=show_cache,
+                    cache_key=cache_key,
+                    search_query=search_query,
+                    progress=progress,
+                    offline=offline,
+                    interactive=interactive,
+                    movie_entity_cache=movie_entity_cache,
+                    stats=stats,
+                    helpers=helpers,
                 )
                 if page is None:
                     selected = manual_fallback
                     outcome = "manual"
                     break
-                candidates = page.candidates
-                raw_results_movie = page.raw_results
-                next_offset = page.next_offset
-                has_more = page.has_more
                 continue
             selected = manual_fallback
             outcome = "manual"

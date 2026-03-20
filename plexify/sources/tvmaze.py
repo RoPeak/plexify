@@ -11,43 +11,52 @@ from urllib3.util.retry import Retry
 from ..logging_config import get_logger
 
 
-_available = True
-_warned = False
-_recover_at: float | None = None
-_unavailable_reason: str | None = None
+@dataclass
+class _AvailabilityState:
+    available: bool = True
+    warned: bool = False
+    recover_at: float | None = None
+    unavailable_reason: str | None = None
+
+
+_state = _AvailabilityState()
 logger = get_logger(__name__)
 
 
 def _warn_unavailable(message: str) -> None:
-    global _warned
-    if _warned:
+    if _state.warned:
         return
     logger.warning(message)
-    _warned = True
+    _state.warned = True
 
 
 def _set_unavailable(message: str, *, cooldown: float = 60.0) -> None:
-    global _available, _recover_at, _unavailable_reason
-    if not _available:
+    if not _state.available:
         return
-    _available = False
-    _recover_at = time.monotonic() + cooldown
-    _unavailable_reason = message
+    _state.available = False
+    _state.recover_at = time.monotonic() + cooldown
+    _state.unavailable_reason = message
     _warn_unavailable(message)
 
 
 def is_available() -> bool:
-    global _available, _recover_at, _warned, _unavailable_reason
-    if not _available and _recover_at is not None and time.monotonic() >= _recover_at:
-        _available = True
-        _recover_at = None
-        _warned = False
-        _unavailable_reason = None
-    return _available
+    if not _state.available and _state.recover_at is not None and time.monotonic() >= _state.recover_at:
+        _state.available = True
+        _state.recover_at = None
+        _state.warned = False
+        _state.unavailable_reason = None
+    return _state.available
 
 
 def unavailable_reason() -> str | None:
-    return _unavailable_reason
+    return _state.unavailable_reason
+
+
+def _reset_state() -> None:
+    _state.available = True
+    _state.warned = False
+    _state.recover_at = None
+    _state.unavailable_reason = None
 
 
 @dataclass(frozen=True)

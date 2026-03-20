@@ -12,12 +12,8 @@ def test_sources_unavailable_does_not_crash(monkeypatch, tmp_path: Path) -> None
         raise requests.ConnectionError("offline")
 
     monkeypatch.setattr(requests.Session, "get", _raise)
-    wikidata._available = True
-    wikidata._warned = False
-    wikidata._recover_at = None
-    tvmaze._available = True
-    tvmaze._warned = False
-    tvmaze._recover_at = None
+    wikidata._reset_state()
+    tvmaze._reset_state()
 
     incoming = tmp_path / "incoming"
     library = tmp_path / "library"
@@ -58,10 +54,7 @@ def test_movie_candidates_report_wikidata_unavailable(monkeypatch, tmp_path: Pat
 
     monkeypatch.setattr(requests.Session, "get", _raise)
     monkeypatch.setattr(cli, "_safe_print", lambda message, *_args, **_kwargs: messages.append(str(message)))
-    wikidata._available = True
-    wikidata._warned = False
-    wikidata._recover_at = None
-    wikidata._unavailable_reason = None
+    wikidata._reset_state()
 
     item = cli.InferredItem(
         path=tmp_path / "Gladiator (2000).mkv",
@@ -91,10 +84,7 @@ def test_tv_candidates_report_tvmaze_unavailable(monkeypatch, tmp_path: Path) ->
 
     monkeypatch.setattr(requests.Session, "get", _raise)
     monkeypatch.setattr(cli, "_safe_print", lambda message, *_args, **_kwargs: messages.append(str(message)))
-    tvmaze._available = True
-    tvmaze._warned = False
-    tvmaze._recover_at = None
-    tvmaze._unavailable_reason = None
+    tvmaze._reset_state()
 
     incoming = tmp_path / "incoming"
     incoming.mkdir()
@@ -114,3 +104,24 @@ def test_tv_candidates_report_tvmaze_unavailable(monkeypatch, tmp_path: Path) ->
 
     assert page.candidates == []
     assert any("TVMaze unavailable" in message for message in messages)
+
+
+def test_wikidata_availability_recovers_after_cooldown(monkeypatch) -> None:
+    wikidata._reset_state()
+    wikidata._set_unavailable("offline", cooldown=1.0)
+    monkeypatch.setattr(wikidata.time, "monotonic", lambda: 100.0)
+    wikidata._state.recover_at = 10.0
+
+    assert wikidata.is_available() is True
+    assert wikidata.unavailable_reason() is None
+
+
+def test_tvmaze_warning_is_deduplicated(monkeypatch) -> None:
+    messages: list[str] = []
+    tvmaze._reset_state()
+    monkeypatch.setattr(tvmaze.logger, "warning", lambda message, *args, **kwargs: messages.append(str(message)))
+
+    tvmaze._set_unavailable("offline")
+    tvmaze._set_unavailable("offline again")
+
+    assert messages == ["offline"]

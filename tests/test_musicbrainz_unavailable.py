@@ -14,9 +14,10 @@ def test_musicbrainz_unavailable_message(monkeypatch, tmp_path: Path) -> None:
     (album / "01 - Artist - Track.flac").write_text("x", encoding="utf-8")
 
     library = tmp_path / "library"
-    monkeypatch.setattr(musicbrainz, "_available", False)
-    monkeypatch.setattr(musicbrainz, "_unavailable_reason", "offline")
-    monkeypatch.setattr(musicbrainz, "_recover_at", None)
+    musicbrainz._reset_state()
+    musicbrainz._state.available = False
+    musicbrainz._state.unavailable_reason = "offline"
+    musicbrainz._state.recover_at = None
 
     runner = CliRunner()
     result = runner.invoke(
@@ -51,9 +52,10 @@ def test_music_replays_filename_fallback_when_musicbrainz_unavailable(monkeypatc
     )
     cache.save()
 
-    monkeypatch.setattr(musicbrainz, "_available", False)
-    monkeypatch.setattr(musicbrainz, "_unavailable_reason", "offline")
-    monkeypatch.setattr(musicbrainz, "_recover_at", None)
+    musicbrainz._reset_state()
+    musicbrainz._state.available = False
+    musicbrainz._state.unavailable_reason = "offline"
+    musicbrainz._state.recover_at = None
 
     runner = CliRunner()
     result = runner.invoke(

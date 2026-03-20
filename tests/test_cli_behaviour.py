@@ -2489,6 +2489,68 @@ def test_no_movie_candidates_can_switch_to_tv_search(monkeypatch) -> None:
     assert "TV Shows" in str(plan.destination)
 
 
+def test_movie_inline_search_reloads_candidates_with_updated_query(monkeypatch) -> None:
+    queries: list[str] = []
+    selections = {"count": 0}
+
+    def _fake_movie_candidates(item: InferredItem, *_args, **kwargs) -> cli.CandidatePage:
+        query = kwargs.get("search_query")
+        queries.append(query)
+        if query == "unknown":
+            return cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
+        candidate = cli.Candidate(
+            title="Example Film",
+            year=2001,
+            source="Wikidata",
+            confidence=1.0,
+            metadata={"qid": "Q1", "title": "Example Film", "year": 2001},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=None, next_offset=0, has_more=False)
+
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+
+    def _fake_select_candidate(_media_type, candidates, *_args, **_kwargs):
+        selections["count"] += 1
+        if selections["count"] == 1:
+            return "search:Example Film"
+        return candidates[0]
+
+    monkeypatch.setattr(cli, "_select_candidate", _fake_select_candidate)
+
+    item = InferredItem(
+        path=Path("incoming") / "Unknown.mkv",
+        media_type="movie",
+        title="Unknown",
+        year=None,
+        episode_title=None,
+    )
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=Path("library"),
+        cache=cli.NullCache(),
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=False,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=Path("incoming"),
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert queries == ["unknown", "example film"]
+
+
 def test_no_tv_candidates_can_switch_to_movie_search(monkeypatch) -> None:
     def _fake_tv_candidates(*_args, **_kwargs) -> cli.CandidatePage:
         return cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False)
@@ -2538,6 +2600,78 @@ def test_no_tv_candidates_can_switch_to_movie_search(monkeypatch) -> None:
     assert plan is not None
     assert plan.media_type == "movie"
     assert "Movies" in str(plan.destination)
+
+
+def test_tv_next_page_choice_loads_follow_up_candidates(monkeypatch) -> None:
+    calls = {"count": 0}
+    selections = {"count": 0}
+
+    def _fake_tv_candidates(item: InferredItem, *_args, **kwargs) -> cli.CandidatePage:
+        calls["count"] += 1
+        offset = kwargs.get("offset", 0)
+        if offset == 0:
+            candidate = cli.Candidate(
+                title="Show",
+                year=2010,
+                source="TVMaze",
+                confidence=0.75,
+                metadata={"id": 1, "name": "Show", "year": 2010, "season": item.season, "episode": item.episode},
+                enrichment=None,
+            )
+            return cli.CandidatePage(candidates=[candidate], raw_results=[{"page": 1}], next_offset=1, has_more=True)
+        candidate = cli.Candidate(
+            title="Show",
+            year=2010,
+            source="TVMaze",
+            confidence=1.0,
+            metadata={"id": 2, "name": "Show", "year": 2010, "season": item.season, "episode": item.episode},
+            enrichment=None,
+        )
+        return cli.CandidatePage(candidates=[candidate], raw_results=[{"page": 2}], next_offset=0, has_more=False)
+
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_maybe_fetch_episode_title", lambda *_args, **_kwargs: None)
+
+    def _fake_select_candidate(_media_type, candidates, *_args, **_kwargs):
+        selections["count"] += 1
+        if selections["count"] == 1:
+            return "n"
+        return candidates[0]
+
+    monkeypatch.setattr(cli, "_select_candidate", _fake_select_candidate)
+
+    item = InferredItem(
+        path=Path("incoming") / "Show.S01E01.mkv",
+        media_type="tv",
+        title="Show",
+        year=2010,
+        season=1,
+        episode=1,
+        episode_title=None,
+    )
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=Path("library"),
+        cache=cli.NullCache(),
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=False,
+        min_confidence=0.95,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=Path("incoming"),
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert calls["count"] == 2
 
 
 def test_movie_to_tv_switch_persists_for_same_folder(monkeypatch, tmp_path: Path) -> None:

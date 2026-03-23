@@ -2,9 +2,7 @@
 
 [![CI](https://github.com/RoPeak/plexify/actions/workflows/ci.yml/badge.svg)](https://github.com/RoPeak/plexify/actions/workflows/ci.yml)
 
-Plexify is a small CLI that organises movie and TV files into a Plex-friendly
-folder structure. It is safe by default and asks for confirmation when metadata
-is uncertain.
+Plexify is a CLI that organises movie and TV files into a Plex-friendly folder structure. It infers titles and years from filenames, queries Wikidata, TVMaze, and MusicBrainz, and applies a confidence-based matching system with a 4-level TV episode cache to minimise redundant API calls. It is safe by default — all file operations are dry-run unless explicitly confirmed, and move operations require a typed `MOVE` confirmation.
 
 ## Requirements
 
@@ -214,6 +212,16 @@ Output:
 ```
 D:\Media\Music\Alanis Morissette\Jagged Little Pill\01 - All I Really Want.flac
 ```
+
+## Testing
+
+40+ test files covering inference logic, cache precedence, conflict handling, offline mode, interactive prompting, undo behaviour, and external API failure paths.
+
+```powershell
+python -m pytest -q
+```
+
+CI runs the full test suite on Windows and Linux across Python 3.10, 3.11, and 3.12.
 
 ## Troubleshooting
 

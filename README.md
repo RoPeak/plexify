@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/RoPeak/plexify/actions/workflows/ci.yml/badge.svg)](https://github.com/RoPeak/plexify/actions/workflows/ci.yml)
 
+![Preview](assets/images/preview.jpg)
+
 Plexify is a CLI that organises movie and TV files into a Plex-friendly folder structure. It infers titles and years from filenames, queries Wikidata, TVMaze, and MusicBrainz, and applies a confidence-based matching system with a 4-level TV episode cache to minimise redundant API calls. It is safe by default — all file operations are dry-run unless explicitly confirmed, and move operations require a typed `MOVE` confirmation.
 
 ## Requirements

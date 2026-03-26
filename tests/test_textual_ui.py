@@ -390,7 +390,7 @@ def test_textual_unresolved_preview_disables_apply(monkeypatch) -> None:
                     year=2008,
                     source="TVMaze",
                     confidence=1.0,
-                    metadata={"id": 1, "name": "Series", "year": 2008},
+                    metadata={"id": 1, "name": "Series", "year": 2008, "manual": False},
                 )
             ],
             raw_results=[],

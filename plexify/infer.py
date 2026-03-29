@@ -22,7 +22,7 @@ SEASON_EP_RE = re.compile(
     re.IGNORECASE,
 )
 EPISODE_RE = re.compile(r"(?<![A-Za-z0-9])(?:episode|ep)[-_. ]*(\d{1,3})(?![A-Za-z0-9])", re.IGNORECASE)
-TV_HINT_RE = re.compile(r"\b(?:series|season|seaon|seson|seasn|episode|ep)\b", re.IGNORECASE)
+TV_HINT_RE = re.compile(r"\b(?:season|seaon|seson|seasn|episode|ep)\b", re.IGNORECASE)
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 YEAR_RANGE_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*[-–]\s*(19\d{2}|20\d{2})(?!\d)")
 LEADING_EPISODE_RE = re.compile(r"^\s*(\d{1,3})\s*[-_. ]+\s*(.+?)\s*$")
@@ -52,6 +52,7 @@ GENERIC_TV_FOLDERS = {
     "unsorted",
     "incoming",
 }
+MOVIE_CONTEXT_FOLDERS = {"movie", "movies", "film", "films"}
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,10 @@ def _parent_show_name(path: Path) -> Optional[str]:
             return show_parent.name
         return None
     return None
+
+
+def _has_movie_context(path: Path) -> bool:
+    return any(part.strip().lower() in MOVIE_CONTEXT_FOLDERS for part in path.parts)
 
 
 def _extract_season_from_parts(path: Path) -> Optional[int]:
@@ -391,7 +396,8 @@ def infer_item(path: Path) -> InferredItem:
     episode_end = None
     explicit_episode = False
     has_tv_context = _has_tv_context(path)
-    has_tv_hint = TV_HINT_RE.search(path.stem) is not None
+    has_movie_context = _has_movie_context(path)
+    has_tv_hint = TV_HINT_RE.search(path.stem) is not None and not has_movie_context
     title_override = None
     year_override = None
     guess_title = guess.get("title")
@@ -512,7 +518,7 @@ def infer_item(path: Path) -> InferredItem:
             media_type = "tv"
 
     title = guess_title or path.stem
-    if media_type == "movie" and has_tv_hint:
+    if media_type == "movie" and has_tv_hint and not has_movie_context:
         media_type = "tv"
 
     if media_type == "movie":

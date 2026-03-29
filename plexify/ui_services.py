@@ -60,6 +60,7 @@ class UICandidatePage:
     total_time: float | None = None
     cache_reusable: bool = False
     search_query_used: str | None = None
+    fallback_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,10 @@ def _normalize_tv_retry_query(value: str) -> str:
     return tv_matcher.normalize_tv_retry_query(value, TV_EXPLICIT_SEASON_RE)
 
 
+def _build_tv_fallback_queries(title: str, hint: str | None, year: int | None = None) -> list[str]:
+    return plan_flow.build_tv_fallback_queries(title, hint, year)
+
+
 def _tv_confidence_score(title_guess: str, title_actual: str, year_guess: int | None, year_actual: int | None) -> float:
     return tv_matcher.tv_confidence_score(title_guess, title_actual, year_guess, year_actual)
 
@@ -336,6 +341,7 @@ def load_tv_candidates(
         make_search_query_fn=make_search_query,
         tv_search_cache_key_fn=_tv_search_cache_key,
         normalize_tv_retry_query_fn=_normalize_tv_retry_query,
+        build_tv_fallback_queries_fn=_build_tv_fallback_queries,
         year_distance_fn=year_distance,
     )
 

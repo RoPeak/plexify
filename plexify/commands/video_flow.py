@@ -397,6 +397,7 @@ def tv_candidates(
     make_search_query_fn: Any = None,
     tv_search_cache_key_fn: Any = None,
     normalize_tv_retry_query_fn: Any = None,
+    build_tv_fallback_queries_fn: Any = None,
     year_distance_fn: Any = None,
 ) -> Any:
     path_key = cache_key or item.title
@@ -442,6 +443,8 @@ def tv_candidates(
     results: list[Any] = []
     elapsed = 0.0
     total_time = None
+    query_used = search_query
+    fallback_attempts = 0
     if cached:
         log_event_fn(
             logger,
@@ -518,6 +521,8 @@ def tv_candidates(
             has_more=False,
             cache_hit=True,
             cache_reusable=cached_key in {reusable_show_key, reusable_episode_key},
+            search_query_used=search_query,
+            fallback_attempts=fallback_attempts,
         )
 
     if offline:
@@ -534,64 +539,148 @@ def tv_candidates(
             confidence=None,
             cache_scope="tv",
         )
-        return candidate_page_cls(candidates=[], raw_results=[], next_offset=0, has_more=False)
+        return candidate_page_cls(
+            candidates=[],
+            raw_results=[],
+            next_offset=0,
+            has_more=False,
+            search_query_used=search_query,
+            fallback_attempts=fallback_attempts,
+        )
 
     if raw_results is None:
-        query = search_query or make_search_query_fn(item.title) or item.title
-        cache_lookup_key = tv_search_cache_key_fn(query, item.year)
-        if search_cache is not None and cache_lookup_key in search_cache:
-            raw_results = search_cache[cache_lookup_key]
-            elapsed = 0.0
-            total_time = 0.0
-        else:
+        queries = build_tv_fallback_queries_fn(item.title, None, item.year)
+        if search_query and search_query.strip():
+            manual_query = search_query.strip()
+            queries = [manual_query, *queries]
+        if not queries:
+            base_query = make_search_query_fn(item.title) or item.title
+            if base_query:
+                queries = [base_query]
+        deduped_queries: list[str] = []
+        seen_queries: set[str] = set()
+        for query in queries:
+            marker = query.casefold()
+            if marker in seen_queries:
+                continue
+            seen_queries.add(marker)
+            deduped_queries.append(query)
+        queries = deduped_queries
+        if not queries:
+            return candidate_page_cls(
+                candidates=[],
+                raw_results=[],
+                next_offset=0,
+                has_more=False,
+                search_query_used=search_query,
+                fallback_attempts=fallback_attempts,
+            )
+        query_used = queries[0]
+        total_started = time.monotonic()
+        raw_results = []
+        attempts = 0
+        for current_query in queries:
+            attempts += 1
+            cache_lookup_key = tv_search_cache_key_fn(current_query, item.year)
+            cached_search = None
+            if search_cache is not None and cache_lookup_key in search_cache:
+                cached_search = search_cache[cache_lookup_key]
+            if cached_search is None:
+                persisted_search = cache.get_search(f"tvmaze-search:{cache_lookup_key}")
+                if isinstance(persisted_search, dict):
+                    persisted_results = persisted_search.get("results")
+                    if isinstance(persisted_results, list):
+                        cached_rows: list[Any] = []
+                        valid_rows = True
+                        for row in persisted_results:
+                            if not isinstance(row, dict):
+                                valid_rows = False
+                                break
+                            row_id = row.get("id")
+                            row_name = row.get("name")
+                            row_premiered = row.get("premiered")
+                            if not isinstance(row_id, int) or not isinstance(row_name, str):
+                                valid_rows = False
+                                break
+                            cached_rows.append(tvmaze.TVMazeShow(id=row_id, name=row_name, premiered=row_premiered))
+                        if valid_rows:
+                            cached_search = cached_rows
+                            if search_cache is not None:
+                                search_cache[cache_lookup_key] = cached_rows
+            if cached_search is not None:
+                if attempts > 1:
+                    safe_print_fn(
+                        f"Retrying TVMaze with simplified query: {rich_escape_fn(current_query)}",
+                        progress,
+                    )
+                raw_results = cached_search
+                query_used = current_query
+                fallback_attempts = max(0, attempts - 1)
+                total_time = time.monotonic() - total_started
+                if cached_search:
+                    break
+                continue
             log_event_fn(
                 logger,
                 "candidate_search_started",
                 source="TVMaze",
-                query=query,
+                query=current_query,
                 media_type=item.media_type,
                 path=item.path,
             )
-            safe_print_fn(f"Searching TVMaze for: {rich_escape_fn(query)}", progress)
-            total_started = time.monotonic()
-            started = total_started
-            raw_results = tvmaze.search_shows(query, session=session, raise_on_error=interactive)
-            elapsed = time.monotonic() - started
+            if attempts == 1:
+                safe_print_fn(f"Searching TVMaze for: {rich_escape_fn(current_query)}", progress)
+            else:
+                safe_print_fn(f"Retrying TVMaze with simplified query: {rich_escape_fn(current_query)}", progress)
+            started = time.monotonic()
+            attempt_results = tvmaze.search_shows(current_query, session=session, raise_on_error=interactive)
+            elapsed += time.monotonic() - started
             total_time = time.monotonic() - total_started
-            if not raw_results:
-                retry_query = normalize_tv_retry_query_fn(search_query or item.title)
-                if retry_query and retry_query != query:
-                    safe_print_fn(f"Retrying TVMaze with normalized query: {rich_escape_fn(retry_query)}", progress)
-                    started_retry = time.monotonic()
-                    raw_results = tvmaze.search_shows(retry_query, session=session, raise_on_error=interactive)
-                    elapsed += time.monotonic() - started_retry
-                    total_time = time.monotonic() - total_started
-                    cache_lookup_key = tv_search_cache_key_fn(retry_query, item.year)
-            log_event_fn(
-                logger,
-                "candidate_search_finished",
-                source="TVMaze",
-                query=query,
-                media_type=item.media_type,
-                path=item.path,
-                result_count=len(raw_results),
-                duration_ms=int(total_time * 1000),
-            )
+            query_used = current_query
+            fallback_attempts = max(0, attempts - 1)
             if search_cache is not None:
-                search_cache[cache_lookup_key] = raw_results
-            if not raw_results:
-                reason = tvmaze.unavailable_reason()
-                if reason:
-                    safe_print_fn(_unavailable_search_message("TVMaze", reason), progress)
-                safe_print_fn(f"No candidates (api={elapsed:.2f}s).", progress)
-                return candidate_page_cls(
-                    candidates=[],
-                    raw_results=raw_results,
-                    next_offset=0,
-                    has_more=False,
-                    search_time=elapsed,
-                    total_time=total_time,
-                )
+                search_cache[cache_lookup_key] = attempt_results
+            cache.set_search(
+                f"tvmaze-search:{cache_lookup_key}",
+                {
+                    "provider": "TVMaze",
+                    "query": current_query,
+                    "results": [
+                        {"id": show.id, "name": show.name, "premiered": show.premiered}
+                        for show in attempt_results
+                    ],
+                },
+            )
+            cache.save_with_status()
+            if attempt_results:
+                raw_results = attempt_results
+                break
+        log_event_fn(
+            logger,
+            "candidate_search_finished",
+            source="TVMaze",
+            query=query_used,
+            media_type=item.media_type,
+            path=item.path,
+            result_count=len(raw_results),
+            duration_ms=int((total_time or 0.0) * 1000),
+            fallback_attempts=fallback_attempts,
+        )
+        if not raw_results:
+            reason = tvmaze.unavailable_reason()
+            if reason:
+                safe_print_fn(_unavailable_search_message("TVMaze", reason), progress)
+            safe_print_fn(f"No candidates (api={elapsed:.2f}s).", progress)
+            return candidate_page_cls(
+                candidates=[],
+                raw_results=raw_results,
+                next_offset=0,
+                has_more=False,
+                search_time=elapsed,
+                total_time=total_time,
+                search_query_used=query_used,
+                fallback_attempts=fallback_attempts,
+            )
     page = raw_results[offset : offset + limit]
     for show in page:
         results.append(tv_candidate_from_show_fn(item, show))
@@ -605,7 +694,16 @@ def tv_candidates(
             f"Found {len(results)} candidates (best confidence {best:.2f}, api={elapsed:.2f}s, total={total_text}).",
             progress,
         )
-    return candidate_page_cls(candidates=results, raw_results=raw_results, next_offset=next_offset, has_more=has_more)
+    return candidate_page_cls(
+        candidates=results,
+        raw_results=raw_results,
+        next_offset=next_offset,
+        has_more=has_more,
+        search_time=elapsed,
+        total_time=total_time,
+        search_query_used=query_used,
+        fallback_attempts=fallback_attempts,
+    )
 
 
 def movie_candidates(

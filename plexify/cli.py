@@ -188,6 +188,7 @@ class CandidatePage:
     total_time: float | None = None
     cache_reusable: bool = False
     search_query_used: str | None = None
+    fallback_attempts: int = 0
 
 
 @dataclass
@@ -425,6 +426,10 @@ def _build_search_query(title: str, hint: str | None) -> str:
 
 def _normalize_tv_retry_query(value: str) -> str:
     return tv_matcher.normalize_tv_retry_query(value, TV_EXPLICIT_SEASON_RE)
+
+
+def _build_tv_fallback_queries(title: str, hint: str | None, year: int | None = None) -> list[str]:
+    return plan_flow.build_tv_fallback_queries(title, hint, year)
 
 
 def _extract_explicit_season_from_path(path: Path) -> int | None:
@@ -843,6 +848,7 @@ def _tv_candidates(
         make_search_query_fn=make_search_query,
         tv_search_cache_key_fn=_tv_search_cache_key,
         normalize_tv_retry_query_fn=_normalize_tv_retry_query,
+        build_tv_fallback_queries_fn=_build_tv_fallback_queries,
         year_distance_fn=_year_distance,
     )
 
@@ -1239,7 +1245,7 @@ def _announce_candidate_prompt_policy(
         )
     if policy.risky_search_query:
         _safe_print(
-            "Refined search broadened the title. Review results explicitly with 1-9, or choose s/m/k/q.",
+            "Effective search query broadened the title. Review results explicitly with 1-9, or choose s/m/k/q.",
             progress,
         )
     if policy.require_explicit_choice:

@@ -13,6 +13,8 @@ FAST_TESTS = [
     "tests/test_cli_help.py",
     "tests/test_matcher_services.py",
     "tests/test_cache_policy.py",
+    "tests/test_wizard_logging.py",
+    "tests/test_infer.py",
 ]
 
 

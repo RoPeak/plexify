@@ -72,7 +72,10 @@ def execute_plans(
                     destination = unique_path(destination)
             ensure_dir(destination.parent)
             if destination.exists() and on_conflict == "overwrite":
-                _replace_destination_atomically(plan.source, destination, remove_source_after=not copy_mode)
+                if copy_mode:
+                    shutil.copy2(plan.source, destination)
+                else:
+                    _replace_destination_atomically(plan.source, destination, remove_source_after=True)
             elif copy_mode:
                 shutil.copy2(plan.source, destination)
             else:

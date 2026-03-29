@@ -115,6 +115,14 @@ def test_infer_movie_hyphen_noise_ignored() -> None:
     assert item.title == "Movie"
 
 
+def test_infer_divergent_series_movie_stays_movie_under_movies_folder() -> None:
+    path = Path("C:/Video/Unorganised/Movies/The Divergent Series - Allegiant (2016)/The Divergent Series - Allegiant (2016).mp4")
+    item = infer_item(path)
+    assert item.media_type == "movie"
+    assert item.season is None
+    assert item.episode is None
+
+
 def test_infer_movie_generic_stem_uses_parent_folder_title() -> None:
     path = Path("About Time (2013)/C1_t00.mkv")
     item = infer_item(path)

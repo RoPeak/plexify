@@ -274,7 +274,7 @@ def test_process_item_conflict_skip_tracks_reason(monkeypatch) -> None:
     assert stats.conflict_skip == 1
 
 
-def test_movie_candidates_limit_one_fetches_only_top_match(monkeypatch) -> None:
+def test_movie_candidates_limit_one_fetches_only_top_match(monkeypatch, tmp_path: Path) -> None:
     item = InferredItem(path=Path("Movie.mkv"), media_type="movie", title="Movie", year=2001, episode_title=None)
     raw_results = [
         cli.wikidata.WikidataCandidate(qid="Q1", label="Movie", description="2001 film"),
@@ -292,7 +292,7 @@ def test_movie_candidates_limit_one_fetches_only_top_match(monkeypatch) -> None:
     page = cli._movie_candidates(
         item,
         session=requests.Session(),
-        cache=Cache(Path("cache.json")),
+        cache=Cache(tmp_path / "cache.json"),
         show_cache=False,
         raw_results=raw_results,
         limit=1,
@@ -304,7 +304,7 @@ def test_movie_candidates_limit_one_fetches_only_top_match(monkeypatch) -> None:
     assert fetched == ["Q1"]
 
 
-def test_movie_candidates_interactive_fetches_only_current_page(monkeypatch) -> None:
+def test_movie_candidates_interactive_fetches_only_current_page(monkeypatch, tmp_path: Path) -> None:
     item = InferredItem(path=Path("Movie.mkv"), media_type="movie", title="Movie", year=2001, episode_title=None)
     raw_results = [
         cli.wikidata.WikidataCandidate(qid="Q1", label="Movie", description="2001 film"),
@@ -322,7 +322,7 @@ def test_movie_candidates_interactive_fetches_only_current_page(monkeypatch) -> 
     page = cli._movie_candidates(
         item,
         session=requests.Session(),
-        cache=Cache(Path("cache.json")),
+        cache=Cache(tmp_path / "cache.json"),
         show_cache=False,
         raw_results=raw_results,
         limit=2,
@@ -334,7 +334,7 @@ def test_movie_candidates_interactive_fetches_only_current_page(monkeypatch) -> 
     assert fetched == ["Q1", "Q2"]
 
 
-def test_movie_candidates_reuses_negative_entity_cache(monkeypatch) -> None:
+def test_movie_candidates_reuses_negative_entity_cache(monkeypatch, tmp_path: Path) -> None:
     item = InferredItem(path=Path("Movie.mkv"), media_type="movie", title="Movie", year=2001, episode_title=None)
     raw_results = [
         cli.wikidata.WikidataCandidate(qid="Q1", label="Movie", description="2001 film"),
@@ -354,7 +354,7 @@ def test_movie_candidates_reuses_negative_entity_cache(monkeypatch) -> None:
     first = cli._movie_candidates(
         item,
         session=requests.Session(),
-        cache=Cache(Path("cache.json")),
+        cache=Cache(tmp_path / "cache.json"),
         show_cache=False,
         raw_results=raw_results,
         limit=1,
@@ -364,7 +364,7 @@ def test_movie_candidates_reuses_negative_entity_cache(monkeypatch) -> None:
     second = cli._movie_candidates(
         item,
         session=requests.Session(),
-        cache=Cache(Path("cache.json")),
+        cache=Cache(tmp_path / "cache.json"),
         show_cache=False,
         raw_results=raw_results,
         limit=1,
@@ -660,6 +660,13 @@ def test_build_movie_fallback_queries_adds_short_franchise_variant_for_two_token
     assert "divergent" in queries[1:]
 
 
+def test_build_tv_fallback_queries_strip_year_and_add_shorter_retry() -> None:
+    queries = cli.plan_flow.build_tv_fallback_queries("Louis Theroux's Forbidden America (2022)", None, 2022)
+    assert queries[0] == "louis therouxs forbidden america"
+    assert "louis therouxs forbidden" in queries
+    assert "louis therouxs forbidden america 2022" in queries
+
+
 def test_movie_candidates_retry_escape_room_tournament_without_manual_search(monkeypatch, tmp_path: Path) -> None:
     queries: list[str] = []
 
@@ -694,6 +701,87 @@ def test_movie_candidates_retry_escape_room_tournament_without_manual_search(mon
     assert "escape room" in queries[1:]
     assert page.candidates
     assert page.candidates[0].title == "Escape Room"
+
+
+def test_tv_candidates_retry_with_fallback_query_without_manual_search(monkeypatch, tmp_path: Path) -> None:
+    queries: list[str] = []
+
+    def _fake_search(query: str, *_args, **_kwargs):
+        queries.append(query)
+        if query.casefold() == "louis therouxs":
+            return [cli.tvmaze.TVMazeShow(id=1, name="Louis Theroux Interviews", premiered=2022)]
+        return []
+
+    monkeypatch.setattr(cli.tvmaze, "search_shows", _fake_search)
+
+    item = InferredItem(
+        path=tmp_path / "Louis Theroux's Forbidden America (2022) - s01e01.mp4",
+        media_type="tv",
+        title="Louis Theroux's Forbidden America (2022)",
+        year=2022,
+        season=1,
+        episode=1,
+        episode_title="Extreme Online",
+    )
+    page = cli._tv_candidates(
+        item=item,
+        session=requests.Session(),
+        cache=Cache(tmp_path / "cache.json"),
+        show_cache=False,
+        search_query="louis therouxs forbidden america 2022",
+    )
+
+    assert queries[0] == "louis therouxs forbidden america 2022"
+    assert "louis therouxs forbidden america" in queries[1:]
+    assert "louis therouxs" in queries[1:]
+    assert page.search_query_used == "louis therouxs"
+    assert page.fallback_attempts >= 1
+    assert page.candidates
+
+
+def test_tv_candidates_reuse_persisted_search_cache_across_calls(monkeypatch, tmp_path: Path) -> None:
+    search_calls = {"count": 0}
+
+    def _fake_search(query: str, *_args, **_kwargs):
+        search_calls["count"] += 1
+        return [cli.tvmaze.TVMazeShow(id=99, name="Two Doors Down", premiered=2013)]
+
+    monkeypatch.setattr(cli.tvmaze, "search_shows", _fake_search)
+
+    cache_path = tmp_path / "cache.json"
+    first_cache = Cache(cache_path)
+    item = InferredItem(
+        path=tmp_path / "Two Doors Down (2013) - s02e02.mp4",
+        media_type="tv",
+        title="Two Doors Down (2013)",
+        year=2013,
+        season=2,
+        episode=2,
+        episode_title="Episode 2",
+    )
+
+    first_page = cli._tv_candidates(
+        item=item,
+        session=requests.Session(),
+        cache=first_cache,
+        show_cache=False,
+        search_query="two doors down 2013",
+        search_cache=None,
+    )
+    second_page = cli._tv_candidates(
+        item=item,
+        session=requests.Session(),
+        cache=Cache(cache_path),
+        show_cache=False,
+        search_query="two doors down 2013",
+        search_cache=None,
+    )
+
+    assert search_calls["count"] == 1
+    assert first_page.candidates and second_page.candidates
+    persisted = Cache(cache_path).get_search("tvmaze-search:two doors down 2013|2013")
+    assert isinstance(persisted, dict)
+    assert persisted.get("results")
 
 
 def test_movie_candidates_reuse_entity_cache_across_calls(monkeypatch, tmp_path: Path) -> None:
@@ -846,6 +934,206 @@ def test_manual_movie_search_retry_requires_explicit_review(monkeypatch, tmp_pat
 
     assert plan is not None
     assert len(choices) == 2
+
+
+def test_manual_tv_search_retry_requires_explicit_review(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Show" / "Show - s01e01 - Episode.mp4"
+    path.parent.mkdir(parents=True)
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(
+        path=path,
+        media_type="tv",
+        title="Louis Theroux's Forbidden America",
+        year=2022,
+        season=1,
+        episode=1,
+        episode_title="Extreme Online",
+    )
+    cache = Cache(library / ".plexify" / "cache.json")
+    candidate = cli.Candidate(
+        title="Louis Theroux Interviews",
+        year=2022,
+        source="TVMaze",
+        confidence=1.0,
+        metadata={"id": 1, "name": "Louis Theroux Interviews", "year": 2022},
+    )
+
+    def _fake_tv_candidates(current_item: InferredItem, *_args, **kwargs) -> cli.CandidatePage:
+        query = kwargs.get("search_query")
+        if query == "louis therouxs forbidden america":
+            return cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False, search_query_used=query)
+        return cli.CandidatePage(
+            candidates=[candidate],
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            search_query_used="louis theroux",
+            fallback_attempts=1,
+        )
+
+    choices: list[object] = []
+
+    def _fake_select_candidate(*_args, **_kwargs):
+        choices.append("called")
+        if len(choices) == 1:
+            return "s"
+        return candidate
+
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(
+        cli,
+        "_prompt_search",
+        lambda current_item, _progress: (cli._with_title(current_item, "Louis Theroux"), "louis theroux"),
+    )
+    monkeypatch.setattr(cli, "_select_candidate", _fake_select_candidate)
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_maybe_fetch_episode_title", lambda *_args, **_kwargs: None)
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.90,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert len(choices) == 2
+
+
+def test_risky_broadened_tv_query_does_not_promote_folder_cache(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    show_dir = incoming / "Louis Theroux's Forbidden America (2022)" / "Season 01"
+    show_dir.mkdir(parents=True)
+    first_path = show_dir / "Louis Theroux's Forbidden America (2022) - s01e01 - Extreme and Online.mp4"
+    second_path = show_dir / "Louis Theroux's Forbidden America (2022) - s01e02 - Rap's New Frontline.mp4"
+    first_path.write_text("x", encoding="utf-8")
+    second_path.write_text("x", encoding="utf-8")
+
+    candidate = cli.Candidate(
+        title="Louis Theroux Interviews",
+        year=2022,
+        source="TVMaze",
+        confidence=1.0,
+        metadata={"id": 1, "name": "Louis Theroux Interviews", "year": 2022},
+    )
+    calls: list[str] = []
+
+    def _fake_tv_candidates(current_item: InferredItem, *_args, **kwargs) -> cli.CandidatePage:
+        calls.append(str(current_item.path.name))
+        query = kwargs.get("search_query")
+        if current_item.path == first_path and query == "louis therouxs forbidden america":
+            return cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False, search_query_used=query)
+        return cli.CandidatePage(
+            candidates=[candidate],
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            search_query_used="louis theroux",
+            fallback_attempts=1,
+        )
+
+    first_choices: list[object] = []
+
+    def _fake_select_candidate(*_args, **_kwargs):
+        first_choices.append("called")
+        if len(first_choices) == 1:
+            return "s"
+        return candidate
+
+    monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
+    monkeypatch.setattr(
+        cli,
+        "_prompt_search",
+        lambda current_item, _progress: (cli._with_title(current_item, "Louis Theroux"), "louis theroux"),
+    )
+    monkeypatch.setattr(cli, "_select_candidate", _fake_select_candidate)
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_maybe_fetch_episode_title", lambda *_args, **_kwargs: None)
+
+    first_item = InferredItem(
+        path=first_path,
+        media_type="tv",
+        title="Louis Theroux's Forbidden America",
+        year=2022,
+        season=1,
+        episode=1,
+        episode_title="Extreme Online",
+    )
+    cache = Cache(library / ".plexify" / "cache.json")
+    first_plan, _collision = cli._process_item(
+        item=first_item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.90,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    folder_key = cli.tv_show_folder_cache_key(first_path, incoming)
+    assert first_plan is not None
+    assert folder_key is not None
+    assert cache.get_show(folder_key) is None
+
+    second_item = InferredItem(
+        path=second_path,
+        media_type="tv",
+        title="Louis Theroux's Forbidden America",
+        year=2022,
+        season=1,
+        episode=2,
+        episode_title="Rap's New Frontline",
+    )
+    second_plan, _collision = cli._process_item(
+        item=second_item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.90,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert second_plan is None
+    assert len(calls) >= 3
 
 
 def test_risky_broadened_movie_query_is_not_auto_cached(monkeypatch, tmp_path: Path) -> None:
@@ -2152,7 +2440,7 @@ def test_tv_search_retries_with_normalized_query(monkeypatch, tmp_path: Path) ->
 
     assert len(queries) == 2
     assert queries[0] == "The Big Bang Theory Seaon 5 cast"
-    assert queries[1] == "the big bang theory cast"
+    assert queries[1] == "the big bang theory"
     assert page.candidates
     assert page.candidates[0].title == "The Big Bang Theory"
 

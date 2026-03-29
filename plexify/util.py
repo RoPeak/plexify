@@ -116,7 +116,7 @@ def make_search_query(value: str) -> str:
     lowered = lowered.replace("&", " and ")
     lowered = re.sub(r"[\u2013\u2014\u2212]+", "-", lowered)
     lowered = re.sub(r"[\"'`\u2019\u201c\u201d]", "", lowered)
-    tokens = re.split(r"[.\s_\-:/\\]+", lowered)
+    tokens = re.split(r"[.\s_\-:/\\()\[\]{}]+", lowered)
     cleaned: list[str] = []
     for token in tokens:
         if not token:

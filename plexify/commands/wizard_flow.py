@@ -252,6 +252,7 @@ def wizard_video(
         None,
         show_default=False,
     )
+    console.print("Risky or overly broad searches will require an explicit choice instead of silent auto-accept.")
     allow_risky_enter_accept = confirm_fn(
         "Allow Enter to accept the top candidate even in risky prompts? [y/N]",
         False,
@@ -275,6 +276,12 @@ def wizard_video(
         clear_cache = confirm_fn("Clear cache before running? [y/N]", False, None, show_default=False)
 
     interactive = confirm_fn("Interactive mode? [Y/n]", True, None, show_default=False)
+    plain_output = confirm_fn(
+        "Use plain transcript-friendly output instead of Rich panels/tables? [y/N]",
+        False,
+        None,
+        show_default=False,
+    )
 
     command_config = build_command_config_cls(
         incoming=incoming,
@@ -299,6 +306,7 @@ def wizard_video(
         prune_ignore=default_prune_ignore,
         allow_risky_enter_accept=allow_risky_enter_accept,
         strict_safe=False,
+        plain_output=plain_output,
     )
     command = build_command_fn(command_config)
     console.print("Running:")
@@ -331,6 +339,7 @@ def wizard_video(
             quiet=False,
             allow_risky_enter_accept=allow_risky_enter_accept,
             strict_safe=False,
+            plain_output=plain_output,
         )
     )
 

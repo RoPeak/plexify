@@ -43,7 +43,8 @@ python -m plexify.cli
 ```
 
 The wizard guides you through incoming/library folders, media type, dry-run vs apply, copy vs move,
-auto-accept settings, risky Enter acceptance, confidence threshold, and cache usage. It prints the exact command it runs.
+auto-accept settings, risky Enter acceptance, confidence threshold, cache usage, and plain transcript output.
+It prints the exact command it runs.
 Move mode requires typing MOVE to confirm. During a dry run, it prints a loud warning that no files
 will be moved or copied, and it offers to apply the plan immediately at the end.
 
@@ -113,8 +114,8 @@ Interactive selection shortcuts:
 
 When interactive prompts are shown, Plexify prints the active selection policy so it is clear when low-confidence
 or risky cached matches still require an explicit numeric choice.
-When you manually refine a risky movie search, Plexify now shows the candidate list for explicit review instead of
-silently auto-accepting the top result.
+When a movie or TV search is materially broadened, Plexify now shows the candidate list for explicit review instead of
+silently auto-accepting the top result or promoting a risky reusable cache entry.
 
 Cache control:
 
@@ -164,9 +165,11 @@ Matching notes:
 
 - Search queries preserve sequel markers (e.g., `II`, `2`) so sequels do not collapse to the base title.
 - Subtitle-style franchise names such as `Divergent Allegiant` fall back more conservatively, and broadened risky queries require explicit review.
+- TV matching retries with safer fallback queries, including yearless and simplified-title retries, before falling back to manual search.
 - Auto-accept requires a meaningful confidence gap or a close year match; otherwise it asks for confirmation.
 - Timing output labels `api=` for API calls and `total=` for end-to-end processing.
 - Cross-run Wikidata entity reuse reduces repeated movie candidate fetch costs.
+- Durable TVMaze search-result reuse reduces repeated TV lookup cost across runs for the same normalized query.
 
 Conflict handling:
 
@@ -262,6 +265,7 @@ python scripts/local_ci.py push
 - Reports are stored in `.plexify/reports` under the library folder.
 - Cache is stored at `.plexify/cache.json` under the library folder by default (override with `--cache`).
 - Use `--plain-output` when you want transcript-friendly output without Rich panels/tables or terminal encoding artifacts.
+- The wizard now offers the same plain-output mode directly for transcript/debugging runs.
 - Numbered episode folders (e.g., `Pride and Prejudice\1.mkv`, `2.mkv`) are treated as TV when the folder
   contains multiple video files. The show name is taken from the folder name and any year is used as a hint.
 

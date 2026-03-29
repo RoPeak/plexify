@@ -10,6 +10,8 @@ from plexify.services.movie_matcher import (
 )
 from plexify.services.music_matcher import rank_music_candidates
 from plexify.services.tv_matcher import normalize_tv_retry_query, tv_confidence_score
+from plexify.services.tv_matcher import broadened_search_query as tv_broadened_search_query
+from plexify.services.tv_matcher import search_lost_title_tokens as tv_search_lost_title_tokens
 from plexify.sources.musicbrainz import ReleaseCandidate
 
 
@@ -61,6 +63,11 @@ def test_tv_confidence_score_rewards_matching_year() -> None:
 def test_tv_retry_query_removes_explicit_season_tokens() -> None:
     season_re = re.compile(r"(?<![A-Za-z0-9])(?:season|series|seaon|seson|seasn)[-_. ]*(\d{1,2})(?![A-Za-z0-9])", re.IGNORECASE)
     assert normalize_tv_retry_query("The Big Bang Theory Seaon 5 cast", season_re) == "the big bang theory cast"
+
+
+def test_tv_broadened_search_query_blocks_lost_title_tokens() -> None:
+    assert tv_search_lost_title_tokens("Louis Theroux's Forbidden America", "louis theroux") is True
+    assert tv_broadened_search_query("Louis Theroux's Forbidden America", "louis theroux") is True
 
 
 def test_selection_policy_uses_offline_skip_reason() -> None:

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -12,15 +12,31 @@ from rich.prompt import Prompt
 
 @pytest.fixture
 def tmp_path() -> Path:
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        base = Path(local_app_data) / "Temp" / "plexify-pytest"
-        base.mkdir(parents=True, exist_ok=True)
-        path = Path(tempfile.mkdtemp(prefix="pytest-plexify-", dir=str(base)))
-    else:
-        path = Path(tempfile.mkdtemp(prefix="pytest-plexify-"))
+    base = Path(__file__).resolve().parents[1] / ".t"
+    base.mkdir(parents=True, exist_ok=True)
+    while True:
+        candidate = base / secrets.token_hex(4)
+        try:
+            candidate.mkdir()
+            path = candidate
+            break
+        except FileExistsError:
+            continue
     yield path
     shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _pin_temp_dirs(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = Path(__file__).resolve().parents[1]
+    temp_dir = base / ".t-temp"
+    local_app_data = base / ".t-localappdata"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    local_app_data.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("TMP", str(temp_dir))
+    monkeypatch.setenv("TEMP", str(temp_dir))
+    monkeypatch.setenv("TMPDIR", str(temp_dir))
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
 
 
 @pytest.fixture(autouse=True)

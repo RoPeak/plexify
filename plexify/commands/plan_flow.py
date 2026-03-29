@@ -77,6 +77,60 @@ def build_movie_fallback_queries(title: str, hint: str | None, year: int | None 
     return queries
 
 
+def build_tv_fallback_queries(title: str, hint: str | None, year: int | None = None) -> list[str]:
+    hint_text = (hint or "").strip()
+    base_title = (title or "").strip()
+    canonical = build_search_query(base_title, hint_text)
+    title_variants: list[str] = [base_title]
+
+    stripped_year = re.sub(r"\s*[\[(]?(19|20)\d{2}[\])\s]*$", "", base_title).strip()
+    if stripped_year:
+        title_variants.append(stripped_year)
+    stripped_suffix = re.sub(r"\s*[\[(].*?[\])]\s*$", "", base_title).strip()
+    if stripped_suffix:
+        title_variants.append(stripped_suffix)
+    if ":" in base_title:
+        title_variants.append(base_title.split(":", 1)[0].strip())
+    if " - " in base_title:
+        title_variants.append(base_title.split(" - ", 1)[0].strip())
+    normalized_separators = re.sub(r"[:\-]+", " ", base_title).strip()
+    if normalized_separators and normalized_separators != base_title:
+        title_variants.append(normalized_separators)
+
+    tokens = [token for token in make_search_query(base_title).split() if token]
+    if len(tokens) >= 3:
+        title_variants.append(" ".join(tokens[:-1]))
+    if len(tokens) >= 4:
+        title_variants.append(" ".join(tokens[:2]))
+
+    candidates: list[str] = []
+    if canonical:
+        candidates.append(canonical)
+    for variant in title_variants:
+        if not variant:
+            continue
+        normalized = make_search_query(variant) or variant.strip()
+        if normalized:
+            candidates.append(normalized)
+            if hint_text:
+                candidates.append(f"{normalized} {hint_text}".strip())
+            if year is not None:
+                candidates.append(f"{normalized} {year}".strip())
+
+    seen: set[str] = set()
+    queries: list[str] = []
+    for candidate in candidates:
+        compact = " ".join(candidate.split()).strip()
+        if not compact:
+            continue
+        marker = compact.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        queries.append(compact)
+    return queries
+
+
 def resolve_media_type_override(
     item: InferredItem,
     incoming_root: Path | None,

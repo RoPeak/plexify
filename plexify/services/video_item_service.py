@@ -11,6 +11,7 @@ from rich.progress import Progress
 @dataclass
 class _CandidateLoopState:
     item: Any
+    reference_title: str
     search_query: str
     page: Any
     candidates: list[Any]
@@ -235,6 +236,7 @@ def _reload_tv_loop_state(
         return None
     return _CandidateLoopState(
         item=state.item,
+        reference_title=state.reference_title,
         search_query=page.search_query_used or state.search_query,
         page=page,
         candidates=candidates,
@@ -281,6 +283,7 @@ def _advance_tv_loop_state(
     candidates, raw_results_tv, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
     return _CandidateLoopState(
         item=state.item,
+        reference_title=state.reference_title,
         search_query=page.search_query_used or state.search_query,
         page=page,
         candidates=candidates,
@@ -323,6 +326,7 @@ def _reload_movie_loop_state(
         return None
     return _CandidateLoopState(
         item=state.item,
+        reference_title=state.reference_title,
         search_query=page.search_query_used or state.search_query,
         page=page,
         candidates=candidates,
@@ -368,6 +372,7 @@ def _advance_movie_loop_state(
     candidates, raw_results_movie, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
     return _CandidateLoopState(
         item=state.item,
+        reference_title=state.reference_title,
         search_query=page.search_query_used or state.search_query,
         page=page,
         candidates=candidates,
@@ -527,13 +532,14 @@ def _handle_tv_no_candidates(
         new_state = _reload_tv_loop_state(
             state=_CandidateLoopState(
                 item=item,
+                reference_title=state.reference_title,
                 search_query=search_query,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
-                search_refined=state.search_refined,
+                search_refined=True,
             ),
             session_tv=session_tv,
             cache=cache,
@@ -553,13 +559,14 @@ def _handle_tv_no_candidates(
         new_state = _reload_tv_loop_state(
             state=_CandidateLoopState(
                 item=helpers._with_title(state.item, query),
+                reference_title=state.reference_title,
                 search_query=helpers._build_search_query(query, None),
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
-                search_refined=state.search_refined,
+                search_refined=True,
             ),
             session_tv=session_tv,
             cache=cache,
@@ -606,12 +613,17 @@ def _handle_tv_candidate_choice(
     stats: Any,
     helpers: Any,
 ) -> tuple[str, Any]:
+    risky_search_query = helpers.tv_matcher.broadened_search_query(
+        state.reference_title,
+        state.search_query,
+    )
     policy = helpers._candidate_prompt_policy(
         item=state.item,
         candidates=state.candidates,
         min_confidence=min_confidence,
         cache_reusable=state.page.cache_reusable,
         allow_risky_enter_accept=allow_risky_enter_accept,
+        risky_search_query=risky_search_query,
     )
     helpers._announce_candidate_prompt_policy(
         media_type="tv",
@@ -651,13 +663,14 @@ def _handle_tv_candidate_choice(
         new_state = _reload_tv_loop_state(
             state=_CandidateLoopState(
                 item=item,
+                reference_title=state.reference_title,
                 search_query=search_query,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
-                search_refined=state.search_refined,
+                search_refined=True,
             ),
             session_tv=session_tv,
             cache=cache,
@@ -677,13 +690,14 @@ def _handle_tv_candidate_choice(
         new_state = _reload_tv_loop_state(
             state=_CandidateLoopState(
                 item=helpers._with_title(state.item, query),
+                reference_title=state.reference_title,
                 search_query=helpers._build_search_query(query, None),
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
-                search_refined=state.search_refined,
+                search_refined=True,
             ),
             session_tv=session_tv,
             cache=cache,
@@ -748,6 +762,7 @@ def _resolve_movie_manual_fallback(
         new_state = _reload_movie_loop_state(
             state=_CandidateLoopState(
                 item=helpers._with_title(state.item, manual_fallback.title),
+                reference_title=state.reference_title,
                 search_query=helpers._build_search_query(manual_fallback.title, manual_hint),
                 page=state.page,
                 candidates=state.candidates,
@@ -867,6 +882,7 @@ def _handle_movie_no_candidates(
         new_state = _reload_movie_loop_state(
             state=_CandidateLoopState(
                 item=item,
+                reference_title=state.reference_title,
                 search_query=search_query,
                 page=state.page,
                 candidates=state.candidates,
@@ -894,6 +910,7 @@ def _handle_movie_no_candidates(
         new_state = _reload_movie_loop_state(
             state=_CandidateLoopState(
                 item=helpers._with_title(state.item, query),
+                reference_title=state.reference_title,
                 search_query=helpers._build_search_query(query, None),
                 page=state.page,
                 candidates=state.candidates,
@@ -964,7 +981,7 @@ def _handle_movie_candidate_choice(
     manual_hint: str,
 ) -> tuple[str, Any, Any, str]:
     risky_search_query = state.search_refined and helpers.movie_matcher.broadened_search_query(
-        state.item.title,
+        state.reference_title,
         state.search_query,
     )
     policy = helpers._candidate_prompt_policy(
@@ -1013,6 +1030,7 @@ def _handle_movie_candidate_choice(
         new_state = _reload_movie_loop_state(
             state=_CandidateLoopState(
                 item=item,
+                reference_title=state.reference_title,
                 search_query=search_query,
                 page=state.page,
                 candidates=state.candidates,
@@ -1040,6 +1058,7 @@ def _handle_movie_candidate_choice(
         new_state = _reload_movie_loop_state(
             state=_CandidateLoopState(
                 item=helpers._with_title(state.item, query),
+                reference_title=state.reference_title,
                 search_query=helpers._build_search_query(query, None),
                 page=state.page,
                 candidates=state.candidates,
@@ -1108,10 +1127,13 @@ def _handle_movie_candidate_choice(
 def _finalize_tv_selection(
     *,
     item: Any,
+    reference_title: str,
+    search_refined: bool,
     selected: Any,
     outcome: str | None,
     candidates: list[Any],
     search_query: str,
+    fallback_attempts: int,
     library: Path,
     cache: Any,
     cache_key: str,
@@ -1156,6 +1178,7 @@ def _finalize_tv_selection(
     metadata = selected.metadata
     confirmed_by_user = outcome in {"confirmed", "manual"}
     promote_reusable = helpers._should_promote_to_reusable(selection_mode=outcome, selected=selected, candidates=candidates)
+    risky_search_query = helpers.tv_matcher.broadened_search_query(reference_title, search_query)
     season = metadata.get("season") or item.season
     episode = metadata.get("episode") or item.episode
     episode_end = metadata.get("episode_end") or item.episode_end
@@ -1223,6 +1246,10 @@ def _finalize_tv_selection(
             "selection_mode": outcome,
             "created_at": helpers.now_timestamp(),
             "source": "Manual",
+            "search_query": search_query,
+            "search_refined": search_refined,
+            "risky_search_query": risky_search_query,
+            "fallback_attempts": fallback_attempts,
         }
         show_entry = {
             "id": None,
@@ -1236,6 +1263,10 @@ def _finalize_tv_selection(
             "selection_mode": outcome,
             "created_at": helpers.now_timestamp(),
             "source": "Manual",
+            "search_query": search_query,
+            "search_refined": search_refined,
+            "risky_search_query": risky_search_query,
+            "fallback_attempts": fallback_attempts,
         }
     else:
         entry = {
@@ -1253,6 +1284,10 @@ def _finalize_tv_selection(
             "selection_mode": outcome,
             "created_at": helpers.now_timestamp(),
             "source": selected.source,
+            "search_query": search_query,
+            "search_refined": search_refined,
+            "risky_search_query": risky_search_query,
+            "fallback_attempts": fallback_attempts,
         }
         show_entry = {
             "id": metadata["id"],
@@ -1265,9 +1300,30 @@ def _finalize_tv_selection(
             "selection_mode": outcome,
             "created_at": helpers.now_timestamp(),
             "source": selected.source,
+            "search_query": search_query,
+            "search_refined": search_refined,
+            "risky_search_query": risky_search_query,
+            "fallback_attempts": fallback_attempts,
         }
+    cache_write_level = "trusted"
     cache.set_show(cache_key, entry)
-    if reusable_show_key and promote_reusable:
+    if risky_search_query:
+        cache_write_level = "file_only"
+        helpers._safe_print(
+            "Trusted TV cache promotion suppressed because the effective search query broadened the title.",
+            progress,
+        )
+        helpers.log_event(
+            helpers.logger,
+            "cache_write_suppressed_risky_search",
+            media_type="tv",
+            path=item.path,
+            title=reference_title,
+            query=search_query,
+            cache_scope="tv",
+            selection_mode=outcome,
+        )
+    if reusable_show_key and promote_reusable and not risky_search_query:
         if helpers._reusable_tv_cache_safe(item):
             helpers._promote_reusable_with_conflict_tracking("tv", cache=cache, key=reusable_show_key, entry=show_entry)
         else:
@@ -1279,7 +1335,7 @@ def _finalize_tv_selection(
                 year=item.year,
                 key=reusable_show_key,
             )
-    if folder_show_key and helpers.selection_policy.should_write_folder_show_cache(
+    if folder_show_key and not risky_search_query and helpers.selection_policy.should_write_folder_show_cache(
         confirmed_by_user=confirmed_by_user,
         selection_mode=outcome,
         manual=bool(selected.metadata.get("manual")),
@@ -1288,7 +1344,7 @@ def _finalize_tv_selection(
         if season is not None:
             folder_entry["season"] = season
         cache.set_show(folder_show_key, folder_entry)
-    if reusable_episode_key and promote_reusable:
+    if reusable_episode_key and promote_reusable and not risky_search_query:
         if helpers._reusable_tv_cache_safe(item):
             cache.set_show(reusable_episode_key, entry)
         else:
@@ -1329,6 +1385,16 @@ def _finalize_tv_selection(
             "episode": int(episode),
             "episode_end": int(episode_end) if episode_end is not None else None,
             "episode_title": metadata.get("episode_title") or episode_title,
+            "selection": {
+                "source": selected.source,
+                "mode": outcome,
+                "reference_title": reference_title,
+                "effective_query": search_query,
+                "search_refined": search_refined,
+                "risky_search_query": risky_search_query,
+                "fallback_attempts": fallback_attempts,
+                "cache_write_level": cache_write_level,
+            },
         },
     )
     helpers._print_plan(plan, progress)
@@ -1350,10 +1416,13 @@ def _finalize_tv_selection(
 def _finalize_movie_selection(
     *,
     item: Any,
+    reference_title: str,
+    search_refined: bool,
     selected: Any,
     outcome: str | None,
     candidates: list[Any],
     search_query: str,
+    fallback_attempts: int,
     library: Path,
     cache: Any,
     cache_key: str,
@@ -1392,6 +1461,7 @@ def _finalize_movie_selection(
     metadata = selected.metadata
     confirmed_by_user = outcome in {"confirmed", "manual"}
     promote_reusable = helpers._should_promote_to_reusable(selection_mode=outcome, selected=selected, candidates=candidates)
+    risky_search_query = helpers.movie_matcher.broadened_search_query(reference_title, search_query)
     if metadata.get("manual"):
         entry = {
             "qid": None,
@@ -1404,6 +1474,10 @@ def _finalize_movie_selection(
             "selection_mode": outcome,
             "created_at": helpers.now_timestamp(),
             "source": "Manual",
+            "search_query": search_query,
+            "search_refined": search_refined,
+            "risky_search_query": risky_search_query,
+            "fallback_attempts": fallback_attempts,
         }
     else:
         entry = {
@@ -1417,6 +1491,10 @@ def _finalize_movie_selection(
             "selection_mode": outcome,
             "created_at": helpers.now_timestamp(),
             "source": selected.source,
+            "search_query": search_query,
+            "search_refined": search_refined,
+            "risky_search_query": risky_search_query,
+            "fallback_attempts": fallback_attempts,
         }
     cache.set_movie(cache_key, entry)
     if reusable_movie_key and promote_reusable:
@@ -1449,7 +1527,19 @@ def _finalize_movie_selection(
         destination=destination,
         mode=mode,
         media_type="movie",
-        metadata={"title": metadata.get("title") or selected.title, "year": year},
+        metadata={
+            "title": metadata.get("title") or selected.title,
+            "year": year,
+            "selection": {
+                "source": selected.source,
+                "mode": outcome,
+                "reference_title": reference_title,
+                "effective_query": search_query,
+                "search_refined": search_refined,
+                "risky_search_query": risky_search_query,
+                "fallback_attempts": fallback_attempts,
+            },
+        },
     )
     helpers._print_plan(plan, progress)
     helpers.log_event(
@@ -1584,7 +1674,13 @@ def process_tv_item(
     )
     cache_key = helpers.build_cache_key(item.path, incoming_root, item.media_type, item.year)
     if item.media_type == "movie" and interactive:
-        if helpers.re.search(r"\b(series|episode)\b", item.path.stem, helpers.re.IGNORECASE):
+        looks_like_tv = (
+            item.season is not None
+            or item.episode is not None
+            or helpers.TV_EXPLICIT_SEASON_RE.search(item.path.stem) is not None
+            or helpers.TV_EXPLICIT_SEASON_EPISODE_RE.search(item.path.stem) is not None
+        )
+        if looks_like_tv:
             if helpers._confirm("This looks like TV. Treat as TV? [Y/n]", True, progress, show_default=False):
                 item = helpers._switch_item_media_type(item, "tv")
                 helpers._persist_media_type_override(cache, override_key, "tv", media_type_overrides, progress)
@@ -1625,6 +1721,7 @@ def process_tv_item(
         candidates, raw_results_tv, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
         state = _CandidateLoopState(
             item=item,
+            reference_title=item.title,
             search_query=page.search_query_used or search_query,
             page=page,
             candidates=candidates,
@@ -1676,18 +1773,20 @@ def process_tv_item(
                     break
                 continue
             helpers._maybe_fetch_episode_title(state.item, state.candidates[0], session_tv, episode_cache, bump_confidence=True)
-            selected = helpers._maybe_auto_select_candidate(
-                candidates=state.candidates,
-                auto_accept=auto_accept,
-                min_confidence=min_confidence,
-                title=state.item.title,
-                search_query=state.search_query,
-                target_year=state.item.year,
-                progress=progress,
-            )
-            if selected is not None:
-                outcome = "auto"
-                break
+            risky_search_query = helpers.tv_matcher.broadened_search_query(state.reference_title, state.search_query)
+            if not state.search_refined and not risky_search_query:
+                selected = helpers._maybe_auto_select_candidate(
+                    candidates=state.candidates,
+                    auto_accept=auto_accept,
+                    min_confidence=min_confidence,
+                    title=state.reference_title,
+                    search_query=state.search_query,
+                    target_year=state.item.year,
+                    progress=progress,
+                )
+                if selected is not None:
+                    outcome = "auto"
+                    break
             if not interactive:
                 helpers._record_stat(
                     stats,
@@ -1724,10 +1823,13 @@ def process_tv_item(
                 break
         return _finalize_tv_selection(
             item=state.item,
+            reference_title=state.reference_title,
+            search_refined=state.search_refined,
             selected=selected,
             outcome=outcome,
             candidates=state.candidates,
             search_query=state.search_query,
+            fallback_attempts=state.page.fallback_attempts,
             library=library,
             cache=cache,
             cache_key=cache_key,
@@ -1810,7 +1912,13 @@ def process_movie_item(
             reprocess_item_fn=reprocess_item_fn,
         )
     if item.media_type == "movie" and interactive:
-        if helpers.re.search(r"\b(series|episode)\b", item.path.stem, helpers.re.IGNORECASE):
+        looks_like_tv = (
+            item.season is not None
+            or item.episode is not None
+            or helpers.TV_EXPLICIT_SEASON_RE.search(item.path.stem) is not None
+            or helpers.TV_EXPLICIT_SEASON_EPISODE_RE.search(item.path.stem) is not None
+        )
+        if looks_like_tv:
             if helpers._confirm("This looks like TV. Treat as TV? [Y/n]", True, progress, show_default=False):
                 item = helpers._switch_item_media_type(item, "tv")
                 helpers._persist_media_type_override(cache, override_key, "tv", media_type_overrides, progress)
@@ -1841,6 +1949,7 @@ def process_movie_item(
     candidates, raw_results_movie, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
     state = _CandidateLoopState(
         item=item,
+        reference_title=item.title,
         search_query=page.search_query_used or search_query,
         page=page,
         candidates=candidates,
@@ -1900,7 +2009,7 @@ def process_movie_item(
                 candidates=state.candidates,
                 auto_accept=auto_accept,
                 min_confidence=min_confidence,
-                title=state.item.title,
+                title=state.reference_title,
                 search_query=state.search_query,
                 target_year=state.item.year,
                 progress=progress,
@@ -1941,10 +2050,13 @@ def process_movie_item(
             break
     return _finalize_movie_selection(
         item=state.item,
+        reference_title=state.reference_title,
+        search_refined=state.search_refined,
         selected=selected,
         outcome=outcome,
         candidates=state.candidates,
         search_query=state.search_query,
+        fallback_attempts=state.page.fallback_attempts,
         library=library,
         cache=cache,
         cache_key=cache_key,

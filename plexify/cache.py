@@ -10,7 +10,7 @@ from .logging_config import get_logger
 from .models import CacheData
 from .util import json_dump, json_load
 
-CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 4
 MIN_SUPPORTED_SCHEMA_VERSION = 1
 LOCK_TIMEOUT_SECONDS = 1.0
 LOCK_RETRY_DELAY_SECONDS = 0.05
@@ -37,13 +37,14 @@ def _upgrade_cache_data(data: Any) -> CacheData:
     upgraded.setdefault("movies", {})
     upgraded.setdefault("enrichment", {})
     upgraded.setdefault("entities", {})
+    upgraded.setdefault("searches", {})
     upgraded.setdefault("music", {})
     upgraded["schema_version"] = CACHE_SCHEMA_VERSION
     return upgraded
 
 
 class Cache:
-    _MUTABLE_SECTIONS = ("shows", "movies", "enrichment", "entities", "music")
+    _MUTABLE_SECTIONS = ("shows", "movies", "enrichment", "entities", "searches", "music")
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -208,6 +209,12 @@ class Cache:
     def set_entity(self, key: str, value: dict[str, Any]) -> None:
         self._mark_set("entities", key, value)
 
+    def get_search(self, key: str) -> dict[str, Any] | None:
+        return self.data.get("searches", {}).get(key)
+
+    def set_search(self, key: str, value: dict[str, Any]) -> None:
+        self._mark_set("searches", key, value)
+
     def get_music(self, key: str) -> dict[str, Any] | None:
         return self.data.get("music", {}).get(key)
 
@@ -237,6 +244,7 @@ class NullCache(Cache):
             "movies": {},
             "enrichment": {},
             "entities": {},
+            "searches": {},
             "music": {},
         }
         self._dirty = False
@@ -276,6 +284,12 @@ class NullCache(Cache):
         return None
 
     def set_entity(self, key: str, value: dict[str, Any]) -> None:
+        return None
+
+    def get_search(self, key: str) -> dict[str, Any] | None:
+        return None
+
+    def set_search(self, key: str, value: dict[str, Any]) -> None:
         return None
 
     def get_music(self, key: str) -> dict[str, Any] | None:

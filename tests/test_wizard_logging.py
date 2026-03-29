@@ -53,7 +53,7 @@ def test_wizard_video_passes_safe_defaults_to_runtime_organise(monkeypatch) -> N
             else "dry-run"
         ),
     )
-    answers = iter([True, False, True, False, True])
+    answers = iter([True, False, True, False, True, False])
     monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: next(answers))
     monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: str(cli.DEFAULT_MIN_CONFIDENCE))
     monkeypatch.setattr(cli, "_build_command", lambda *_args, **_kwargs: "python -m plexify.cli organise")
@@ -64,6 +64,7 @@ def test_wizard_video_passes_safe_defaults_to_runtime_organise(monkeypatch) -> N
         captured["offline"] = options.offline
         captured["strict_safe"] = options.strict_safe
         captured["allow_risky_enter_accept"] = options.allow_risky_enter_accept
+        captured["plain_output"] = options.plain_output
 
     monkeypatch.setattr(cli, "run_organise", _fake_run_organise)
 
@@ -72,6 +73,7 @@ def test_wizard_video_passes_safe_defaults_to_runtime_organise(monkeypatch) -> N
     assert captured.get("offline") is False
     assert captured.get("strict_safe") is False
     assert captured.get("allow_risky_enter_accept") is False
+    assert captured.get("plain_output") is False
 
 
 def test_wizard_video_uses_unambiguous_auto_accept_prompt(monkeypatch) -> None:
@@ -102,6 +104,7 @@ def test_wizard_video_uses_unambiguous_auto_accept_prompt(monkeypatch) -> None:
 
     assert "Automatically accept only clearly unambiguous high-confidence matches? [Y/n]" in prompts
     assert "Allow Enter to accept the top candidate even in risky prompts? [y/N]" in prompts
+    assert "Use plain transcript-friendly output instead of Rich panels/tables? [y/N]" in prompts
 
 
 def test_wizard_video_command_and_runtime_flags_stay_aligned(monkeypatch) -> None:
@@ -116,7 +119,7 @@ def test_wizard_video_command_and_runtime_flags_stay_aligned(monkeypatch) -> Non
         "_prompt_choice_loop",
         lambda prompt, *_args, **_kwargs: ("movie" if prompt.startswith("Media type") else "dry-run"),
     )
-    answers = iter([True, False, True, False, True])
+    answers = iter([True, False, True, False, True, True])
     monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: next(answers))
     monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: str(cli.DEFAULT_MIN_CONFIDENCE))
 
@@ -125,11 +128,13 @@ def test_wizard_video_command_and_runtime_flags_stay_aligned(monkeypatch) -> Non
     def _fake_build_command(config: cli.BuildCommandConfig) -> str:
         captured["command_strict_safe"] = config.strict_safe
         captured["command_allow_risky_enter_accept"] = config.allow_risky_enter_accept
+        captured["command_plain_output"] = config.plain_output
         return "python -m plexify.cli organise"
 
     def _fake_run_organise(options: cli.OrganiseOptions) -> None:
         captured["runtime_strict_safe"] = options.strict_safe
         captured["runtime_allow_risky_enter_accept"] = options.allow_risky_enter_accept
+        captured["runtime_plain_output"] = options.plain_output
 
     monkeypatch.setattr(cli, "_build_command", _fake_build_command)
     monkeypatch.setattr(cli, "run_organise", _fake_run_organise)
@@ -140,6 +145,8 @@ def test_wizard_video_command_and_runtime_flags_stay_aligned(monkeypatch) -> Non
     assert captured["runtime_strict_safe"] is False
     assert captured["command_allow_risky_enter_accept"] is False
     assert captured["runtime_allow_risky_enter_accept"] is False
+    assert captured["command_plain_output"] is True
+    assert captured["runtime_plain_output"] is True
 
 
 def test_wizard_keeps_log_file_none_when_not_enabled(monkeypatch) -> None:

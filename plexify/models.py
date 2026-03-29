@@ -9,6 +9,7 @@ class CacheData(TypedDict):
     movies: dict[str, dict[str, Any]]
     enrichment: dict[str, dict[str, Any]]
     entities: dict[str, dict[str, Any]]
+    searches: dict[str, dict[str, Any]]
     music: dict[str, dict[str, Any]]
 
 

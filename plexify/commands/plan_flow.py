@@ -44,6 +44,10 @@ def build_movie_fallback_queries(title: str, hint: str | None, year: int | None 
             if trimmed:
                 title_variants.append(trimmed)
             break
+    if ":" not in base_title and " - " not in base_title and len(tokens) == 2:
+        short_franchise = tokens[0].strip()
+        if short_franchise:
+            title_variants.append(short_franchise)
 
     candidates: list[str] = []
     if canonical:

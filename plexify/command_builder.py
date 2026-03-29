@@ -37,6 +37,7 @@ def build_organise_command(
     prune_ignore: str | None,
     allow_risky_enter_accept: bool = False,
     strict_safe: bool = False,
+    plain_output: bool = False,
 ) -> str:
     parts = [
         "python -m plexify.cli organise",
@@ -79,6 +80,8 @@ def build_organise_command(
         parts.append("--allow-risky-enter-accept")
     if strict_safe:
         parts.append("--strict-safe")
+    if plain_output:
+        parts.append("--plain-output")
     if not interactive:
         parts.append("--no-interactive")
     return " ".join(parts)

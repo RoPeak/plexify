@@ -17,6 +17,7 @@ class _CandidateLoopState:
     raw_results: Any
     next_offset: int
     has_more: bool
+    search_refined: bool = False
 
 
 def _prepare_item_context(
@@ -234,12 +235,13 @@ def _reload_tv_loop_state(
         return None
     return _CandidateLoopState(
         item=state.item,
-        search_query=state.search_query,
+        search_query=page.search_query_used or state.search_query,
         page=page,
         candidates=candidates,
         raw_results=raw_results_tv,
         next_offset=next_offset,
         has_more=has_more,
+        search_refined=state.search_refined,
     )
 
 
@@ -279,12 +281,13 @@ def _advance_tv_loop_state(
     candidates, raw_results_tv, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
     return _CandidateLoopState(
         item=state.item,
-        search_query=state.search_query,
+        search_query=page.search_query_used or state.search_query,
         page=page,
         candidates=candidates,
         raw_results=raw_results_tv,
         next_offset=next_offset,
         has_more=has_more,
+        search_refined=state.search_refined,
     )
 
 
@@ -320,12 +323,13 @@ def _reload_movie_loop_state(
         return None
     return _CandidateLoopState(
         item=state.item,
-        search_query=state.search_query,
+        search_query=page.search_query_used or state.search_query,
         page=page,
         candidates=candidates,
         raw_results=raw_results_movie,
         next_offset=next_offset,
         has_more=has_more,
+        search_refined=state.search_refined,
     )
 
 
@@ -364,12 +368,13 @@ def _advance_movie_loop_state(
     candidates, raw_results_movie, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
     return _CandidateLoopState(
         item=state.item,
-        search_query=state.search_query,
+        search_query=page.search_query_used or state.search_query,
         page=page,
         candidates=candidates,
         raw_results=raw_results_movie,
         next_offset=next_offset,
         has_more=has_more,
+        search_refined=state.search_refined,
     )
 
 
@@ -528,6 +533,7 @@ def _handle_tv_no_candidates(
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
+                search_refined=state.search_refined,
             ),
             session_tv=session_tv,
             cache=cache,
@@ -553,6 +559,7 @@ def _handle_tv_no_candidates(
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
+                search_refined=state.search_refined,
             ),
             session_tv=session_tv,
             cache=cache,
@@ -650,6 +657,7 @@ def _handle_tv_candidate_choice(
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
+                search_refined=state.search_refined,
             ),
             session_tv=session_tv,
             cache=cache,
@@ -675,6 +683,7 @@ def _handle_tv_candidate_choice(
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
+                search_refined=state.search_refined,
             ),
             session_tv=session_tv,
             cache=cache,
@@ -745,6 +754,7 @@ def _resolve_movie_manual_fallback(
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
+                search_refined=True,
             ),
             session_wd=session_wd,
             cache=cache,
@@ -863,6 +873,7 @@ def _handle_movie_no_candidates(
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
+                search_refined=True,
             ),
             session_wd=session_wd,
             cache=cache,
@@ -889,6 +900,7 @@ def _handle_movie_no_candidates(
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
+                search_refined=True,
             ),
             session_wd=session_wd,
             cache=cache,
@@ -951,12 +963,17 @@ def _handle_movie_candidate_choice(
     manual_fallback: Any | None,
     manual_hint: str,
 ) -> tuple[str, Any, Any, str]:
+    risky_search_query = state.search_refined and helpers.movie_matcher.broadened_search_query(
+        state.item.title,
+        state.search_query,
+    )
     policy = helpers._candidate_prompt_policy(
         item=state.item,
         candidates=state.candidates,
         min_confidence=min_confidence,
         cache_reusable=state.page.cache_reusable,
         allow_risky_enter_accept=allow_risky_enter_accept,
+        risky_search_query=risky_search_query,
     )
     helpers._announce_candidate_prompt_policy(
         media_type="movie",
@@ -1002,6 +1019,7 @@ def _handle_movie_candidate_choice(
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
+                search_refined=True,
             ),
             session_wd=session_wd,
             cache=cache,
@@ -1028,6 +1046,7 @@ def _handle_movie_candidate_choice(
                 raw_results=state.raw_results,
                 next_offset=state.next_offset,
                 has_more=state.has_more,
+                search_refined=True,
             ),
             session_wd=session_wd,
             cache=cache,
@@ -1606,12 +1625,13 @@ def process_tv_item(
         candidates, raw_results_tv, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
         state = _CandidateLoopState(
             item=item,
-            search_query=search_query,
+            search_query=page.search_query_used or search_query,
             page=page,
             candidates=candidates,
             raw_results=raw_results_tv,
             next_offset=next_offset,
             has_more=has_more,
+            search_refined=False,
         )
         selected = None
         outcome = None
@@ -1821,12 +1841,13 @@ def process_movie_item(
     candidates, raw_results_movie, next_offset, has_more = _apply_candidate_page(page, stats, helpers)
     state = _CandidateLoopState(
         item=item,
-        search_query=search_query,
+        search_query=page.search_query_used or search_query,
         page=page,
         candidates=candidates,
         raw_results=raw_results_movie,
         next_offset=next_offset,
         has_more=has_more,
+        search_refined=False,
     )
     selected = None
     manual_fallback: Any | None = None
@@ -1874,18 +1895,19 @@ def process_movie_item(
                 selected, outcome = payload
                 break
             continue
-        selected = helpers._maybe_auto_select_candidate(
-            candidates=state.candidates,
-            auto_accept=auto_accept,
-            min_confidence=min_confidence,
-            title=state.item.title,
-            search_query=state.search_query,
-            target_year=state.item.year,
-            progress=progress,
-        )
-        if selected is not None:
-            outcome = "auto"
-            break
+        if not state.search_refined:
+            selected = helpers._maybe_auto_select_candidate(
+                candidates=state.candidates,
+                auto_accept=auto_accept,
+                min_confidence=min_confidence,
+                title=state.item.title,
+                search_query=state.search_query,
+                target_year=state.item.year,
+                progress=progress,
+            )
+            if selected is not None:
+                outcome = "auto"
+                break
         if not interactive:
             helpers._record_stat(stats, "skipped")
             return None, False

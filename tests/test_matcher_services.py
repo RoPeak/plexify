@@ -1,7 +1,13 @@
 import re
 
 from plexify.services import selection_policy
-from plexify.services.movie_matcher import auto_acceptable, confidence_score, search_lost_sequel_marker
+from plexify.services.movie_matcher import (
+    auto_acceptable,
+    broadened_search_query,
+    confidence_score,
+    search_lost_sequel_marker,
+    search_lost_subtitle_tokens,
+)
 from plexify.services.music_matcher import rank_music_candidates
 from plexify.services.tv_matcher import normalize_tv_retry_query, tv_confidence_score
 from plexify.sources.musicbrainz import ReleaseCandidate
@@ -24,6 +30,23 @@ def test_movie_auto_acceptable_blocks_lost_sequel_marker() -> None:
             title="Rocky II",
             search_query="rocky",
             target_year=1979,
+        )
+        is False
+    )
+
+
+def test_movie_auto_acceptable_blocks_lost_subtitle_tokens() -> None:
+    assert search_lost_subtitle_tokens("Divergent Allegiant", "divergent") is True
+    assert broadened_search_query("Divergent Allegiant", "divergent") is True
+    assert (
+        auto_acceptable(
+            top_confidence=0.99,
+            second_confidence=None,
+            top_year=2016,
+            min_confidence=0.9,
+            title="Divergent Allegiant",
+            search_query="divergent",
+            target_year=2016,
         )
         is False
     )

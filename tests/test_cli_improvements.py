@@ -353,6 +353,7 @@ def test_candidate_prompt_policy_requires_explicit_choice_for_low_confidence(tmp
     assert policy == cli.CandidatePromptPolicy(
         low_confidence=True,
         risky_reusable_cache_hit=False,
+        risky_search_query=False,
         require_explicit_choice=True,
     )
 
@@ -386,7 +387,43 @@ def test_candidate_prompt_policy_allows_enter_for_safe_candidate(tmp_path: Path)
     assert policy == cli.CandidatePromptPolicy(
         low_confidence=False,
         risky_reusable_cache_hit=False,
+        risky_search_query=False,
         require_explicit_choice=False,
+    )
+
+
+def test_candidate_prompt_policy_requires_explicit_choice_for_risky_search_query(tmp_path: Path) -> None:
+    item = InferredItem(
+        path=tmp_path / "Movie.mkv",
+        media_type="movie",
+        title="Divergent Allegiant",
+        year=2016,
+        episode_title=None,
+    )
+    candidates = [
+        cli.Candidate(
+            title="Divergent",
+            year=2014,
+            source="Wikidata",
+            confidence=0.97,
+            metadata={"qid": "Q1", "title": "Divergent", "year": 2014},
+        )
+    ]
+
+    policy = cli._candidate_prompt_policy(
+        item=item,
+        candidates=candidates,
+        min_confidence=0.90,
+        cache_reusable=False,
+        allow_risky_enter_accept=False,
+        risky_search_query=True,
+    )
+
+    assert policy == cli.CandidatePromptPolicy(
+        low_confidence=False,
+        risky_reusable_cache_hit=False,
+        risky_search_query=True,
+        require_explicit_choice=True,
     )
 
 

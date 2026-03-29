@@ -43,7 +43,22 @@ def print_candidates(
     media_type: str,
     candidates: list[Any],
     item: Any | None = None,
+    plain: bool = False,
 ) -> None:
+    if plain:
+        console.print("Candidates:")
+        for idx, cand in enumerate(candidates, start=1):
+            year_text = str(cand.year) if cand.year else "Unknown"
+            line = f"{idx}. {cand.title} ({year_text}) [{cand.source}] confidence={cand.confidence:.2f}"
+            if media_type == "tv" and item is not None:
+                season = item.season if item.season is not None else "-"
+                episode = item.episode if item.episode is not None else "-"
+                episode_title = cand.metadata.get("episode_title") or item.episode_title
+                line += f" S/E={season}/{episode}"
+                if episode_title:
+                    line += f" title={episode_title}"
+            console.print(rich_escape(line))
+        return
     table = Table(title="Candidates")
     table.add_column("#")
     table.add_column("Title")
@@ -150,7 +165,7 @@ def select_candidate(
         safe_print("Invalid choice.")
 
 
-def file_panel(index: int, total: int, item: Any, incoming_root: Path | None) -> Panel:
+def file_panel(index: int, total: int, item: Any, incoming_root: Path | None, *, plain: bool = False) -> Panel | str:
     title_line = f"File {index}/{total} - {item.media_type.upper()} - {rich_escape(item.path.name)}"
     year_text = str(item.year) if item.year else "Unknown"
     rel_path = item.path
@@ -174,16 +189,22 @@ def file_panel(index: int, total: int, item: Any, incoming_root: Path | None) ->
         lines.append(f"Season/Episode: {season}/{episode_text}")
         if item.episode_title:
             lines.append(f"Episode title: {rich_escape(item.episode_title)}")
-    return Panel("\n".join(lines), title=title_line, expand=False)
+    body = "\n".join(lines)
+    if plain:
+        return f"{title_line}\n{body}"
+    return Panel(body, title=title_line, expand=False)
 
 
-def album_panel(index: int, total: int, album: Any) -> Panel:
+def album_panel(index: int, total: int, album: Any, *, plain: bool = False) -> Panel | str:
     title_line = f"Album {index}/{total} - {rich_escape(album.album)}"
     lines = [
         f"Detected: Artist={rich_escape(album.artist)}, Album={rich_escape(album.album)}",
         f"Tracks: {len(album.tracks)}",
     ]
-    return Panel("\n".join(lines), title=title_line, expand=False)
+    body = "\n".join(lines)
+    if plain:
+        return f"{title_line}\n{body}"
+    return Panel(body, title=title_line, expand=False)
 
 
 def print_music_candidates(*, console: Any, candidates: list[Any]) -> None:

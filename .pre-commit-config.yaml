@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: plexify-fast-gate
+        name: plexify fast local gate
+        entry: python scripts/local_ci.py fast
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: plexify-pre-push
+        name: plexify pre-push pytest gate
+        entry: python scripts/local_ci.py push
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

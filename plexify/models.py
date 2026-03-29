@@ -8,6 +8,7 @@ class CacheData(TypedDict):
     shows: dict[str, dict[str, Any]]
     movies: dict[str, dict[str, Any]]
     enrichment: dict[str, dict[str, Any]]
+    entities: dict[str, dict[str, Any]]
     music: dict[str, dict[str, Any]]
 
 

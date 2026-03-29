@@ -7,6 +7,21 @@ from rapidfuzz import fuzz
 from ..cache_policy import year_distance
 from ..util import make_search_query, normalize_title_for_similarity
 
+_SIGNIFICANT_QUERY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "for",
+    "from",
+    "in",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "with",
+}
+
 
 def compact_text(value: str) -> str:
     return re.sub(r"\s+", "", value)
@@ -81,6 +96,29 @@ def search_lost_sequel_marker(title: str, search_query: str) -> bool:
     return not has_sequel_marker(search_query)
 
 
+def _significant_query_tokens(value: str) -> set[str]:
+    normalized = make_search_query(value) or value.lower()
+    tokens = {
+        token
+        for token in normalized.split()
+        if token and token not in _SIGNIFICANT_QUERY_STOPWORDS and not token.isdigit()
+    }
+    return tokens
+
+
+def search_lost_subtitle_tokens(title: str, search_query: str) -> bool:
+    title_tokens = _significant_query_tokens(title)
+    query_tokens = _significant_query_tokens(search_query)
+    if not title_tokens or not query_tokens:
+        return False
+    missing = title_tokens - query_tokens
+    return bool(missing)
+
+
+def broadened_search_query(title: str, search_query: str) -> bool:
+    return search_lost_sequel_marker(title, search_query) or search_lost_subtitle_tokens(title, search_query)
+
+
 def auto_acceptable(
     *,
     top_confidence: float,
@@ -94,7 +132,7 @@ def auto_acceptable(
 ) -> bool:
     if top_confidence < min_confidence:
         return False
-    if search_lost_sequel_marker(title, search_query):
+    if broadened_search_query(title, search_query):
         return False
     if second_confidence is None:
         return True

@@ -59,6 +59,7 @@ class UICandidatePage:
     fetch_time: float | None = None
     total_time: float | None = None
     cache_reusable: bool = False
+    search_query_used: str | None = None
 
 
 @dataclass(frozen=True)

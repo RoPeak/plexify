@@ -34,7 +34,7 @@ env/
 Thumbs.db
 Desktop.ini
 
-.tmp/
+.tmp*/
 plexify-run.txt
 test-logs/
 exports/

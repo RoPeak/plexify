@@ -40,6 +40,7 @@ def test_organise_help():
     assert "log file" in output
     assert "offline" in output
     assert "quiet" in output
+    assert "plain-output" in output
     assert "prune-empty-dirs" in output
     assert "ignore" in output
     assert "filename" in output

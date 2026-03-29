@@ -25,6 +25,7 @@ plexify = "plexify.cli:app"
 [project.optional-dependencies]
 dev = [
   "pytest==8.2.2",
+  "pre-commit>=3.7,<5",
 ]
 
 [tool.setuptools.packages.find]

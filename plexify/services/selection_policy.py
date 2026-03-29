@@ -8,6 +8,7 @@ from typing import Any, Callable
 class CandidatePromptPolicy:
     low_confidence: bool
     risky_reusable_cache_hit: bool
+    risky_search_query: bool
     require_explicit_choice: bool
 
 
@@ -40,12 +41,15 @@ def build_candidate_prompt_policy(
     *,
     low_confidence: bool,
     risky_reusable_cache_hit: bool,
+    risky_search_query: bool,
     allow_risky_enter_accept: bool,
 ) -> CandidatePromptPolicy:
     return CandidatePromptPolicy(
         low_confidence=low_confidence,
         risky_reusable_cache_hit=risky_reusable_cache_hit,
-        require_explicit_choice=(low_confidence or risky_reusable_cache_hit) and not allow_risky_enter_accept,
+        risky_search_query=risky_search_query,
+        require_explicit_choice=(low_confidence or risky_reusable_cache_hit or risky_search_query)
+        and not allow_risky_enter_accept,
     )
 
 

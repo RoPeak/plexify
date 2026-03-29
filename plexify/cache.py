@@ -36,13 +36,14 @@ def _upgrade_cache_data(data: Any) -> CacheData:
     upgraded.setdefault("shows", {})
     upgraded.setdefault("movies", {})
     upgraded.setdefault("enrichment", {})
+    upgraded.setdefault("entities", {})
     upgraded.setdefault("music", {})
     upgraded["schema_version"] = CACHE_SCHEMA_VERSION
     return upgraded
 
 
 class Cache:
-    _MUTABLE_SECTIONS = ("shows", "movies", "enrichment", "music")
+    _MUTABLE_SECTIONS = ("shows", "movies", "enrichment", "entities", "music")
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -201,6 +202,12 @@ class Cache:
     def set_enrichment(self, key: str, value: dict[str, Any]) -> None:
         self._mark_set("enrichment", key, value)
 
+    def get_entity(self, key: str) -> dict[str, Any] | None:
+        return self.data.get("entities", {}).get(key)
+
+    def set_entity(self, key: str, value: dict[str, Any]) -> None:
+        self._mark_set("entities", key, value)
+
     def get_music(self, key: str) -> dict[str, Any] | None:
         return self.data.get("music", {}).get(key)
 
@@ -229,6 +236,7 @@ class NullCache(Cache):
             "shows": {},
             "movies": {},
             "enrichment": {},
+            "entities": {},
             "music": {},
         }
         self._dirty = False
@@ -262,6 +270,12 @@ class NullCache(Cache):
         return None
 
     def set_enrichment(self, key: str, value: dict[str, Any]) -> None:
+        return None
+
+    def get_entity(self, key: str) -> dict[str, Any] | None:
+        return None
+
+    def set_entity(self, key: str, value: dict[str, Any]) -> None:
         return None
 
     def get_music(self, key: str) -> dict[str, Any] | None:

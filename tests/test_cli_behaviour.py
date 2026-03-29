@@ -654,6 +654,12 @@ def test_build_movie_fallback_queries_relaxes_subtitles_and_adds_year() -> None:
     assert queries == list(dict.fromkeys(queries))
 
 
+def test_build_movie_fallback_queries_adds_short_franchise_variant_for_two_token_title() -> None:
+    queries = cli.plan_flow.build_movie_fallback_queries("Divergent Allegiant", None, None)
+    assert queries[0] == "divergent allegiant"
+    assert "divergent" in queries[1:]
+
+
 def test_movie_candidates_retry_escape_room_tournament_without_manual_search(monkeypatch, tmp_path: Path) -> None:
     queries: list[str] = []
 
@@ -731,6 +737,168 @@ def test_movie_candidates_reuse_entity_cache_across_calls(monkeypatch, tmp_path:
     assert first_page.candidates and second_page.candidates
     assert first_page.candidates[0].title == "Movie"
     assert second_page.candidates[0].title == "Movie"
+
+
+def test_movie_candidates_reuse_persisted_entity_cache_across_calls(monkeypatch, tmp_path: Path) -> None:
+    fetch_calls = {"count": 0}
+
+    def _fake_search(*_args, **_kwargs):
+        return [cli.wikidata.WikidataCandidate(qid="Q42", label="Movie", description=None)]
+
+    def _fake_fetch_entity(qid: str, *_args, **_kwargs):
+        fetch_calls["count"] += 1
+        return cli.wikidata.WikidataFilm(qid=qid, title="Movie", year=2001, is_film=True)
+
+    monkeypatch.setattr(cli.wikidata, "search", _fake_search)
+    monkeypatch.setattr(cli.wikidata, "fetch_entity", _fake_fetch_entity)
+
+    session = requests.Session()
+    cache_path = tmp_path / "cache.json"
+    cache = Cache(cache_path)
+    first = InferredItem(path=tmp_path / "A.mkv", media_type="movie", title="Movie", year=None, episode_title=None)
+    second = InferredItem(path=tmp_path / "B.mkv", media_type="movie", title="Movie", year=None, episode_title=None)
+
+    first_page = cli._movie_candidates(
+        item=first,
+        session=session,
+        cache=cache,
+        show_cache=False,
+        cache_key="movie|path|a|unknown",
+        movie_entity_cache=None,
+    )
+    cache.save()
+    persisted_cache = Cache(cache_path)
+    second_page = cli._movie_candidates(
+        item=second,
+        session=session,
+        cache=persisted_cache,
+        show_cache=False,
+        cache_key="movie|path|b|unknown",
+        movie_entity_cache=None,
+    )
+
+    assert fetch_calls["count"] == 1
+    assert persisted_cache.get_entity("wikidata-film:Q42") == {"title": "Movie", "year": 2001, "is_film": True}
+    assert first_page.candidates and second_page.candidates
+
+
+def test_manual_movie_search_retry_requires_explicit_review(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Divergent_Allegiant.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="movie", title="Divergent Allegiant", year=None, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+    candidate = cli.Candidate(
+        title="Divergent",
+        year=2014,
+        source="Wikidata",
+        confidence=0.99,
+        metadata={"qid": "Q1", "title": "Divergent", "year": 2014},
+    )
+
+    def _fake_movie_candidates(current_item: InferredItem, *_args, **kwargs) -> cli.CandidatePage:
+        query = kwargs.get("search_query")
+        if current_item.title == "Divergent Allegiant":
+            return cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False, search_query_used=query)
+        return cli.CandidatePage(
+            candidates=[candidate],
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            search_query_used="divergent",
+        )
+
+    choices: list[object] = []
+
+    def _fake_select_candidate(*_args, **_kwargs):
+        choices.append("called")
+        if len(choices) == 1:
+            return "s"
+        return candidate
+
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli, "_prompt_search", lambda current_item, _progress: (cli._with_title(current_item, "Divergent"), "divergent"))
+    monkeypatch.setattr(cli, "_select_candidate", _fake_select_candidate)
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.90,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert len(choices) == 2
+
+
+def test_risky_broadened_movie_query_is_not_auto_cached(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Divergent_Allegiant.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="movie", title="Divergent Allegiant", year=None, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+    candidate = cli.Candidate(
+        title="Divergent",
+        year=2014,
+        source="Wikidata",
+        confidence=1.0,
+        metadata={"qid": "Q1", "title": "Divergent", "year": 2014},
+    )
+
+    monkeypatch.setattr(
+        cli,
+        "_movie_candidates",
+        lambda *_args, **_kwargs: cli.CandidatePage(
+            candidates=[candidate],
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            search_query_used="divergent",
+        ),
+    )
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=False,
+        auto_accept=True,
+        min_confidence=0.90,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is None
+    assert cache.get_movie(cli.build_cache_key(path, incoming, "movie", item.year)) is None
 
 
 def test_reusable_movie_cache_ignored_when_stem_has_extra_tokens(monkeypatch, tmp_path: Path) -> None:

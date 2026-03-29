@@ -19,7 +19,7 @@ From the repository root:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python -m pip install -e .
+python -m pip install -e .[dev]
 ```
 
 After editable install, you can run the console script directly:
@@ -113,6 +113,8 @@ Interactive selection shortcuts:
 
 When interactive prompts are shown, Plexify prints the active selection policy so it is clear when low-confidence
 or risky cached matches still require an explicit numeric choice.
+When you manually refine a risky movie search, Plexify now shows the candidate list for explicit review instead of
+silently auto-accepting the top result.
 
 Cache control:
 
@@ -127,6 +129,7 @@ Logging:
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --log-level DEBUG
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --log-format json
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --log-file ".plexify\run.log"
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --plain-output
 ```
 
 JSON logs are line-delimited and include event metadata, for example:
@@ -160,8 +163,10 @@ Cache reuse:
 Matching notes:
 
 - Search queries preserve sequel markers (e.g., `II`, `2`) so sequels do not collapse to the base title.
+- Subtitle-style franchise names such as `Divergent Allegiant` fall back more conservatively, and broadened risky queries require explicit review.
 - Auto-accept requires a meaningful confidence gap or a close year match; otherwise it asks for confirmation.
 - Timing output labels `api=` for API calls and `total=` for end-to-end processing.
+- Cross-run Wikidata entity reuse reduces repeated movie candidate fetch costs.
 
 Conflict handling:
 
@@ -225,6 +230,27 @@ python -m pytest -q
 
 CI runs the full test suite on Windows and Linux across Python 3.10, 3.11, and 3.12.
 
+## Local hooks
+
+Install the local quality gates:
+
+```powershell
+pre-commit install
+pre-commit install --hook-type pre-push
+```
+
+Hook behavior:
+
+- `pre-commit` runs a fast local gate: Python compile smoke, CLI startup/help smoke, and a small stable pytest slice.
+- `pre-push` runs the full suite with `python -m pytest -q`.
+
+Manual equivalents:
+
+```powershell
+python scripts/local_ci.py fast
+python scripts/local_ci.py push
+```
+
 ## Troubleshooting
 
 - Click/Typer compatibility: keep the pinned versions in `requirements.txt`.
@@ -235,6 +261,7 @@ CI runs the full test suite on Windows and Linux across Python 3.10, 3.11, and 3
 - Incoming and library overlap: Plexify exits with code 2; use separate folders to avoid re-scanning output.
 - Reports are stored in `.plexify/reports` under the library folder.
 - Cache is stored at `.plexify/cache.json` under the library folder by default (override with `--cache`).
+- Use `--plain-output` when you want transcript-friendly output without Rich panels/tables or terminal encoding artifacts.
 - Numbered episode folders (e.g., `Pride and Prejudice\1.mkv`, `2.mkv`) are treated as TV when the folder
   contains multiple video files. The show name is taken from the folder name and any year is used as a hint.
 

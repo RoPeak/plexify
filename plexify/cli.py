@@ -79,6 +79,7 @@ console = Console(safe_box=ASCII_UI_ENABLED)
 logger = get_logger(__name__)
 COMPLETION_ENABLED = True
 QUIET_OUTPUT = False
+PLAIN_OUTPUT = False
 _cache_save_warning_shown = False
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
 DEFAULT_EXTENSIONS_LIST = [ext.strip() for ext in DEFAULT_EXTENSIONS.split(",") if ext.strip()]
@@ -186,6 +187,7 @@ class CandidatePage:
     fetch_time: float | None = None
     total_time: float | None = None
     cache_reusable: bool = False
+    search_query_used: str | None = None
 
 
 @dataclass
@@ -245,6 +247,7 @@ class BuildCommandConfig:
     prune_ignore: str | None
     allow_risky_enter_accept: bool = False
     strict_safe: bool = False
+    plain_output: bool = False
 
 
 @dataclass
@@ -274,6 +277,7 @@ class OrganiseOptions:
     quiet: bool
     allow_risky_enter_accept: bool = False
     strict_safe: bool = False
+    plain_output: bool = False
 
 
 @dataclass(frozen=True)
@@ -298,6 +302,7 @@ class MusicAutoDecision:
 class CandidatePromptPolicy:
     low_confidence: bool
     risky_reusable_cache_hit: bool
+    risky_search_query: bool
     require_explicit_choice: bool
 
 
@@ -757,6 +762,7 @@ def _print_candidates(
         media_type=media_type,
         candidates=candidates,
         item=item,
+        plain=PLAIN_OUTPUT,
     )
 
 
@@ -1186,17 +1192,20 @@ def _candidate_prompt_policy(
     min_confidence: float,
     cache_reusable: bool,
     allow_risky_enter_accept: bool,
+    risky_search_query: bool = False,
 ) -> CandidatePromptPolicy:
     low_confidence = candidates[0].confidence < min_confidence
     risky_reusable_cache_hit = cache_reusable and _reusable_cache_hit_looks_risky(item, candidates, min_confidence)
     policy = selection_policy.build_candidate_prompt_policy(
         low_confidence=low_confidence,
         risky_reusable_cache_hit=risky_reusable_cache_hit,
+        risky_search_query=risky_search_query,
         allow_risky_enter_accept=allow_risky_enter_accept,
     )
     return CandidatePromptPolicy(
         low_confidence=policy.low_confidence,
         risky_reusable_cache_hit=policy.risky_reusable_cache_hit,
+        risky_search_query=policy.risky_search_query,
         require_explicit_choice=policy.require_explicit_choice,
     )
 
@@ -1228,6 +1237,11 @@ def _announce_candidate_prompt_policy(
             "Choose explicitly with 1-9, or choose s/m/k/q.",
             progress,
         )
+    if policy.risky_search_query:
+        _safe_print(
+            "Refined search broadened the title. Review results explicitly with 1-9, or choose s/m/k/q.",
+            progress,
+        )
     if policy.require_explicit_choice:
         log_event(
             logger,
@@ -1244,6 +1258,7 @@ def _announce_candidate_prompt_policy(
             min_confidence=min_confidence,
             confidence=candidates[0].confidence,
             cache_scope=media_type,
+            risky_search_query=policy.risky_search_query,
         )
 
 
@@ -1282,12 +1297,12 @@ def _resolve_destination(
     return destination, changed
 
 
-def _file_panel(index: int, total: int, item: InferredItem, incoming_root: Path | None) -> Panel:
-    return prompting_ui.file_panel(index, total, item, incoming_root)
+def _file_panel(index: int, total: int, item: InferredItem, incoming_root: Path | None) -> Panel | str:
+    return prompting_ui.file_panel(index, total, item, incoming_root, plain=PLAIN_OUTPUT)
 
 
-def _album_panel(index: int, total: int, album: music_util.AlbumGroup) -> Panel:
-    return prompting_ui.album_panel(index, total, album)
+def _album_panel(index: int, total: int, album: music_util.AlbumGroup) -> Panel | str:
+    return prompting_ui.album_panel(index, total, album, plain=PLAIN_OUTPUT)
 
 
 def _print_music_candidates(candidates: list[musicbrainz.ReleaseCandidate]) -> None:
@@ -2035,6 +2050,7 @@ def _build_command(config: BuildCommandConfig) -> str:
         prune_ignore=config.prune_ignore,
         allow_risky_enter_accept=config.allow_risky_enter_accept,
         strict_safe=config.strict_safe,
+        plain_output=config.plain_output,
     )
 
 
@@ -2132,6 +2148,7 @@ def run_organise(options: OrganiseOptions) -> None:
     prune_ignore = options.prune_ignore
     allow_risky_enter_accept = options.allow_risky_enter_accept
     strict_safe = options.strict_safe
+    plain_output = options.plain_output
     yes = _coerce_bool_flag(yes, default=False)
     print_tree = _coerce_bool_flag(print_tree, default=False)
     interactive_mode = _coerce_bool_flag(interactive_mode, default=True)
@@ -2141,6 +2158,7 @@ def run_organise(options: OrganiseOptions) -> None:
     quiet = _coerce_bool_flag(quiet, default=False)
     prune_empty_dirs = _coerce_bool_flag(prune_empty_dirs, default=False)
     allow_risky_enter_accept = _coerce_bool_flag(allow_risky_enter_accept, default=False)
+    plain_output = _coerce_bool_flag(plain_output, default=False)
     if not isinstance(min_confidence, (int, float)):
         min_confidence = DEFAULT_MIN_CONFIDENCE
     if not isinstance(extensions, str):
@@ -2165,6 +2183,7 @@ def run_organise(options: OrganiseOptions) -> None:
     min_confidence = options.min_confidence if isinstance(options.min_confidence, (int, float)) else DEFAULT_MIN_CONFIDENCE
     allow_risky_enter_accept = _coerce_bool_flag(options.allow_risky_enter_accept, default=False)
     strict_safe = _coerce_bool_flag(options.strict_safe, default=False)
+    plain_output = _coerce_bool_flag(options.plain_output, default=False)
 
     if mode not in {"dry-run", "apply"}:
         console.print("Invalid mode. Use dry-run or apply.")
@@ -2202,8 +2221,11 @@ def run_organise(options: OrganiseOptions) -> None:
     options.skip_reason_lines_fn = video_flow.skip_reason_lines
     options.rich_escape_fn = rich_escape
     global QUIET_OUTPUT
+    global PLAIN_OUTPUT
     previous_quiet_output = QUIET_OUTPUT
+    previous_plain_output = PLAIN_OUTPUT
     QUIET_OUTPUT = quiet and not interactive_mode
+    PLAIN_OUTPUT = plain_output
     try:
         organise_service.run_video_workflow(
             options=options,
@@ -2231,6 +2253,7 @@ def run_organise(options: OrganiseOptions) -> None:
         )
     finally:
         QUIET_OUTPUT = previous_quiet_output
+        PLAIN_OUTPUT = previous_plain_output
 
 
 @app.command()
@@ -2238,8 +2261,8 @@ def organise(
     incoming: Path = typer.Option(..., exists=True, file_okay=False, dir_okay=True, help="Folder to scan"),
     library: Path = typer.Option(..., file_okay=False, dir_okay=True, help="Library root"),
     mode: str = typer.Option("dry-run", help="dry-run or apply"),
-    move: bool = typer.Option(False, "--move", help="Move files (overrides default copy)", is_flag=True),
-    copy: bool = typer.Option(False, "--copy", help="Copy files (default behaviour for apply)", is_flag=True),
+    move: bool = typer.Option(False, "--move", help="Move files (overrides default copy)"),
+    copy: bool = typer.Option(False, "--copy", help="Copy files (default behaviour for apply)"),
     extensions: str = typer.Option(DEFAULT_EXTENSIONS, help="Comma-separated extensions"),
     min_confidence: float = typer.Option(
         DEFAULT_MIN_CONFIDENCE,
@@ -2251,24 +2274,21 @@ def organise(
         False,
         "--yes",
         help="Auto-accept unambiguous top result when confidence >= 0.90",
-        is_flag=True,
     ),
     limit: int = typer.Option(None, help="Limit number of files"),
-    print_tree: bool = typer.Option(False, "--print-tree", help="Print planned destination tree", is_flag=True),
-    interactive: bool = typer.Option(False, "--interactive", help="Force interactive mode", is_flag=True),
-    no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive prompts", is_flag=True),
+    print_tree: bool = typer.Option(False, "--print-tree", help="Print planned destination tree"),
+    interactive: bool = typer.Option(False, "--interactive", help="Force interactive mode"),
+    no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive prompts"),
     media_type: str = typer.Option("auto", "--media-type", help="Filter by media type: auto/movie/tv"),
-    no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes", is_flag=True),
-    clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running", is_flag=True),
-    offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run", is_flag=True),
-    quiet: bool = typer.Option(False, "--quiet", "--batch", help="Reduce per-file output; show errors and summary", is_flag=True),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes"),
+    clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running"),
+    offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run"),
+    quiet: bool = typer.Option(False, "--quiet", "--batch", help="Reduce per-file output; show errors and summary"),
     on_conflict: str = typer.Option("rename", "--on-conflict", help="On destination conflict: rename/skip/overwrite"),
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
-    prune_empty_dirs: bool = typer.Option(
-        False, "--prune-empty-dirs", help="Remove empty folders after move", is_flag=True
-    ),
+    prune_empty_dirs: bool = typer.Option(False, "--prune-empty-dirs", help="Remove empty folders after move"),
     prune_ignore: str = typer.Option(
         DEFAULT_PRUNE_IGNORE,
         "--prune-ignore",
@@ -2278,13 +2298,16 @@ def organise(
         False,
         "--allow-risky-enter-accept",
         help="Allow Enter to accept top match in risky candidate prompts",
-        is_flag=True,
     ),
     strict_safe: bool = typer.Option(
         False,
         "--strict-safe",
         help="Use conservative matching defaults (disable cache reuse, disable auto-accept, higher confidence floor)",
-        is_flag=True,
+    ),
+    plain_output: bool = typer.Option(
+        False,
+        "--plain-output",
+        help="Use transcript-friendly plain text output instead of Rich panels and tables",
     ),
 ) -> None:
     """Organise video files for Plex.
@@ -2304,6 +2327,7 @@ def organise(
     prune_empty_dirs = _coerce_bool_flag(prune_empty_dirs, default=False)
     allow_risky_enter_accept = _coerce_bool_flag(allow_risky_enter_accept, default=False)
     strict_safe = _coerce_bool_flag(strict_safe, default=False)
+    plain_output = _coerce_bool_flag(plain_output, default=False)
 
     if move and copy:
         console.print("Choose only one of --move or --copy.")
@@ -2340,6 +2364,7 @@ def organise(
         quiet=quiet,
         allow_risky_enter_accept=allow_risky_enter_accept,
         strict_safe=strict_safe,
+        plain_output=plain_output,
     )
     run_organise(options)
 
@@ -2349,28 +2374,25 @@ def music(
     source: Path = typer.Option(None, "--source", help="Folder containing album directories"),
     library: Path = typer.Option(None, "--library", help="Library root (will contain Music)"),
     apply: bool = typer.Option(False, "--apply/--dry-run", help="Apply changes or dry-run"),
-    copy: bool = typer.Option(False, "--copy", help="Copy files instead of moving", is_flag=True),
+    copy: bool = typer.Option(False, "--copy", help="Copy files instead of moving"),
     extensions: str = typer.Option(DEFAULT_MUSIC_EXTENSIONS, help="Comma-separated extensions"),
     verify: bool = typer.Option(True, "--verify/--no-verify", help="Verify albums via MusicBrainz"),
     keep_art: bool = typer.Option(True, "--keep-art/--no-art", help="Move/copy album artwork to cover.jpg"),
-    keep_cue: bool = typer.Option(False, "--keep-cue", help="Keep .cue sidecars", is_flag=True),
-    keep_log: bool = typer.Option(False, "--keep-log", help="Keep .log sidecars", is_flag=True),
-    offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run", is_flag=True),
-    cleanup_empty_dirs: bool = typer.Option(
-        False, "--cleanup-empty-dirs", help="Remove empty folders after move", is_flag=True
-    ),
+    keep_cue: bool = typer.Option(False, "--keep-cue", help="Keep .cue sidecars"),
+    keep_log: bool = typer.Option(False, "--keep-log", help="Keep .log sidecars"),
+    offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run"),
+    cleanup_empty_dirs: bool = typer.Option(False, "--cleanup-empty-dirs", help="Remove empty folders after move"),
     cleanup_unknown_files: bool = typer.Option(
         False,
         "--cleanup-unknown-files",
         help="When cleaning up after move, remove non-media leftover files in source album folders",
-        is_flag=True,
     ),
     cleanup_unknown_confirm_token: str = typer.Option(
         "",
         "--cleanup-unknown-confirm-token",
         help="Confirmation token required for unknown leftover deletion (use REMOVE-UNKNOWN)",
     ),
-    verbose_plan: bool = typer.Option(False, "--verbose-plan", help="Print per-track plan output", is_flag=True),
+    verbose_plan: bool = typer.Option(False, "--verbose-plan", help="Print per-track plan output"),
     plan_preview_tracks: int = typer.Option(
         0,
         "--plan-preview-tracks",

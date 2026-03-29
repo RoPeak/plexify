@@ -662,6 +662,7 @@ def movie_candidates(
     elapsed = 0.0
     fetch_time = 0.0
     total_time = None
+    query_used = search_query
     if cached and not cached.get("manual"):
         log_event_fn(
             logger,
@@ -699,6 +700,7 @@ def movie_candidates(
             has_more=False,
             cache_hit=True,
             cache_reusable=cached_key == reusable_key,
+            search_query_used=search_query,
         )
 
     if offline:
@@ -749,6 +751,7 @@ def movie_candidates(
                 total_time=0.0,
             )
         query = queries[0]
+        query_used = query
         log_event_fn(
             logger,
             "candidate_search_started",
@@ -770,6 +773,7 @@ def movie_candidates(
             attempt_results = wikidata.search(current_query, session=session, limit=10, raise_on_error=interactive)
             elapsed += time.monotonic() - started
             query = current_query
+            query_used = current_query
             if attempt_results:
                 raw_results = attempt_results
                 break
@@ -786,6 +790,7 @@ def movie_candidates(
                 has_more=False,
                 search_time=elapsed,
                 total_time=total_time,
+                search_query_used=query_used,
             )
         total_time = time.monotonic() - total_started
         log_event_fn(
@@ -817,18 +822,41 @@ def movie_candidates(
         raw_results = sorted(raw_results, key=_provisional_confidence, reverse=True)
     idx = offset
     fetch_started = time.monotonic()
+    entity_cache_updated = False
     while idx < len(raw_results) and len(results) < limit:
         cand = raw_results[idx]
         idx += 1
         if movie_entity_cache is not None and cand.qid in movie_entity_cache:
             film = movie_entity_cache[cand.qid]
         else:
-            film = wikidata.fetch_entity(cand.qid, session=session)
+            cache_key = f"wikidata-film:{cand.qid}"
+            cached_entity = cache.get_entity(cache_key)
+            if isinstance(cached_entity, dict):
+                title = cached_entity.get("title")
+                year = cached_entity.get("year")
+                is_film = cached_entity.get("is_film")
+                if isinstance(title, str) and isinstance(is_film, bool):
+                    film = wikidata.WikidataFilm(qid=cand.qid, title=title, year=year, is_film=is_film)
+                else:
+                    cached_entity = None
+            if not isinstance(cached_entity, dict):
+                film = wikidata.fetch_entity(cand.qid, session=session)
+                cache.set_entity(
+                    cache_key,
+                    {
+                        "title": film.title,
+                        "year": film.year,
+                        "is_film": film.is_film,
+                    },
+                )
+                entity_cache_updated = True
             if movie_entity_cache is not None:
                 movie_entity_cache[cand.qid] = film
         if not film.is_film:
             continue
         results.append(movie_candidate_from_film_fn(item, film, description=cand.description))
+    if entity_cache_updated:
+        cache.save_with_status()
     fetch_time = time.monotonic() - fetch_started
     results.sort(key=lambda cand: (-cand.confidence, year_distance_fn(item.year, cand.year)))
     has_more = idx < len(raw_results)
@@ -851,4 +879,5 @@ def movie_candidates(
         search_time=elapsed,
         fetch_time=fetch_time,
         total_time=total_time,
+        search_query_used=query_used,
     )

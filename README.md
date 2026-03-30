@@ -9,7 +9,7 @@ Plexify is a CLI that organises movie and TV files into a Plex-friendly folder s
 ## Requirements
 
 - Python 3.10+
-- Windows tested; macOS/Linux should work with the same commands
+- Windows and Linux tested in CI
 
 ## Installation
 
@@ -18,6 +18,13 @@ From the repository root:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pip install -e .[dev]
+```
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements.txt
 python -m pip install -e .[dev]
 ```
@@ -52,6 +59,10 @@ Organise (dry run):
 
 ```powershell
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --mode dry-run
+```
+
+```bash
+python -m plexify.cli organise --incoming "/mnt/media/_Incoming" --library "/mnt/media" --mode dry-run
 ```
 
 Organise (apply, copy):
@@ -145,6 +156,18 @@ Offline mode:
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --offline
 python -m plexify.cli music --source "D:\Rips" --library "D:\Media" --offline
 ```
+
+Platform override (optional, auto by default):
+
+```powershell
+python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --platform windows
+```
+
+```bash
+python -m plexify.cli organise --incoming "/mnt/media/_Incoming" --library "/mnt/media" --platform linux
+```
+
+You can also set `PLEXIFY_PLATFORM=windows|linux|auto` for the session. Command-line `--platform` takes precedence.
 
 Offline behaviour:
 

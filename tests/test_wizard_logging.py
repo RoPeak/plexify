@@ -22,10 +22,11 @@ def test_wizard_prompts_logging_and_passes_to_video_flow(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "_prompt_choice_loop", _fake_choice_loop)
 
-    def _fake_wizard_video(*, log_level: str, log_format: str, log_file: Path | None) -> None:
+    def _fake_wizard_video(*, log_level: str, log_format: str, log_file: Path | None, platform: str = "auto") -> None:
         captured["log_level"] = log_level
         captured["log_format"] = log_format
         captured["log_file"] = log_file
+        captured["platform"] = platform
 
     monkeypatch.setattr(cli, "_wizard_video", _fake_wizard_video)
     monkeypatch.setattr(cli, "_wizard_music", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected music")))
@@ -35,6 +36,7 @@ def test_wizard_prompts_logging_and_passes_to_video_flow(monkeypatch) -> None:
     assert captured["log_level"] == "DEBUG"
     assert captured["log_format"] == "json"
     assert captured["log_file"] == Path(".plexify/custom.log")
+    assert captured["platform"] == "auto"
 
 
 def test_wizard_video_passes_safe_defaults_to_runtime_organise(monkeypatch) -> None:
@@ -167,10 +169,11 @@ def test_wizard_keeps_log_file_none_when_not_enabled(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "_prompt_choice_loop", _fake_choice_loop)
 
-    def _fake_wizard_video(*, log_level: str, log_format: str, log_file: Path | None) -> None:
+    def _fake_wizard_video(*, log_level: str, log_format: str, log_file: Path | None, platform: str = "auto") -> None:
         captured["log_level"] = log_level
         captured["log_format"] = log_format
         captured["log_file"] = log_file
+        captured["platform"] = platform
 
     monkeypatch.setattr(cli, "_wizard_video", _fake_wizard_video)
     monkeypatch.setattr(cli, "_wizard_music", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected music")))
@@ -180,3 +183,4 @@ def test_wizard_keeps_log_file_none_when_not_enabled(monkeypatch) -> None:
     assert captured["log_level"] == "INFO"
     assert captured["log_format"] == "text"
     assert captured["log_file"] is None
+    assert captured["platform"] == "auto"

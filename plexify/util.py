@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .logging_config import get_logger
+from .runtime_platform import path_lookup_key, resolve_platform
 
 WINDOWS_INVALID = r'<>"/\\|?*'
 NOISE_TOKENS = {
@@ -297,8 +298,9 @@ def unique_path(path: Path) -> Path:
         counter += 1
 
 
-def unique_plan_path(path: Path, planned: dict[str, int]) -> tuple[Path, bool]:
-    key = str(path).lower()
+def unique_plan_path(path: Path, planned: dict[str, int], *, platform: str = "auto") -> tuple[Path, bool]:
+    context = resolve_platform(platform)
+    key = path_lookup_key(path, platform=context.effective_platform)
     if key not in planned:
         planned[key] = 1
         return path, False

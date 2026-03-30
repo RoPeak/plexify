@@ -44,10 +44,20 @@ def test_overlap_case_insensitive() -> None:
     left = Path("C:\\Temp\\Incoming")
     right = Path("c:\\temp\\incoming")
     with pytest.raises(PathOverlapError):
-        ensure_non_overlapping_paths(left, right)
-    ok, reason, suggestion = validate_non_overlapping(left, right)
+        ensure_non_overlapping_paths(left, right, platform="windows")
+    ok, reason, suggestion = validate_non_overlapping(left, right, platform="windows")
     assert ok is False
     assert reason
+
+
+def test_overlap_case_sensitive_linux_paths_do_not_overlap() -> None:
+    left = Path("/Media/Incoming")
+    right = Path("/media/incoming")
+    ensure_non_overlapping_paths(left, right, platform="linux")
+    ok, reason, suggestion = validate_non_overlapping(left, right, platform="linux")
+    assert ok is True
+    assert reason == ""
+    assert suggestion is None
 
 
 def test_non_overlapping_paths_ok(tmp_path: Path) -> None:

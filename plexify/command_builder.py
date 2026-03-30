@@ -4,10 +4,13 @@ import os
 import shlex
 from pathlib import Path
 
+from .runtime_platform import resolve_platform
 
-def quote_cli_arg(value: str) -> str:
+
+def quote_cli_arg(value: str, *, platform: str = "auto") -> str:
     # PowerShell single-quoted strings escape embedded apostrophes by doubling.
-    if os.name == "nt":
+    context = resolve_platform(platform, env=os.environ)
+    if context.effective_platform == "windows":
         return "'" + value.replace("'", "''") + "'"
     return shlex.quote(value)
 
@@ -38,11 +41,12 @@ def build_organise_command(
     allow_risky_enter_accept: bool = False,
     strict_safe: bool = False,
     plain_output: bool = False,
+    platform: str = "auto",
 ) -> str:
     parts = [
         "python -m plexify.cli organise",
-        f"--incoming {quote_cli_arg(str(incoming))}",
-        f"--library {quote_cli_arg(str(library))}",
+        f"--incoming {quote_cli_arg(str(incoming), platform=platform)}",
+        f"--library {quote_cli_arg(str(library), platform=platform)}",
     ]
     if mode != "dry-run":
         parts.append(f"--mode {mode}")
@@ -51,7 +55,7 @@ def build_organise_command(
     if print_tree:
         parts.append("--print-tree")
     if extensions != default_extensions:
-        parts.append(f"--extensions {quote_cli_arg(','.join(extensions))}")
+        parts.append(f"--extensions {quote_cli_arg(','.join(extensions), platform=platform)}")
     if min_confidence != default_min_confidence:
         parts.append(f"--min-confidence {min_confidence}")
     if limit is not None:
@@ -63,9 +67,9 @@ def build_organise_command(
     if no_cache:
         parts.append("--no-cache")
     if cache_file is not None:
-        parts.append(f"--cache {quote_cli_arg(str(cache_file))}")
+        parts.append(f"--cache {quote_cli_arg(str(cache_file), platform=platform)}")
     if report is not None:
-        parts.append(f"--report {quote_cli_arg(str(report))}")
+        parts.append(f"--report {quote_cli_arg(str(report), platform=platform)}")
     if clear_cache:
         parts.append("--clear-cache")
     if on_conflict != "rename":
@@ -73,7 +77,9 @@ def build_organise_command(
     if prune_empty_dirs:
         parts.append("--prune-empty-dirs")
     if prune_ignore and prune_ignore != "Thumbs.db,desktop.ini,.DS_Store":
-        parts.append(f"--prune-ignore {quote_cli_arg(prune_ignore)}")
+        parts.append(f"--prune-ignore {quote_cli_arg(prune_ignore, platform=platform)}")
+    if platform != "auto":
+        parts.append(f"--platform {platform}")
     if quiet:
         parts.append("--quiet")
     if allow_risky_enter_accept:

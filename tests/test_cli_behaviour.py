@@ -2867,7 +2867,7 @@ def test_tv_long_path_collision_rename_stays_stable(monkeypatch, tmp_path: Path)
     path.write_text("x", encoding="utf-8")
     item = InferredItem(path=path, media_type="tv", title="Show", year=2010, season=1, episode=2, episode_title=None)
     cache = Cache(tmp_path / "cache.json")
-    planned = {str(long_destination).lower(): 1}
+    planned = {cli._path_lookup_key(long_destination): 1}
 
     plan, _collision = cli._process_item(
         item=item,

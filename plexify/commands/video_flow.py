@@ -161,6 +161,7 @@ def plan_items(
     history_entry_cls: Any,
     plan_stats_cls: Any,
     quiet_output: bool,
+    path_lookup_key_fn: Any | None = None,
 ) -> tuple[list[Any], list[str], Any]:
     cache_store: Cache = Cache(cache_path) if use_cache else NullCache()
     exts = parse_extensions_fn(extensions)
@@ -312,7 +313,10 @@ def plan_items(
                                     plans.remove(entry.plan)
                                 except ValueError:
                                     pass
-                            key = str(entry.plan.destination).lower()
+                            if path_lookup_key_fn is not None:
+                                key = path_lookup_key_fn(entry.plan.destination)
+                            else:
+                                key = str(entry.plan.destination).lower()
                             if key in planned:
                                 if planned[key] <= 1:
                                     planned.pop(key, None)

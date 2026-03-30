@@ -223,6 +223,8 @@ def resolve_destination(
     destination: Path,
     on_conflict: str,
     planned: dict[str, int] | None,
+    *,
+    platform: str = "auto",
 ) -> tuple[Path | None, bool]:
     def _path_exists_safe(path: Path) -> bool:
         try:
@@ -239,7 +241,7 @@ def resolve_destination(
             changed = True
     if planned is None:
         planned = {}
-    destination, planned_changed = unique_plan_path(destination, planned)
+    destination, planned_changed = unique_plan_path(destination, planned, platform=platform)
     return destination, changed or planned_changed
 
 

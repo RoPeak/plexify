@@ -72,12 +72,23 @@ def test_build_command_escapes_apostrophes_for_windows_shells() -> None:
         prune_empty_dirs=False,
         quiet=False,
         prune_ignore=cli.DEFAULT_PRUNE_IGNORE,
+        platform="windows",
     )
 
     command = cli._build_command(config)
-    incoming_quoted = quote_cli_arg(str(Path("C:/Ronan's Incoming")))
+    incoming_quoted = quote_cli_arg(str(Path("C:/Ronan's Incoming")), platform="windows")
 
     assert f"--incoming {incoming_quoted}" in command
+
+
+def test_quote_cli_arg_windows_mode() -> None:
+    quoted = quote_cli_arg("C:/Ronan's Incoming", platform="windows")
+    assert quoted == "'C:/Ronan''s Incoming'"
+
+
+def test_quote_cli_arg_linux_mode() -> None:
+    quoted = quote_cli_arg("/mnt/media/Ronan's Incoming", platform="linux")
+    assert quoted == "'/mnt/media/Ronan'\"'\"'s Incoming'"
 
 
 def test_build_command_includes_allow_risky_enter_accept_flag() -> None:
@@ -165,3 +176,33 @@ def test_build_command_includes_plain_output_flag() -> None:
 
     command = cli._build_command(config)
     assert "--plain-output" in command
+
+
+def test_build_command_includes_platform_override() -> None:
+    config = cli.BuildCommandConfig(
+        incoming=Path("/incoming"),
+        library=Path("/library"),
+        media_type="auto",
+        mode="dry-run",
+        copy_mode=True,
+        extensions=cli.DEFAULT_EXTENSIONS_LIST,
+        min_confidence=cli.DEFAULT_MIN_CONFIDENCE,
+        limit=None,
+        interactive=True,
+        print_tree=False,
+        show_enrichment=False,
+        yes=False,
+        no_cache=False,
+        cache_file=None,
+        clear_cache=False,
+        report=None,
+        on_conflict="rename",
+        prune_empty_dirs=False,
+        quiet=False,
+        prune_ignore=cli.DEFAULT_PRUNE_IGNORE,
+        plain_output=False,
+        platform="linux",
+    )
+
+    command = cli._build_command(config)
+    assert "--platform linux" in command

@@ -53,6 +53,7 @@ def run_video_workflow(
     allow_risky_enter_accept = options.allow_risky_enter_accept
     strict_safe = options.strict_safe
     plain_output = options.plain_output
+    platform = getattr(options, "platform", "auto")
     run_id = options.run_id
 
     ignored_prune_files = parse_prune_ignore_fn(prune_ignore)
@@ -195,6 +196,7 @@ def run_video_workflow(
             allow_risky_enter_accept=allow_risky_enter_accept,
             strict_safe=strict_safe,
             plain_output=plain_output,
+            platform=platform,
         )
         console.print("Apply command:")
         console.print(build_command_fn(apply_config))

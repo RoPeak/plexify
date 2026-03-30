@@ -45,6 +45,12 @@ from .tv_episode_cache import EpisodeCache
 from .undo import undo_report
 from .ui import format_path, rich_escape
 from . import ui_services
+from .runtime_platform import (
+    PLEXIFY_PLATFORM_ENV,
+    detect_runtime_platform,
+    path_lookup_key as runtime_path_lookup_key,
+    resolve_platform,
+)
 from .cache_policy import (
     cache_entry_compatible,
     cache_entry_confirmed_or_auto,
@@ -80,6 +86,7 @@ logger = get_logger(__name__)
 COMPLETION_ENABLED = True
 QUIET_OUTPUT = False
 PLAIN_OUTPUT = False
+CURRENT_EFFECTIVE_PLATFORM = detect_runtime_platform()
 _cache_save_warning_shown = False
 DEFAULT_EXTENSIONS = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
 DEFAULT_EXTENSIONS_LIST = [ext.strip() for ext in DEFAULT_EXTENSIONS.split(",") if ext.strip()]
@@ -249,6 +256,7 @@ class BuildCommandConfig:
     allow_risky_enter_accept: bool = False
     strict_safe: bool = False
     plain_output: bool = False
+    platform: str = "auto"
 
 
 @dataclass
@@ -279,6 +287,7 @@ class OrganiseOptions:
     allow_risky_enter_accept: bool = False
     strict_safe: bool = False
     plain_output: bool = False
+    platform: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -309,6 +318,19 @@ class CandidatePromptPolicy:
 
 class BackRequested(Exception):
     pass
+
+
+def _resolve_platform_context(platform: str | None) -> tuple[str, str, str | None]:
+    try:
+        context = resolve_platform(platform, env=os.environ)
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=2) from exc
+    return context.requested_platform, context.effective_platform, context.override_source
+
+
+def _path_lookup_key(path: Path) -> str:
+    return runtime_path_lookup_key(path, platform=CURRENT_EFFECTIVE_PLATFORM)
 
 
 def _console_for(progress: Progress | None) -> Console:
@@ -1295,9 +1317,16 @@ def _resolve_destination(
     on_conflict: str,
     planned: dict[str, int] | None,
     progress: Progress | None,
+    platform: str | None = None,
 ) -> tuple[Path | None, bool]:
     original_destination = destination
-    destination, changed = ui_services.resolve_destination(destination, on_conflict, planned)
+    active_platform = platform or CURRENT_EFFECTIVE_PLATFORM
+    destination, changed = ui_services.resolve_destination(
+        destination,
+        on_conflict,
+        planned,
+        platform=active_platform,
+    )
     if destination is None and on_conflict == "skip":
         _safe_print(f"Skipping due to existing destination: {format_path(original_destination)}", progress)
     return destination, changed
@@ -2028,6 +2057,7 @@ def _plan_items(
         history_entry_cls=HistoryEntry,
         plan_stats_cls=PlanStats,
         quiet_output=QUIET_OUTPUT,
+        path_lookup_key_fn=_path_lookup_key,
     )
 
 
@@ -2057,6 +2087,7 @@ def _build_command(config: BuildCommandConfig) -> str:
         allow_risky_enter_accept=config.allow_risky_enter_accept,
         strict_safe=config.strict_safe,
         plain_output=config.plain_output,
+        platform=config.platform,
     )
 
 
@@ -2155,6 +2186,7 @@ def run_organise(options: OrganiseOptions) -> None:
     allow_risky_enter_accept = options.allow_risky_enter_accept
     strict_safe = options.strict_safe
     plain_output = options.plain_output
+    platform = options.platform
     yes = _coerce_bool_flag(yes, default=False)
     print_tree = _coerce_bool_flag(print_tree, default=False)
     interactive_mode = _coerce_bool_flag(interactive_mode, default=True)
@@ -2169,6 +2201,7 @@ def run_organise(options: OrganiseOptions) -> None:
         min_confidence = DEFAULT_MIN_CONFIDENCE
     if not isinstance(extensions, str):
         extensions = DEFAULT_EXTENSIONS
+    requested_platform, effective_platform, platform_override_source = _resolve_platform_context(platform)
     global _cache_save_warning_shown
     _cache_save_warning_shown = False
     _initialise_logging(log_level, log_format, log_file)
@@ -2181,6 +2214,10 @@ def run_organise(options: OrganiseOptions) -> None:
         incoming=incoming,
         library=library,
         mode=mode,
+        platform=requested_platform,
+        effective_platform=effective_platform,
+        detected_platform=detect_runtime_platform(),
+        platform_override_source=platform_override_source,
     )
 
     _apply_strict_safe_policy(options)
@@ -2204,7 +2241,13 @@ def run_organise(options: OrganiseOptions) -> None:
         console.print("Strict-safe mode enabled: cache disabled, auto-accept disabled, confidence floor set to 0.95.")
 
     try:
-        ensure_non_overlapping_paths(incoming, library, label_source="Incoming", label_library="Library")
+        ensure_non_overlapping_paths(
+            incoming,
+            library,
+            label_source="Incoming",
+            label_library="Library",
+            platform=effective_platform,
+        )
     except PathOverlapError as exc:
         _print_overlap_error(exc)
         raise typer.Exit(code=2)
@@ -2228,10 +2271,13 @@ def run_organise(options: OrganiseOptions) -> None:
     options.rich_escape_fn = rich_escape
     global QUIET_OUTPUT
     global PLAIN_OUTPUT
+    global CURRENT_EFFECTIVE_PLATFORM
     previous_quiet_output = QUIET_OUTPUT
     previous_plain_output = PLAIN_OUTPUT
+    previous_effective_platform = CURRENT_EFFECTIVE_PLATFORM
     QUIET_OUTPUT = quiet and not interactive_mode
     PLAIN_OUTPUT = plain_output
+    CURRENT_EFFECTIVE_PLATFORM = effective_platform
     try:
         organise_service.run_video_workflow(
             options=options,
@@ -2260,6 +2306,7 @@ def run_organise(options: OrganiseOptions) -> None:
     finally:
         QUIET_OUTPUT = previous_quiet_output
         PLAIN_OUTPUT = previous_plain_output
+        CURRENT_EFFECTIVE_PLATFORM = previous_effective_platform
 
 
 @app.command()
@@ -2314,6 +2361,11 @@ def organise(
         False,
         "--plain-output",
         help="Use transcript-friendly plain text output instead of Rich panels and tables",
+    ),
+    platform: str = typer.Option(
+        "auto",
+        "--platform",
+        help=f"Platform mode: auto/windows/linux (env: {PLEXIFY_PLATFORM_ENV})",
     ),
 ) -> None:
     """Organise video files for Plex.
@@ -2371,6 +2423,7 @@ def organise(
         allow_risky_enter_accept=allow_risky_enter_accept,
         strict_safe=strict_safe,
         plain_output=plain_output,
+        platform=platform,
     )
     run_organise(options)
 
@@ -2410,6 +2463,11 @@ def music(
         "--mismatch-policy",
         help="Mismatch handling for MB track-count conflicts: ask, filename, filename-titles, order",
     ),
+    platform: str = typer.Option(
+        "auto",
+        "--platform",
+        help=f"Platform mode: auto/windows/linux (env: {PLEXIFY_PLATFORM_ENV})",
+    ),
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
@@ -2432,6 +2490,7 @@ def music(
     if mismatch_policy not in {"ask", "filename", "filename-titles", "order"}:
         console.print("mismatch-policy must be one of: ask, filename, filename-titles, order.")
         raise typer.Exit(code=2)
+    requested_platform, effective_platform, platform_override_source = _resolve_platform_context(platform)
     source_prompted = source is None
     library_prompted = library is None
     run_id = uuid.uuid4().hex
@@ -2443,6 +2502,10 @@ def music(
         source=source,
         library=library,
         mode="apply" if apply else "dry-run",
+        platform=requested_platform,
+        effective_platform=effective_platform,
+        detected_platform=detect_runtime_platform(),
+        platform_override_source=platform_override_source,
     )
     if offline:
         console.print("Offline mode enabled: network lookups disabled.")
@@ -2512,7 +2575,13 @@ def music(
             console.print("Cancelled. No changes were made.")
             raise typer.Exit(code=0)
     try:
-        ensure_non_overlapping_paths(source, library, label_source="Source", label_library="Library")
+        ensure_non_overlapping_paths(
+            source,
+            library,
+            label_source="Source",
+            label_library="Library",
+            platform=effective_platform,
+        )
     except PathOverlapError as exc:
         _print_overlap_error(exc)
         raise typer.Exit(code=2)
@@ -2637,7 +2706,9 @@ def music(
                     track.track_title,
                     track.ext,
                 )
-                destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                destination, _collision = _resolve_destination(
+                    destination, "rename", planned, None, platform=effective_platform
+                )
                 if destination is None:
                     continue
                 plan = MovePlan(
@@ -2661,7 +2732,9 @@ def music(
                 artwork = music_util.select_best_artwork(album.images)
                 if artwork:
                     destination = album_folder / "cover.jpg"
-                    destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                    destination, _collision = _resolve_destination(
+                        destination, "rename", planned, None, platform=effective_platform
+                    )
                     if destination is not None:
                         plans.append(
                             MovePlan(
@@ -2675,7 +2748,9 @@ def music(
             if keep_cue:
                 for cue in album.cues:
                     destination = album_folder / cue.name
-                    destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                    destination, _collision = _resolve_destination(
+                        destination, "rename", planned, None, platform=effective_platform
+                    )
                     if destination is not None:
                         plans.append(
                             MovePlan(
@@ -2689,7 +2764,9 @@ def music(
             if keep_log:
                 for log in album.logs:
                     destination = album_folder / log.name
-                    destination, _collision = _resolve_destination(destination, "rename", planned, None)
+                    destination, _collision = _resolve_destination(
+                        destination, "rename", planned, None, platform=effective_platform
+                    )
                     if destination is not None:
                         plans.append(
                             MovePlan(
@@ -3006,6 +3083,11 @@ def wizard(
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
+    platform: str = typer.Option(
+        "auto",
+        "--platform",
+        help=f"Platform mode: auto/windows/linux (env: {PLEXIFY_PLATFORM_ENV})",
+    ),
 ) -> None:
     """Run the interactive setup wizard.
 
@@ -3045,7 +3127,17 @@ def wizard(
         selected_log_file = None
 
     _initialise_logging(selected_log_level, selected_log_format, selected_log_file)
-    log_event(logger, "run_started", run_id=uuid.uuid4().hex, command="wizard")
+    requested_platform, effective_platform, platform_override_source = _resolve_platform_context(platform)
+    log_event(
+        logger,
+        "run_started",
+        run_id=uuid.uuid4().hex,
+        command="wizard",
+        platform=requested_platform,
+        effective_platform=effective_platform,
+        detected_platform=detect_runtime_platform(),
+        platform_override_source=platform_override_source,
+    )
 
     choice = _prompt_choice_loop(
         "Organise: (v)ideo or (m)usic",
@@ -3060,12 +3152,14 @@ def wizard(
             log_level=selected_log_level,
             log_format=selected_log_format,
             log_file=selected_log_file,
+            platform=requested_platform,
         )
     else:
         _wizard_video(
             log_level=selected_log_level,
             log_format=selected_log_format,
             log_file=selected_log_file,
+            platform=requested_platform,
         )
 
 
@@ -3075,6 +3169,7 @@ def _prompt_non_overlapping_paths(
     label_library: str,
     source_default: Path | None,
     library_default: Path | None,
+    platform: str = "auto",
 ) -> tuple[Path, Path]:
     return wizard_flow.prompt_non_overlapping_paths(
         label_source=label_source,
@@ -3083,7 +3178,9 @@ def _prompt_non_overlapping_paths(
         library_default=library_default,
         prompt_path_fn=_prompt_path,
         confirm_fn=_confirm,
-        validate_non_overlapping_fn=validate_non_overlapping,
+        validate_non_overlapping_fn=lambda source, library: validate_non_overlapping(
+            source, library, platform=platform
+        ),
         console=console,
         typer_module=typer,
     )
@@ -3094,6 +3191,7 @@ def _wizard_video(
     log_level: str = "INFO",
     log_format: str = "text",
     log_file: Path | None = None,
+    platform: str = "auto",
 ) -> None:
     return wizard_flow.wizard_video(
         log_level=log_level,
@@ -3121,6 +3219,7 @@ def _wizard_video(
         wizard_copy_choices=WIZARD_COPY_CHOICES,
         default_extensions=DEFAULT_EXTENSIONS,
         default_prune_ignore=DEFAULT_PRUNE_IGNORE,
+        platform=platform,
     )
 
 
@@ -3131,6 +3230,7 @@ def _wizard_music(
     log_level: str = "INFO",
     log_format: str = "text",
     log_file: Path | None = None,
+    platform: str = "auto",
 ) -> None:
     return wizard_flow.wizard_music(
         source_override=source_override,
@@ -3155,6 +3255,7 @@ def _wizard_music(
         wizard_copy_choices=WIZARD_COPY_CHOICES,
         wizard_music_mismatch_choices=WIZARD_MUSIC_MISMATCH_CHOICES,
         wizard_music_plan_output_choices=WIZARD_MUSIC_PLAN_OUTPUT_CHOICES,
+        platform=platform,
     )
 
 

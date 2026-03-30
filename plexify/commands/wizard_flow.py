@@ -183,6 +183,7 @@ def wizard_video(
     wizard_copy_choices: set[str],
     default_extensions: str,
     default_prune_ignore: str,
+    platform: str = "auto",
 ) -> None:
     console.print("This will help you organise video files into a Plex-friendly folder layout.")
     console.print("Tip: for PowerShell tab-complete paths, run organise with --incoming/--library arguments instead.")
@@ -195,6 +196,7 @@ def wizard_video(
         label_library="Library",
         source_default=incoming_default,
         library_default=library_default,
+        platform=platform,
     )
     save_wizard_prefs_fn("video", incoming, library)
 
@@ -209,6 +211,7 @@ def wizard_video(
                 log_level=log_level,
                 log_format=log_format,
                 log_file=log_file,
+                platform=platform,
             )
             return
 
@@ -307,6 +310,7 @@ def wizard_video(
         allow_risky_enter_accept=allow_risky_enter_accept,
         strict_safe=False,
         plain_output=plain_output,
+        platform=platform,
     )
     command = build_command_fn(command_config)
     console.print("Running:")
@@ -340,6 +344,7 @@ def wizard_video(
             allow_risky_enter_accept=allow_risky_enter_accept,
             strict_safe=False,
             plain_output=plain_output,
+            platform=platform,
         )
     )
 
@@ -368,6 +373,7 @@ def wizard_music(
     wizard_copy_choices: set[str],
     wizard_music_mismatch_choices: set[str],
     wizard_music_plan_output_choices: set[str],
+    platform: str = "auto",
 ) -> None:
     console.print("This will help you organise music into a Plex-friendly folder layout.")
     if completion_enabled:
@@ -383,6 +389,7 @@ def wizard_music(
         label_library="Library",
         source_default=source_default,
         library_default=library_default,
+        platform=platform,
     )
     save_wizard_prefs_fn("music", source, library)
 
@@ -391,7 +398,7 @@ def wizard_music(
     has_audio, has_video = detect_media_in_path_fn(source, audio_exts, video_exts)
     if has_video and not has_audio:
         if confirm_fn("This looks like video. Switch to video mode? [Y/n]", True, None, show_default=False):
-            wizard_video_fn(log_level=log_level, log_format=log_format, log_file=log_file)
+            wizard_video_fn(log_level=log_level, log_format=log_format, log_file=log_file, platform=platform)
             return
 
     mode = prompt_choice_loop_fn(
@@ -472,6 +479,7 @@ def wizard_music(
         verbose_plan=verbose_plan,
         plan_preview_tracks=plan_preview_tracks,
         mismatch_policy=mismatch_policy,
+        platform=platform,
         log_level=log_level,
         log_format=log_format,
         log_file=log_file,

@@ -196,6 +196,7 @@ class CandidatePage:
     cache_reusable: bool = False
     search_query_used: str | None = None
     fallback_attempts: int = 0
+    attempted_queries: list[str] | None = None
 
 
 @dataclass
@@ -1094,6 +1095,30 @@ def _prompt_search(item: InferredItem, progress: Progress | None) -> tuple[Infer
     return _with_title(item, query), _build_search_query(query, hint)
 
 
+def _format_attempted_queries(attempted_queries: list[str] | None) -> str:
+    if not attempted_queries:
+        return ""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for query in attempted_queries:
+        compact = " ".join(str(query).split()).strip()
+        if not compact:
+            continue
+        marker = compact.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        ordered.append(compact)
+    return ", ".join(ordered)
+
+
+def _announce_attempted_queries(attempted_queries: list[str] | None, progress: Progress | None = None) -> None:
+    formatted = _format_attempted_queries(attempted_queries)
+    if not formatted:
+        return
+    _safe_print(f"Already tried: {rich_escape(formatted)}", progress)
+
+
 def _record_stat(stats: PlanStats | None, outcome: str, *, reason: str | None = None) -> None:
     if stats is None:
         return
@@ -1591,7 +1616,9 @@ def _search_musicbrainz_candidates_with_retry(
 ) -> tuple[list[musicbrainz.ReleaseCandidate] | None, str, str, str]:
     search_artist = artist
     search_album = album
+    attempted_queries: list[str] = []
     while True:
+        attempted_queries.append(f"artist={search_artist} album={search_album}")
         candidates = musicbrainz.search_releases(
             search_artist,
             search_album,
@@ -1617,6 +1644,7 @@ def _search_musicbrainz_candidates_with_retry(
             return None, "fallback", search_artist, search_album
         if action == "s":
             return None, "skip", search_artist, search_album
+        _announce_attempted_queries(attempted_queries)
         search_artist = _prompt_text("Search artist", search_artist, None)
         search_album = _prompt_text("Search album", search_album, None)
 
@@ -2115,6 +2143,7 @@ def _process_item(
     media_type_overrides: dict[str, str] | None = None,
     tv_search_cache: dict[str, list[tvmaze.TVMazeShow]] | None = None,
     movie_entity_cache: dict[str, wikidata.WikidataFilm] | None = None,
+    requested_media_type: str | None = None,
 ) -> tuple[MovePlan | None, bool]:
     return video_item_service.process_video_item(
         item=item,
@@ -2140,6 +2169,7 @@ def _process_item(
         media_type_overrides=media_type_overrides,
         tv_search_cache=tv_search_cache,
         movie_entity_cache=movie_entity_cache,
+        requested_media_type=requested_media_type,
         helpers=sys.modules[__name__],
         reprocess_item_fn=_process_item,
     )

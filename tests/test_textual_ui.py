@@ -424,7 +424,7 @@ def test_textual_unresolved_preview_disables_apply(monkeypatch) -> None:
                 await pilot.pause()
                 review.query_one("#accept", Button).press()
                 review.query_one("#preview", Button).press()
-                await pilot.pause()
+                await _wait_for_widget(app, pilot, "PreviewScreen", "#apply", Button)
                 preview = app.screen
                 assert preview.query_one("#apply", Button).disabled is True
                 assert "Unresolved:" in str(preview.query_one("#preview-plans", Static).renderable)

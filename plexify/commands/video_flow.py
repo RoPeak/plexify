@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import time
 import re
@@ -18,6 +19,10 @@ from ..cache_policy import is_ambiguous_cache_title
 
 
 WIKIDATA_DESCRIPTION_YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
+
+
+def _search_timing_enabled(logger: Any) -> bool:
+    return bool(logger and hasattr(logger, "isEnabledFor") and logger.isEnabledFor(logging.DEBUG))
 
 
 def reusable_cache_hit_looks_risky(item: InferredItem, top_confidence: float, min_confidence: float) -> bool:
@@ -280,6 +285,7 @@ def plan_items(
                             media_type_overrides=media_type_overrides,
                             tv_search_cache=tv_search_cache,
                             movie_entity_cache=movie_entity_cache,
+                            requested_media_type=media_type_filter,
                         )
                         if result is None:
                             plan, collision = None, False
@@ -449,6 +455,7 @@ def tv_candidates(
     total_time = None
     query_used = search_query
     fallback_attempts = 0
+    attempted_queries: list[str] = []
     if cached:
         log_event_fn(
             logger,
@@ -527,6 +534,7 @@ def tv_candidates(
             cache_reusable=cached_key in {reusable_show_key, reusable_episode_key},
             search_query_used=search_query,
             fallback_attempts=fallback_attempts,
+            attempted_queries=attempted_queries,
         )
 
     if offline:
@@ -550,6 +558,7 @@ def tv_candidates(
             has_more=False,
             search_query_used=search_query,
             fallback_attempts=fallback_attempts,
+            attempted_queries=attempted_queries,
         )
 
     if raw_results is None:
@@ -578,6 +587,7 @@ def tv_candidates(
                 has_more=False,
                 search_query_used=search_query,
                 fallback_attempts=fallback_attempts,
+                attempted_queries=attempted_queries,
             )
         query_used = queries[0]
         total_started = time.monotonic()
@@ -585,6 +595,7 @@ def tv_candidates(
         attempts = 0
         for current_query in queries:
             attempts += 1
+            attempted_queries.append(current_query)
             cache_lookup_key = tv_search_cache_key_fn(current_query, item.year)
             cached_search = None
             if search_cache is not None and cache_lookup_key in search_cache:
@@ -674,7 +685,10 @@ def tv_candidates(
             reason = tvmaze.unavailable_reason()
             if reason:
                 safe_print_fn(_unavailable_search_message("TVMaze", reason), progress)
-            safe_print_fn(f"No candidates (api={elapsed:.2f}s).", progress)
+            if _search_timing_enabled(logger):
+                safe_print_fn(f"No candidates (api={elapsed:.2f}s).", progress)
+            else:
+                safe_print_fn("No candidates.", progress)
             return candidate_page_cls(
                 candidates=[],
                 raw_results=raw_results,
@@ -684,6 +698,7 @@ def tv_candidates(
                 total_time=total_time,
                 search_query_used=query_used,
                 fallback_attempts=fallback_attempts,
+                attempted_queries=attempted_queries,
             )
     page = raw_results[offset : offset + limit]
     for show in page:
@@ -693,11 +708,14 @@ def tv_candidates(
     has_more = next_offset < len(raw_results)
     if raw_results is not None and offset == 0:
         best = results[0].confidence if results else 0.0
-        total_text = f"{total_time:.2f}s" if total_time is not None else f"{elapsed:.2f}s"
-        safe_print_fn(
-            f"Found {len(results)} candidates (best confidence {best:.2f}, api={elapsed:.2f}s, total={total_text}).",
-            progress,
-        )
+        if _search_timing_enabled(logger):
+            total_text = f"{total_time:.2f}s" if total_time is not None else f"{elapsed:.2f}s"
+            safe_print_fn(
+                f"Found {len(results)} candidates (best confidence {best:.2f}, api={elapsed:.2f}s, total={total_text}).",
+                progress,
+            )
+        else:
+            safe_print_fn(f"Found {len(results)} candidates (best confidence {best:.2f}).", progress)
     return candidate_page_cls(
         candidates=results,
         raw_results=raw_results,
@@ -707,6 +725,7 @@ def tv_candidates(
         total_time=total_time,
         search_query_used=query_used,
         fallback_attempts=fallback_attempts,
+        attempted_queries=attempted_queries,
     )
 
 
@@ -765,6 +784,7 @@ def movie_candidates(
     fetch_time = 0.0
     total_time = None
     query_used = search_query
+    attempted_queries: list[str] = []
     if cached and not cached.get("manual"):
         log_event_fn(
             logger,
@@ -803,6 +823,7 @@ def movie_candidates(
             cache_hit=True,
             cache_reusable=cached_key == reusable_key,
             search_query_used=search_query,
+            attempted_queries=attempted_queries,
         )
 
     if offline:
@@ -819,7 +840,14 @@ def movie_candidates(
             confidence=None,
             cache_scope="movie",
         )
-        return candidate_page_cls(candidates=[], raw_results=[], next_offset=0, has_more=False)
+        return candidate_page_cls(
+            candidates=[],
+            raw_results=[],
+            next_offset=0,
+            has_more=False,
+            search_query_used=search_query,
+            attempted_queries=attempted_queries,
+        )
 
     if raw_results is None:
         fallback_queries = build_movie_fallback_queries_fn(item.title, None, item.year)
@@ -851,6 +879,7 @@ def movie_candidates(
                 has_more=False,
                 search_time=0.0,
                 total_time=0.0,
+                attempted_queries=attempted_queries,
             )
         query = queries[0]
         query_used = query
@@ -869,6 +898,7 @@ def movie_candidates(
         raw_results = []
         for current_query in queries:
             attempts += 1
+            attempted_queries.append(current_query)
             if attempts > 1:
                 safe_print_fn(f"Retrying Wikidata with simplified query: {rich_escape_fn(current_query)}", progress)
             started = time.monotonic()
@@ -884,7 +914,10 @@ def movie_candidates(
             reason = wikidata.unavailable_reason()
             if reason:
                 safe_print_fn(_unavailable_search_message("Wikidata", reason), progress)
-            safe_print_fn(f"No candidates (api={total_time:.2f}s).", progress)
+            if _search_timing_enabled(logger):
+                safe_print_fn(f"No candidates (api={total_time:.2f}s).", progress)
+            else:
+                safe_print_fn("No candidates.", progress)
             return candidate_page_cls(
                 candidates=[],
                 raw_results=raw_results,
@@ -893,6 +926,7 @@ def movie_candidates(
                 search_time=elapsed,
                 total_time=total_time,
                 search_query_used=query_used,
+                attempted_queries=attempted_queries,
             )
         total_time = time.monotonic() - total_started
         log_event_fn(
@@ -968,11 +1002,14 @@ def movie_candidates(
             total_time = elapsed + fetch_time
         else:
             total_time = total_time + fetch_time
-        safe_print_fn(
-            f"Found {len(results)} candidates (best confidence {best:.2f}, "
-            f"api={elapsed:.2f}s, fetch={fetch_time:.2f}s, total={total_time:.2f}s).",
-            progress,
-        )
+        if _search_timing_enabled(logger):
+            safe_print_fn(
+                f"Found {len(results)} candidates (best confidence {best:.2f}, "
+                f"api={elapsed:.2f}s, fetch={fetch_time:.2f}s, total={total_time:.2f}s).",
+                progress,
+            )
+        else:
+            safe_print_fn(f"Found {len(results)} candidates (best confidence {best:.2f}).", progress)
     return candidate_page_cls(
         candidates=results,
         raw_results=raw_results,
@@ -982,4 +1019,5 @@ def movie_candidates(
         fetch_time=fetch_time,
         total_time=total_time,
         search_query_used=query_used,
+        attempted_queries=attempted_queries,
     )

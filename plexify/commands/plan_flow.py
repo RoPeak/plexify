@@ -25,6 +25,7 @@ def build_movie_fallback_queries(title: str, hint: str | None, year: int | None 
     canonical = build_search_query(base_title, hint_text)
     title_variants: list[str] = [base_title]
     sequel_markers = {"chapter", "part", "volume", "vol", "episode", "tournament", "returns", "return"}
+    subtitle_boundary_tokens = {"the", "a", "an"}
 
     if ":" in base_title:
         title_variants.append(base_title.split(":", 1)[0].strip())
@@ -38,6 +39,14 @@ def build_movie_fallback_queries(title: str, hint: str | None, year: int | None 
     if stripped_suffix:
         title_variants.append(stripped_suffix)
     tokens = base_title.split()
+    normalized_tokens = [token for token in make_search_query(base_title).split() if token]
+    if ":" not in base_title and " - " not in base_title and len(normalized_tokens) >= 4:
+        for index, token in enumerate(normalized_tokens[2:], start=2):
+            if token in subtitle_boundary_tokens:
+                subtitle_prefix = " ".join(normalized_tokens[:index]).strip()
+                if subtitle_prefix:
+                    title_variants.append(subtitle_prefix)
+                break
     for index, token in enumerate(tokens[2:], start=2):
         if token.casefold() in sequel_markers:
             trimmed = " ".join(tokens[:index]).strip()

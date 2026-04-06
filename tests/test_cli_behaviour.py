@@ -615,6 +615,37 @@ def test_prompt_search_blank_query_keeps_existing_title(monkeypatch, tmp_path: P
     assert search_query == "wallace and gromit"
 
 
+def test_music_retry_announces_attempted_queries(monkeypatch) -> None:
+    prompts: list[str] = []
+    messages: list[str] = []
+    answers = iter(["r", "Artist 2", "Album 2", "s"])
+
+    monkeypatch.setattr(cli.musicbrainz, "search_releases", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli.musicbrainz, "is_available", lambda: True)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_prompt_choice_loop", lambda *args, **_kwargs: next(answers))
+    monkeypatch.setattr(
+        cli,
+        "_prompt_text",
+        lambda label, default, *_args, **_kwargs: prompts.append(f"{label}:{default}") or next(answers),
+    )
+    monkeypatch.setattr(cli, "_safe_print", lambda message, *_args, **_kwargs: messages.append(str(message)))
+
+    candidates, state, final_artist, final_album = cli._search_musicbrainz_candidates_with_retry(
+        artist="Artist 1",
+        album="Album 1",
+        year=2001,
+        session=requests.Session(),
+    )
+
+    assert candidates is None
+    assert state == "skip"
+    assert final_artist == "Artist 2"
+    assert final_album == "Album 2"
+    assert prompts == ["Search artist:Artist 1", "Search album:Album 1"]
+    assert any("Already tried: artist=Artist 1 album=Album 1" in message for message in messages)
+
+
 def test_movie_candidates_do_not_fallback_to_unknown_when_title_present(monkeypatch, tmp_path: Path) -> None:
     queries: list[str] = []
 
@@ -660,6 +691,21 @@ def test_build_movie_fallback_queries_adds_short_franchise_variant_for_two_token
     assert "divergent" in queries[1:]
 
 
+def test_build_movie_fallback_queries_adds_safe_prefix_for_subtitle_style_titles() -> None:
+    puss_queries = cli.plan_flow.build_movie_fallback_queries("Puss in Boots The Last Wish", None, None)
+    hunger_queries = cli.plan_flow.build_movie_fallback_queries(
+        "The Hunger Games The Ballad of Songbirds Snakes",
+        None,
+        None,
+    )
+
+    assert puss_queries[:2] == ["puss in boots the last wish", "puss in boots"]
+    assert hunger_queries[:2] == [
+        "the hunger games the ballad of songbirds snakes",
+        "the hunger games",
+    ]
+
+
 def test_build_tv_fallback_queries_strip_year_and_add_shorter_retry() -> None:
     queries = cli.plan_flow.build_tv_fallback_queries("Louis Theroux's Forbidden America (2022)", None, 2022)
     assert queries[0] == "louis therouxs forbidden america"
@@ -701,6 +747,55 @@ def test_movie_candidates_retry_escape_room_tournament_without_manual_search(mon
     assert "escape room" in queries[1:]
     assert page.candidates
     assert page.candidates[0].title == "Escape Room"
+
+
+def test_movie_candidates_retry_subtitle_style_titles_without_manual_search(monkeypatch, tmp_path: Path) -> None:
+    queries: list[str] = []
+
+    def _fake_search(query: str, *_args, **_kwargs):
+        queries.append(query)
+        if query.casefold() == "the hunger games":
+            return [
+                cli.wikidata.WikidataCandidate(
+                    qid="Q1",
+                    label="The Hunger Games: The Ballad of Songbirds & Snakes",
+                    description="2023 film",
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(cli.wikidata, "search", _fake_search)
+    monkeypatch.setattr(
+        cli.wikidata,
+        "fetch_entity",
+        lambda qid, *_args, **_kwargs: cli.wikidata.WikidataFilm(
+            qid=qid,
+            title="The Hunger Games: The Ballad of Songbirds & Snakes",
+            year=2023,
+            is_film=True,
+        ),
+    )
+
+    item = InferredItem(
+        path=tmp_path / "The_Hunger_Games_The_Ballad_of_Songbirds_Snakes.mkv",
+        media_type="movie",
+        title="The Hunger Games The Ballad of Songbirds Snakes",
+        year=None,
+        episode_title=None,
+    )
+    page = cli._movie_candidates(
+        item=item,
+        session=requests.Session(),
+        cache=Cache(tmp_path / "cache.json"),
+        show_cache=False,
+    )
+
+    assert queries[:2] == [
+        "the hunger games the ballad of songbirds snakes",
+        "the hunger games",
+    ]
+    assert page.candidates
+    assert page.candidates[0].title == "The Hunger Games: The Ballad of Songbirds & Snakes"
 
 
 def test_tv_candidates_retry_with_fallback_query_without_manual_search(monkeypatch, tmp_path: Path) -> None:
@@ -936,6 +1031,85 @@ def test_manual_movie_search_retry_requires_explicit_review(monkeypatch, tmp_pat
     assert len(choices) == 2
 
 
+def test_repeated_movie_search_announces_attempted_queries(monkeypatch, tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Puss_in_Boots_The_Last_Wish.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="movie", title="Puss in Boots The Last Wish", year=None, episode_title=None)
+    cache = Cache(library / ".plexify" / "cache.json")
+    candidate = cli.Candidate(
+        title="Puss in Boots: The Last Wish",
+        year=2022,
+        source="Wikidata",
+        confidence=1.0,
+        metadata={"qid": "Q1", "title": "Puss in Boots: The Last Wish", "year": 2022},
+    )
+    messages: list[str] = []
+
+    def _fake_movie_candidates(current_item: InferredItem, *_args, **kwargs) -> cli.CandidatePage:
+        query = kwargs.get("search_query")
+        if query == "puss in boots the last wish":
+            return cli.CandidatePage(
+                candidates=[],
+                raw_results=[],
+                next_offset=0,
+                has_more=False,
+                search_query_used=query,
+                attempted_queries=["puss in boots the last wish", "puss in boots"],
+            )
+        return cli.CandidatePage(
+            candidates=[candidate],
+            raw_results=None,
+            next_offset=0,
+            has_more=False,
+            search_query_used="puss in boots the last wish 2022",
+            attempted_queries=["puss in boots the last wish 2022"],
+        )
+
+    choices = iter(["s", candidate])
+    monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(
+        cli,
+        "_prompt_search",
+        lambda current_item, _progress: (
+            cli._with_title(current_item, "Puss in Boots The Last Wish"),
+            "puss in boots the last wish 2022",
+        ),
+    )
+    monkeypatch.setattr(cli, "_select_candidate", lambda *_args, **_kwargs: next(choices))
+    monkeypatch.setattr(cli, "_maybe_enrich_candidates", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cli, "_safe_print", lambda message, *_args, **_kwargs: messages.append(str(message)))
+
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=cache,
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.90,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+    )
+
+    assert plan is not None
+    assert any(
+        "Already tried: puss in boots the last wish, puss in boots" in message
+        for message in messages
+    )
+
+
 def test_manual_tv_search_retry_requires_explicit_review(monkeypatch, tmp_path: Path) -> None:
     incoming = tmp_path / "incoming"
     library = tmp_path / "library"
@@ -1015,6 +1189,76 @@ def test_manual_tv_search_retry_requires_explicit_review(monkeypatch, tmp_path: 
 
     assert plan is not None
     assert len(choices) == 2
+
+
+def test_debug_movie_search_shows_timings_and_warning_hides_them(monkeypatch, tmp_path: Path) -> None:
+    messages: list[str] = []
+    original_level = cli.logger.level
+
+    def _fake_search(query: str, *_args, **_kwargs):
+        return [cli.wikidata.WikidataCandidate(qid="Q1", label="Movie", description="2001 film")]
+
+    monkeypatch.setattr(cli.wikidata, "search", _fake_search)
+    monkeypatch.setattr(
+        cli.wikidata,
+        "fetch_entity",
+        lambda qid, *_args, **_kwargs: cli.wikidata.WikidataFilm(qid=qid, title="Movie", year=2001, is_film=True),
+    )
+    monkeypatch.setattr(cli, "_safe_print", lambda message, *_args, **_kwargs: messages.append(str(message)))
+
+    item = InferredItem(path=tmp_path / "Movie.mkv", media_type="movie", title="Movie", year=None, episode_title=None)
+
+    try:
+        cli.logger.setLevel("WARNING")
+        cli._movie_candidates(
+            item=item,
+            session=requests.Session(),
+            cache=Cache(tmp_path / "cache-warning.json"),
+            show_cache=False,
+        )
+        cli.logger.setLevel("DEBUG")
+        cli._movie_candidates(
+            item=item,
+            session=requests.Session(),
+            cache=Cache(tmp_path / "cache-debug.json"),
+            show_cache=False,
+        )
+    finally:
+        cli.logger.setLevel(original_level)
+
+    assert any("Found 1 candidates (best confidence 1.00)." in message for message in messages)
+    assert any("api=" in message and "fetch=" in message and "total=" in message for message in messages)
+
+
+def test_debug_no_candidate_messages_hide_timings_by_default(monkeypatch, tmp_path: Path) -> None:
+    messages: list[str] = []
+    original_level = cli.logger.level
+
+    monkeypatch.setattr(cli.wikidata, "search", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(cli, "_safe_print", lambda message, *_args, **_kwargs: messages.append(str(message)))
+
+    item = InferredItem(path=tmp_path / "Missing.mkv", media_type="movie", title="Missing", year=None, episode_title=None)
+
+    try:
+        cli.logger.setLevel("WARNING")
+        cli._movie_candidates(
+            item=item,
+            session=requests.Session(),
+            cache=Cache(tmp_path / "cache-warning.json"),
+            show_cache=False,
+        )
+        cli.logger.setLevel("DEBUG")
+        cli._movie_candidates(
+            item=item,
+            session=requests.Session(),
+            cache=Cache(tmp_path / "cache-debug.json"),
+            show_cache=False,
+        )
+    finally:
+        cli.logger.setLevel(original_level)
+
+    assert any(message == "No candidates." for message in messages)
+    assert any(message.startswith("No candidates (api=") for message in messages)
 
 
 def test_risky_broadened_tv_query_does_not_promote_folder_cache(monkeypatch, tmp_path: Path) -> None:
@@ -3234,6 +3478,49 @@ def test_movie_to_tv_switch_persists_for_same_folder(monkeypatch, tmp_path: Path
     assert plan_two.media_type == "tv"
     assert movie_calls["count"] == 1
     assert sum("Switch to TV search?" in prompt for prompt in confirm_prompts) == 1
+
+
+def test_explicit_movie_mode_skips_switch_to_tv_prompt(monkeypatch, tmp_path: Path) -> None:
+    confirm_prompts: list[str] = []
+
+    monkeypatch.setattr(
+        cli,
+        "_movie_candidates",
+        lambda *_args, **_kwargs: cli.CandidatePage(candidates=[], raw_results=[], next_offset=0, has_more=False),
+    )
+    monkeypatch.setattr(cli, "_confirm", lambda prompt, *_args, **_kwargs: confirm_prompts.append(prompt) or False)
+    monkeypatch.setattr(cli, "_select_candidate", lambda *_args, **_kwargs: "k")
+
+    incoming = tmp_path / "incoming"
+    library = tmp_path / "library"
+    incoming.mkdir()
+    library.mkdir()
+    path = incoming / "Movie.mkv"
+    path.write_text("x", encoding="utf-8")
+
+    item = InferredItem(path=path, media_type="movie", title="Movie", year=None, episode_title=None)
+    plan, _collision = cli._process_item(
+        item=item,
+        library=library,
+        cache=Cache(tmp_path / "cache.json"),
+        mode="dry-run",
+        copy_mode=True,
+        interactive=True,
+        auto_accept=True,
+        min_confidence=0.55,
+        session_tv=requests.Session(),
+        session_wd=requests.Session(),
+        episode_cache=EpisodeCache(),
+        progress=None,
+        show_cache=False,
+        incoming_root=incoming,
+        planned={},
+        on_conflict="rename",
+        requested_media_type="movie",
+    )
+
+    assert plan is None
+    assert all("Switch to TV search?" not in prompt for prompt in confirm_prompts)
 
 
 def test_organise_apply_overwrite_requires_extra_token(monkeypatch, tmp_path: Path) -> None:

@@ -13,12 +13,39 @@ class _CandidateLoopState:
     item: Any
     reference_title: str
     search_query: str
+    query_history: list[str]
     page: Any
     candidates: list[Any]
     raw_results: Any
     next_offset: int
     has_more: bool
     search_refined: bool = False
+
+
+def _merge_query_history(*query_groups: list[str] | None) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for group in query_groups:
+        if not group:
+            continue
+        for query in group:
+            compact = " ".join(str(query).split()).strip()
+            if not compact:
+                continue
+            marker = compact.casefold()
+            if marker in seen:
+                continue
+            seen.add(marker)
+            merged.append(compact)
+    return merged
+
+
+def _state_query_history(state: _CandidateLoopState, page: Any) -> list[str]:
+    return _merge_query_history(state.query_history, getattr(page, "attempted_queries", None))
+
+
+def _announce_query_history(state: _CandidateLoopState, helpers: Any, progress: Progress | None) -> None:
+    helpers._announce_attempted_queries(state.query_history, progress)
 
 
 def _prepare_item_context(
@@ -238,6 +265,7 @@ def _reload_tv_loop_state(
         item=state.item,
         reference_title=state.reference_title,
         search_query=page.search_query_used or state.search_query,
+        query_history=_state_query_history(state, page),
         page=page,
         candidates=candidates,
         raw_results=raw_results_tv,
@@ -285,6 +313,7 @@ def _advance_tv_loop_state(
         item=state.item,
         reference_title=state.reference_title,
         search_query=page.search_query_used or state.search_query,
+        query_history=_state_query_history(state, page),
         page=page,
         candidates=candidates,
         raw_results=raw_results_tv,
@@ -328,6 +357,7 @@ def _reload_movie_loop_state(
         item=state.item,
         reference_title=state.reference_title,
         search_query=page.search_query_used or state.search_query,
+        query_history=_state_query_history(state, page),
         page=page,
         candidates=candidates,
         raw_results=raw_results_movie,
@@ -374,6 +404,7 @@ def _advance_movie_loop_state(
         item=state.item,
         reference_title=state.reference_title,
         search_query=page.search_query_used or state.search_query,
+        query_history=_state_query_history(state, page),
         page=page,
         candidates=candidates,
         raw_results=raw_results_movie,
@@ -412,6 +443,7 @@ def _reprocess_with_media_type(
     cache_override_key: str | None,
     helpers: Any,
     reprocess_item_fn: Any,
+    requested_media_type: str | None,
 ) -> tuple[Any | None, bool]:
     helpers._persist_media_type_override(cache, cache_override_key, new_media_type, media_type_overrides, progress)
     return reprocess_item_fn(
@@ -438,6 +470,7 @@ def _reprocess_with_media_type(
         media_type_overrides=media_type_overrides,
         tv_search_cache=tv_search_cache,
         movie_entity_cache=movie_entity_cache,
+        requested_media_type=requested_media_type,
     )
 
 
@@ -468,6 +501,7 @@ def _handle_tv_no_candidates(
     movie_entity_cache: dict[str, Any] | None,
     cache_key: str,
     override_key: str | None,
+    requested_media_type: str | None,
     helpers: Any,
     reprocess_item_fn: Any,
 ) -> tuple[str, Any]:
@@ -515,6 +549,7 @@ def _handle_tv_no_candidates(
             cache_override_key=override_key,
             helpers=helpers,
             reprocess_item_fn=reprocess_item_fn,
+            requested_media_type=requested_media_type,
         )
     helpers._safe_print(f"No candidates found for {helpers.rich_escape(state.item.title)}.", progress)
     choice = helpers._select_candidate(
@@ -528,12 +563,14 @@ def _handle_tv_no_candidates(
         item=state.item,
     )
     if choice == "s":
+        _announce_query_history(state, helpers, progress)
         item, search_query = helpers._prompt_search(state.item, progress)
         new_state = _reload_tv_loop_state(
             state=_CandidateLoopState(
                 item=item,
                 reference_title=state.reference_title,
                 search_query=search_query,
+                query_history=state.query_history,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
@@ -561,6 +598,7 @@ def _handle_tv_no_candidates(
                 item=helpers._with_title(state.item, query),
                 reference_title=state.reference_title,
                 search_query=helpers._build_search_query(query, None),
+                query_history=state.query_history,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
@@ -659,12 +697,14 @@ def _handle_tv_candidate_choice(
             )
         return "selected", (choice, "confirmed")
     if choice == "s":
+        _announce_query_history(state, helpers, progress)
         item, search_query = helpers._prompt_search(state.item, progress)
         new_state = _reload_tv_loop_state(
             state=_CandidateLoopState(
                 item=item,
                 reference_title=state.reference_title,
                 search_query=search_query,
+                query_history=state.query_history,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
@@ -692,6 +732,7 @@ def _handle_tv_candidate_choice(
                 item=helpers._with_title(state.item, query),
                 reference_title=state.reference_title,
                 search_query=helpers._build_search_query(query, None),
+                query_history=state.query_history,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
@@ -764,6 +805,7 @@ def _resolve_movie_manual_fallback(
                 item=helpers._with_title(state.item, manual_fallback.title),
                 reference_title=state.reference_title,
                 search_query=helpers._build_search_query(manual_fallback.title, manual_hint),
+                query_history=state.query_history,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
@@ -819,6 +861,7 @@ def _handle_movie_no_candidates(
     reprocess_item_fn: Any,
     manual_fallback: Any | None,
     manual_hint: str,
+    requested_media_type: str | None,
 ) -> tuple[str, Any, Any, str]:
     if not interactive:
         if offline:
@@ -835,7 +878,12 @@ def _handle_movie_no_candidates(
             reason=helpers.selection_policy.no_match_skip_reason(offline=offline),
         )
         return "return", (None, False), manual_fallback, manual_hint
-    if helpers._confirm("No movie candidates. Switch to TV search? [y/N]", False, progress, show_default=False):
+    if requested_media_type != "movie" and helpers._confirm(
+        "No movie candidates. Switch to TV search? [y/N]",
+        False,
+        progress,
+        show_default=False,
+    ):
         result = _reprocess_with_media_type(
             new_media_type="tv",
             item=state.item,
@@ -864,6 +912,7 @@ def _handle_movie_no_candidates(
             cache_override_key=override_key,
             helpers=helpers,
             reprocess_item_fn=reprocess_item_fn,
+            requested_media_type=requested_media_type,
         )
         return "return", result, manual_fallback, manual_hint
     helpers._safe_print(f"No candidates found for {helpers.rich_escape(state.item.title)}.", progress)
@@ -878,12 +927,14 @@ def _handle_movie_no_candidates(
         item=state.item,
     )
     if choice == "s":
+        _announce_query_history(state, helpers, progress)
         item, search_query = helpers._prompt_search(state.item, progress)
         new_state = _reload_movie_loop_state(
             state=_CandidateLoopState(
                 item=item,
                 reference_title=state.reference_title,
                 search_query=search_query,
+                query_history=state.query_history,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
@@ -912,6 +963,7 @@ def _handle_movie_no_candidates(
                 item=helpers._with_title(state.item, query),
                 reference_title=state.reference_title,
                 search_query=helpers._build_search_query(query, None),
+                query_history=state.query_history,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
@@ -1026,12 +1078,14 @@ def _handle_movie_candidate_choice(
             )
         return "selected", (choice, "confirmed"), manual_fallback, manual_hint
     if choice == "s":
+        _announce_query_history(state, helpers, progress)
         item, search_query = helpers._prompt_search(state.item, progress)
         new_state = _reload_movie_loop_state(
             state=_CandidateLoopState(
                 item=item,
                 reference_title=state.reference_title,
                 search_query=search_query,
+                query_history=state.query_history,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
@@ -1060,6 +1114,7 @@ def _handle_movie_candidate_choice(
                 item=helpers._with_title(state.item, query),
                 reference_title=state.reference_title,
                 search_query=helpers._build_search_query(query, None),
+                query_history=state.query_history,
                 page=state.page,
                 candidates=state.candidates,
                 raw_results=state.raw_results,
@@ -1578,6 +1633,7 @@ def process_video_item(
     media_type_overrides: dict[str, str] | None = None,
     tv_search_cache: dict[str, list[Any]] | None = None,
     movie_entity_cache: dict[str, Any] | None = None,
+    requested_media_type: str | None = None,
     helpers: Any = None,
     reprocess_item_fn: Any = None,
 ) -> tuple[Any | None, bool]:
@@ -1606,6 +1662,7 @@ def process_video_item(
             media_type_overrides=media_type_overrides,
             tv_search_cache=tv_search_cache,
             movie_entity_cache=movie_entity_cache,
+            requested_media_type=requested_media_type,
             helpers=helpers,
             reprocess_item_fn=reprocess_item_fn,
         )
@@ -1633,6 +1690,7 @@ def process_video_item(
         media_type_overrides=media_type_overrides,
         tv_search_cache=tv_search_cache,
         movie_entity_cache=movie_entity_cache,
+        requested_media_type=requested_media_type,
         helpers=helpers,
         reprocess_item_fn=reprocess_item_fn,
     )
@@ -1662,6 +1720,7 @@ def process_tv_item(
     media_type_overrides: dict[str, str] | None = None,
     tv_search_cache: dict[str, list[Any]] | None = None,
     movie_entity_cache: dict[str, Any] | None = None,
+    requested_media_type: str | None = None,
     helpers: Any = None,
     reprocess_item_fn: Any = None,
 ) -> tuple[Any | None, bool]:
@@ -1723,6 +1782,7 @@ def process_tv_item(
             item=item,
             reference_title=item.title,
             search_query=page.search_query_used or search_query,
+            query_history=_merge_query_history(page.attempted_queries),
             page=page,
             candidates=candidates,
             raw_results=raw_results_tv,
@@ -1760,6 +1820,7 @@ def process_tv_item(
                     movie_entity_cache=movie_entity_cache,
                     cache_key=cache_key,
                     override_key=override_key,
+                    requested_media_type=requested_media_type,
                     helpers=helpers,
                     reprocess_item_fn=reprocess_item_fn,
                 )
@@ -1872,6 +1933,7 @@ def process_movie_item(
     media_type_overrides: dict[str, str] | None = None,
     tv_search_cache: dict[str, list[Any]] | None = None,
     movie_entity_cache: dict[str, Any] | None = None,
+    requested_media_type: str | None = None,
     helpers: Any = None,
     reprocess_item_fn: Any = None,
 ) -> tuple[Any | None, bool]:
@@ -1908,6 +1970,7 @@ def process_movie_item(
             media_type_overrides=media_type_overrides,
             tv_search_cache=tv_search_cache,
             movie_entity_cache=movie_entity_cache,
+            requested_media_type=requested_media_type,
             helpers=helpers,
             reprocess_item_fn=reprocess_item_fn,
         )
@@ -1951,6 +2014,7 @@ def process_movie_item(
         item=item,
         reference_title=item.title,
         search_query=page.search_query_used or search_query,
+        query_history=_merge_query_history(page.attempted_queries),
         page=page,
         candidates=candidates,
         raw_results=raw_results_movie,
@@ -1994,6 +2058,7 @@ def process_movie_item(
                 reprocess_item_fn=reprocess_item_fn,
                 manual_fallback=manual_fallback,
                 manual_hint=manual_hint,
+                requested_media_type=requested_media_type,
             )
             if status == "return":
                 return payload

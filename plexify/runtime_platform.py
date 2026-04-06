@@ -74,7 +74,7 @@ def is_case_sensitive_filesystem(platform: str) -> bool:
 
 
 def path_lookup_key(path: Path | str, *, platform: str) -> str:
-    value = str(path)
+    value = str(path).replace("\\", "/")
     if platform == "windows":
         return value.casefold()
     return value

@@ -12,4 +12,5 @@ repos:
         entry: python scripts/local_ci.py push
         language: system
         pass_filenames: false
+        always_run: true
         stages: [pre-push]

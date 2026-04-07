@@ -61,6 +61,7 @@ class UICandidatePage:
     cache_reusable: bool = False
     search_query_used: str | None = None
     fallback_attempts: int = 0
+    attempted_queries: list[str] | None = None
 
 
 @dataclass(frozen=True)

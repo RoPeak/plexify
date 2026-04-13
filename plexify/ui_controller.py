@@ -89,11 +89,44 @@ class VideoReviewItem:
     warning: str | None = None
 
     @property
+    def selected_candidate(self) -> UICandidate | None:
+        if self.manual_candidate is not None:
+            return self.manual_candidate
+        if self.selected_candidate_index is None or not self.candidates:
+            return None
+        if self.selected_candidate_index < 0 or self.selected_candidate_index >= len(self.candidates):
+            return None
+        return self.candidates[self.selected_candidate_index]
+
+    @property
+    def preview_block_reason(self) -> str | None:
+        if self.skipped:
+            return None
+        if self.decision_status == "unresolved":
+            return self.unresolved_reason or "No decision selected."
+        selected = self.selected_candidate
+        if selected is None:
+            return self.unresolved_reason or "No selected candidate."
+        if self.item.media_type != "tv":
+            return None
+        season = selected.metadata.get("season") if selected.metadata.get("manual") else self.item.season
+        episode = selected.metadata.get("episode") if selected.metadata.get("manual") else self.item.episode
+        if season is None or episode is None:
+            return "Missing season or episode."
+        return None
+
+    @property
+    def preview_valid(self) -> bool:
+        return self.preview_block_reason is None
+
+    @property
     def resolved(self) -> bool:
         return self.decision_status in {"accepted", "manual", "skipped"}
 
     @property
     def status_label(self) -> str:
+        if self.decision_status in {"accepted", "manual"} and self.preview_block_reason:
+            return "blocked"
         return self.decision_status.replace("_", " ")
 
 
@@ -160,6 +193,13 @@ class PreviewState:
     @property
     def can_apply(self) -> bool:
         return self.unresolved_count == 0
+
+
+@dataclass(frozen=True)
+class BulkApplyResult:
+    affected_count: int
+    preview_valid_count: int
+    blocked_count: int
 
 
 @dataclass(frozen=True)
@@ -378,26 +418,39 @@ class VideoUIController:
         if state.has_more:
             self._load_video_candidates(state)
 
-    def apply_choice_to_folder(self, index: int) -> None:
+    def apply_choice_to_folder(self, index: int) -> BulkApplyResult:
         state = self.items[index]
         parent = state.item.path.parent
+        affected = 0
         for other in self.items:
             if other.item.path.parent == parent and other.item.media_type == state.item.media_type:
                 self._copy_video_decision(state, other)
+                affected += 1
+        return self._bulk_apply_result(affected)
 
-    def apply_choice_to_title_group(self, index: int) -> None:
+    def apply_choice_to_title_group(self, index: int) -> BulkApplyResult:
         state = self.items[index]
         title_key = (state.item.title.strip().casefold(), state.item.media_type)
+        affected = 0
         for other in self.items:
             if (other.item.title.strip().casefold(), other.item.media_type) == title_key:
                 self._copy_video_decision(state, other)
+                affected += 1
+        return self._bulk_apply_result(affected)
 
     def _copy_video_decision(self, source: VideoReviewItem, target: VideoReviewItem) -> None:
         if source.skipped:
             target.skipped = True
             target.selected_candidate_index = None
             target.manual_candidate = None
+            target.unresolved_reason = None
             target.decision_status = "skipped"
+            return
+        selected = source.selected_candidate
+        if selected is None:
+            return
+        if source.item.media_type == "tv" and target.item.media_type == "tv":
+            self._copy_tv_show_decision(source, target, selected)
             return
         if source.manual_candidate is not None:
             target.manual_candidate = UICandidate(
@@ -412,12 +465,97 @@ class VideoUIController:
             target.unresolved_reason = None
             target.decision_status = "manual"
             return
-        if source.selected_candidate_index is not None and target.candidates:
-            target.selected_candidate_index = min(source.selected_candidate_index, len(target.candidates) - 1)
+        if target.candidates:
+            target.selected_candidate_index = min(source.selected_candidate_index or 0, len(target.candidates) - 1)
             target.manual_candidate = None
             target.skipped = False
             target.unresolved_reason = None
             target.decision_status = "accepted"
+
+    def _copy_tv_show_decision(
+        self,
+        source: VideoReviewItem,
+        target: VideoReviewItem,
+        selected: UICandidate,
+    ) -> None:
+        show_name = selected.metadata.get("name") or selected.title
+        show_year = selected.metadata.get("year") or selected.year
+        inferred_target = infer_item(target.item.path)
+        season = inferred_target.season if inferred_target.season is not None else target.item.season
+        if season is None:
+            season = source.item.season
+        episode = inferred_target.episode if inferred_target.episode is not None else target.item.episode
+        episode_end = inferred_target.episode_end if inferred_target.episode_end is not None else target.item.episode_end
+        episode_title = inferred_target.episode_title or target.item.episode_title
+
+        target.item = InferredItem(
+            path=target.item.path,
+            media_type="tv",
+            title=show_name,
+            year=show_year,
+            season=season,
+            episode=episode,
+            episode_end=episode_end,
+            episode_title=episode_title,
+        )
+        target.search_query = build_search_query(show_name, None)
+        propagated = UICandidate(
+            title=selected.title,
+            year=selected.year,
+            source=selected.source,
+            confidence=selected.confidence,
+            metadata={
+                **dict(selected.metadata),
+                "name": show_name,
+                "year": show_year,
+                "season": season,
+                "episode": episode,
+                "episode_end": episode_end,
+                "episode_title": episode_title,
+            },
+            enrichment=selected.enrichment,
+        )
+        matched_index = self._matching_candidate_index(target, propagated)
+        candidate_state = UICandidateState(
+            title=propagated.title,
+            year=propagated.year,
+            source=propagated.source,
+            confidence=propagated.confidence,
+            summary=f"{propagated.title} ({propagated.year or 'Unknown'}) [{propagated.confidence:.2f}]",
+        )
+        if matched_index is None:
+            target.candidates.append(propagated)
+            target.candidate_states.append(candidate_state)
+            target.selected_candidate_index = len(target.candidates) - 1
+        else:
+            target.candidates[matched_index] = propagated
+            target.candidate_states[matched_index] = candidate_state
+            target.selected_candidate_index = matched_index
+        target.manual_candidate = None
+        target.skipped = False
+        target.unresolved_reason = None
+        target.decision_status = "accepted"
+
+    def _matching_candidate_index(self, target: VideoReviewItem, selected: UICandidate) -> int | None:
+        selected_id = selected.metadata.get("id")
+        selected_name = str(selected.metadata.get("name") or selected.title).strip().casefold()
+        for idx, candidate in enumerate(target.candidates):
+            candidate_id = candidate.metadata.get("id")
+            if selected_id is not None and candidate_id == selected_id:
+                return idx
+            candidate_name = str(candidate.metadata.get("name") or candidate.title).strip().casefold()
+            if candidate_name == selected_name and candidate.year == selected.year:
+                return idx
+        return None
+
+    def _bulk_apply_result(self, affected: int) -> BulkApplyResult:
+        preview_valid = sum(1 for item in self.items if item.preview_valid)
+        blocked = sum(1 for item in self.items if item.preview_block_reason is not None)
+        return BulkApplyResult(
+            affected_count=affected,
+            preview_valid_count=preview_valid,
+            blocked_count=blocked,
+        )
 
     def build_preview(self) -> PreviewState:
         plans: list[MovePlan] = []
@@ -429,15 +567,12 @@ class VideoUIController:
             if state.skipped:
                 skipped += 1
                 continue
-            if not state.resolved:
-                unresolved_items.append(f"{state.item.path.name}: {state.unresolved_reason or 'No decision selected.'}")
+            block_reason = state.preview_block_reason
+            if block_reason is not None:
+                unresolved_items.append(f"{state.item.path.name}: {block_reason}")
                 continue
-            selected = state.manual_candidate
-            if selected is None and state.selected_candidate_index is not None and state.candidates:
-                selected = state.candidates[state.selected_candidate_index]
-            if selected is None:
-                unresolved_items.append(f"{state.item.path.name}: No selected candidate.")
-                continue
+            selected = state.selected_candidate
+            assert selected is not None
             if state.item.media_type == "movie":
                 year = selected.metadata.get("year") or selected.year or state.item.year
                 title = selected.metadata.get("title") or selected.title
@@ -449,9 +584,6 @@ class VideoUIController:
                 season = selected.metadata.get("season") if selected.metadata.get("manual") else state.item.season
                 episode = selected.metadata.get("episode") if selected.metadata.get("manual") else state.item.episode
                 episode_title = selected.metadata.get("episode_title") or state.item.episode_title
-                if season is None or episode is None:
-                    unresolved_items.append(f"{state.item.path.name}: missing season or episode.")
-                    continue
                 destination = plan_tv_show(
                     self.config.library,
                     show_name,

@@ -119,9 +119,92 @@ def test_video_preview_marks_unresolved_items(monkeypatch) -> None:
         controller.accept_candidate(0, 0)
         preview = controller.build_preview()
 
+        assert controller.items[0].status_label == "blocked"
+        assert controller.items[0].preview_block_reason == "Missing season or episode."
         assert preview.unresolved_count == 1
         assert not preview.can_apply
-        assert "missing season or episode" in preview.unresolved_items[0]
+        assert "Missing season or episode." in preview.unresolved_items[0]
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_video_bulk_show_apply_reuses_show_and_keeps_episode_inference(monkeypatch) -> None:
+    def _fake_tv_page(*_args, **_kwargs) -> ui_services.UICandidatePage:
+        return ui_services.UICandidatePage(
+            candidates=[
+                ui_services.UICandidate(
+                    title="Doctor Who",
+                    year=2005,
+                    source="TVMaze",
+                    confidence=1.0,
+                    metadata={"id": 42, "name": "Doctor Who", "year": 2005},
+                )
+            ],
+            raw_results=[],
+            next_offset=0,
+            has_more=False,
+        )
+
+    monkeypatch.setattr(ui_controller, "load_tv_candidates", _fake_tv_page)
+    monkeypatch.setattr(ui_controller, "load_movie_candidates", _fake_movie_page)
+    monkeypatch.setattr(ui_controller.VideoUIController, "_maybe_fetch_episode_title", lambda *_args, **_kwargs: None)
+
+    workspace = _local_tmp("video-bulk-tv")
+    try:
+        incoming = workspace / "incoming" / "Doctor.Who"
+        library = workspace / "library"
+        incoming.mkdir(parents=True)
+        library.mkdir()
+        (incoming / "Doctor.Who.S07E05.mkv").write_text("x", encoding="utf-8")
+        (incoming / "Doctor.Who.S07E06.mkv").write_text("x", encoding="utf-8")
+
+        controller = VideoUIController(VideoUIConfig(incoming=workspace / "incoming", library=library))
+        controller.scan()
+        controller.accept_candidate(0, 0)
+
+        result = controller.apply_choice_to_folder(0)
+        preview = controller.build_preview()
+
+        assert result.affected_count == 2
+        assert result.blocked_count == 0
+        assert controller.items[1].item.title == "Doctor Who"
+        assert controller.items[1].item.episode == 6
+        assert controller.items[1].preview_valid is True
+        assert preview.unresolved_count == 0
+        assert preview.can_apply
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_video_manual_tv_selection_with_explicit_episode_resolves_preview(monkeypatch) -> None:
+    def _fake_tv_page(*_args, **_kwargs) -> ui_services.UICandidatePage:
+        return ui_services.UICandidatePage(
+            candidates=[],
+            raw_results=[],
+            next_offset=0,
+            has_more=False,
+        )
+
+    monkeypatch.setattr(ui_controller, "load_tv_candidates", _fake_tv_page)
+    monkeypatch.setattr(ui_controller, "load_movie_candidates", _fake_movie_page)
+
+    workspace = _local_tmp("video-manual-tv")
+    try:
+        incoming = workspace / "incoming" / "Series"
+        library = workspace / "library"
+        incoming.mkdir(parents=True)
+        library.mkdir()
+        (incoming / "Pilot.mkv").write_text("x", encoding="utf-8")
+
+        controller = VideoUIController(VideoUIConfig(incoming=workspace / "incoming", library=library))
+        controller.scan()
+        controller.switch_media_type(0, "tv")
+        controller.manual_select(0, title="Series", year=2008, season=1, episode=1, episode_title="Pilot")
+        preview = controller.build_preview()
+
+        assert controller.items[0].preview_block_reason is None
+        assert preview.unresolved_count == 0
+        assert preview.can_apply
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
 

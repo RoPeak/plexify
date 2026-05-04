@@ -73,6 +73,7 @@ class VideoReviewItem:
     item: InferredItem
     search_query: str
     cache_key: str
+    lookup_title: str | None = None
     candidates: list[UICandidate] = field(default_factory=list)
     candidate_states: list[UICandidateState] = field(default_factory=list)
     selected_candidate_index: int | None = None
@@ -88,6 +89,16 @@ class VideoReviewItem:
     next_offset: int = 0
     raw_results: list[Any] | None = None
     warning: str | None = None
+    provider: str | None = None
+    lookup_status: str = "ok"
+    lookup_reason: str | None = None
+    attempted_queries: list[str] = field(default_factory=list)
+    raw_result_count: int | None = None
+    candidate_count: int | None = None
+    filtered_count: int | None = None
+    search_time: float | None = None
+    fetch_time: float | None = None
+    total_time: float | None = None
 
     @property
     def selected_candidate(self) -> UICandidate | None:
@@ -228,28 +239,38 @@ class VideoUIController:
         self.items = []
         self.errors = []
         exts = _parse_extensions(self.config.extensions)
-        for path in iter_video_files(self.config.incoming, exts):
-            item = infer_item(path)
-            item, _override_key = resolve_media_type_override(item, self._cache, self.config.incoming, self._media_type_overrides)
-            folder_show_key = tv_show_folder_cache_key(item.path, self.config.incoming) if item.media_type == "tv" else None
-            item = apply_tv_folder_season_lock(item, self._cache, folder_show_key)
-            if self.config.media_type != "auto" and item.media_type != self.config.media_type:
-                continue
-            state = VideoReviewItem(
-                item=item,
-                search_query=build_search_query(item.title, None),
-                cache_key=build_cache_key(item.path, self.config.incoming, item.media_type, item.year),
-            )
-            self._load_video_candidates(state)
-            self.items.append(state)
+        with tvmaze.create_session() as session_tv, wikidata.create_session() as session_wd:
+            for path in iter_video_files(self.config.incoming, exts):
+                item = infer_item(path)
+                item, _override_key = resolve_media_type_override(item, self._cache, self.config.incoming, self._media_type_overrides)
+                folder_show_key = tv_show_folder_cache_key(item.path, self.config.incoming) if item.media_type == "tv" else None
+                item = apply_tv_folder_season_lock(item, self._cache, folder_show_key)
+                if self.config.media_type != "auto" and item.media_type != self.config.media_type:
+                    continue
+                state = VideoReviewItem(
+                    item=item,
+                    search_query=build_search_query(item.title, None),
+                    cache_key=build_cache_key(item.path, self.config.incoming, item.media_type, item.year),
+                )
+                self._load_video_candidates(state, session_tv=session_tv, session_wd=session_wd)
+                self.items.append(state)
 
-    def _load_video_candidates(self, state: VideoReviewItem) -> None:
-        item = state.item
+    def _load_video_candidates(
+        self,
+        state: VideoReviewItem,
+        *,
+        lookup_item: InferredItem | None = None,
+        session_tv: requests.Session | None = None,
+        session_wd: requests.Session | None = None,
+    ) -> None:
+        item = lookup_item or (with_title(state.item, state.lookup_title) if state.lookup_title else state.item)
         state.warning = None
         state.unresolved_reason = None
         try:
             if item.media_type == "tv":
-                with tvmaze.create_session() as session_tv:
+                owns_session = session_tv is None
+                session_tv = session_tv or tvmaze.create_session()
+                try:
                     page = load_tv_candidates(
                         item=item,
                         session=session_tv,
@@ -264,8 +285,13 @@ class VideoUIController:
                     )
                     if page.candidates:
                         self._maybe_fetch_episode_title(item, page.candidates[0], session_tv)
+                finally:
+                    if owns_session:
+                        session_tv.close()
             else:
-                with wikidata.create_session() as session_wd:
+                owns_session = session_wd is None
+                session_wd = session_wd or wikidata.create_session()
+                try:
                     page = load_movie_candidates(
                         item=item,
                         session=session_wd,
@@ -277,9 +303,15 @@ class VideoUIController:
                         offline=self.config.offline,
                         movie_entity_cache=self._movie_entity_cache,
                     )
+                finally:
+                    if owns_session:
+                        session_wd.close()
         except requests.RequestException as exc:
             state.warning = f"{item.path.name}: {exc.__class__.__name__}"
             state.unresolved_reason = "Candidate search failed."
+            state.provider = "TVMaze" if item.media_type == "tv" else "Wikidata"
+            state.lookup_status = "network_error"
+            state.lookup_reason = str(exc) or exc.__class__.__name__
             self.errors.append(state.warning)
             state.candidates = []
             state.candidate_states = []
@@ -304,14 +336,24 @@ class VideoUIController:
         state.has_more = page.has_more
         state.next_offset = page.next_offset
         state.raw_results = page.raw_results
+        state.provider = page.provider
+        state.lookup_status = page.lookup_status
+        state.lookup_reason = page.lookup_reason
+        state.attempted_queries = list(page.attempted_queries or [])
+        state.raw_result_count = page.raw_result_count
+        state.candidate_count = page.candidate_count if page.candidate_count is not None else len(page.candidates)
+        state.filtered_count = page.filtered_count
+        state.search_time = page.search_time
+        state.fetch_time = page.fetch_time
+        state.total_time = page.total_time
         state.auto_selectable = bool(
             page.candidates
             and auto_acceptable(
                 page.candidates,
                 self.config.min_confidence,
-                title=state.item.title,
+                title=state.lookup_title or state.item.title,
                 search_query=state.search_query,
-                target_year=state.item.year,
+                target_year=item.year,
             )
         )
         state.cache_context = describe_cache_context(
@@ -393,19 +435,22 @@ class VideoUIController:
         state = self.items[index]
         if not query.strip():
             return
-        state.item = with_title(state.item, query.strip())
-        state.search_query = build_search_query(query.strip(), None)
+        lookup_title = query.strip()
+        lookup_item = with_title(state.item, lookup_title)
+        state.lookup_title = lookup_title
+        state.search_query = build_search_query(lookup_title, None)
         state.next_offset = 0
         state.raw_results = None
         state.selected_candidate_index = None
         state.manual_candidate = None
         state.skipped = False
-        self._load_video_candidates(state)
+        self._load_video_candidates(state, lookup_item=lookup_item)
 
     def switch_media_type(self, index: int, media_type: str) -> None:
         state = self.items[index]
         state.item = switch_item_media_type(state.item, media_type)
         state.cache_key = build_cache_key(state.item.path, self.config.incoming, state.item.media_type, state.item.year)
+        state.lookup_title = None
         state.search_query = build_search_query(state.item.title, None)
         state.next_offset = 0
         state.raw_results = None

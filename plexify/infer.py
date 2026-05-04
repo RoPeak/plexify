@@ -40,6 +40,7 @@ GENERIC_MOVIE_STEM_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
+MOVIE_DISC_SUFFIX_RE = re.compile(r"^(.+?)[-_. ]+[A-Za-z]{1,4}\d+[_\-\s]*t\d+$", re.IGNORECASE)
 GENERIC_TV_FOLDERS = {
     "tv",
     "tv shows",
@@ -141,6 +142,8 @@ def _clean_parent_show_name(name: str) -> tuple[str, Optional[int]]:
     year = _extract_year_range(name) or _extract_year(name)
     cleaned = re.sub(r"\s*[\[(].*?[\])]\s*$", "", name).strip()
     cleaned = re.sub(r"[._]+", " ", cleaned).strip()
+    if year is not None and cleaned == str(year):
+        year = None
     return cleaned, year
 
 
@@ -240,6 +243,17 @@ def _looks_like_title_fragment(value: str) -> bool:
 
 def _is_generic_movie_stem(stem: str) -> bool:
     return GENERIC_MOVIE_STEM_RE.fullmatch(stem.strip()) is not None
+
+
+def _movie_title_from_parent_prefixed_disc_stem(stem: str, parent_name: str) -> Optional[str]:
+    match = MOVIE_DISC_SUFFIX_RE.match(stem.strip())
+    if not match or not parent_name.strip():
+        return None
+    title_fragment = re.sub(r"[._]+", " ", match.group(1)).strip()
+    parent_title, _parent_year = _clean_parent_show_name(parent_name)
+    if normalize_title_for_similarity(title_fragment) == normalize_title_for_similarity(parent_title):
+        return parent_title
+    return None
 
 
 def infer_tv_episode_from_stem(stem: str) -> Optional[int]:
@@ -529,8 +543,11 @@ def infer_item(path: Path) -> InferredItem:
                 title = parent_title
                 if year_override is None:
                     year_override = parent_year
+        parent_prefixed_title = _movie_title_from_parent_prefixed_disc_stem(path.stem, parent_name)
+        if parent_prefixed_title:
+            title = parent_prefixed_title
         cleaned = _clean_title_from_stem(path.stem)
-        if cleaned:
+        if cleaned and not parent_prefixed_title:
             if _starts_with_number(path.stem) and not _starts_with_number(str(title)):
                 title = cleaned
             elif title == path.stem:

@@ -80,6 +80,19 @@ def _unavailable_search_message(source_name: str, reason: str | None) -> str:
     return f"{source_name} unavailable."
 
 
+def _lookup_status(*, reason: str | None, raw_count: int, candidate_count: int) -> str:
+    if reason:
+        lowered = reason.lower()
+        if "network" in lowered:
+            return "network_error"
+        return "provider_unavailable"
+    if raw_count == 0:
+        return "no_results"
+    if candidate_count == 0:
+        return "filtered_empty"
+    return "ok"
+
+
 def print_run_summary(
     *,
     console: Any,
@@ -535,6 +548,11 @@ def tv_candidates(
             search_query_used=search_query,
             fallback_attempts=fallback_attempts,
             attempted_queries=attempted_queries,
+            provider="TVMaze",
+            lookup_status="cache_hit",
+            raw_result_count=0,
+            candidate_count=len(results),
+            filtered_count=0,
         )
 
     if offline:
@@ -559,6 +577,12 @@ def tv_candidates(
             search_query_used=search_query,
             fallback_attempts=fallback_attempts,
             attempted_queries=attempted_queries,
+            provider="TVMaze",
+            lookup_status="offline_no_cache",
+            lookup_reason="Offline mode enabled and no cached TV match was available.",
+            raw_result_count=0,
+            candidate_count=0,
+            filtered_count=0,
         )
 
     if raw_results is None:
@@ -588,6 +612,11 @@ def tv_candidates(
                 search_query_used=search_query,
                 fallback_attempts=fallback_attempts,
                 attempted_queries=attempted_queries,
+                provider="TVMaze",
+                lookup_status="no_results",
+                raw_result_count=0,
+                candidate_count=0,
+                filtered_count=0,
             )
         query_used = queries[0]
         total_started = time.monotonic()
@@ -699,6 +728,12 @@ def tv_candidates(
                 search_query_used=query_used,
                 fallback_attempts=fallback_attempts,
                 attempted_queries=attempted_queries,
+                provider="TVMaze",
+                lookup_status=_lookup_status(reason=reason, raw_count=len(raw_results), candidate_count=0),
+                lookup_reason=reason,
+                raw_result_count=len(raw_results),
+                candidate_count=0,
+                filtered_count=0,
             )
     page = raw_results[offset : offset + limit]
     for show in page:
@@ -726,6 +761,16 @@ def tv_candidates(
         search_query_used=query_used,
         fallback_attempts=fallback_attempts,
         attempted_queries=attempted_queries,
+        provider="TVMaze",
+        lookup_status=_lookup_status(
+            reason=tvmaze.unavailable_reason(),
+            raw_count=len(raw_results or []),
+            candidate_count=len(results),
+        ),
+        lookup_reason=tvmaze.unavailable_reason(),
+        raw_result_count=len(raw_results or []),
+        candidate_count=len(results),
+        filtered_count=max(0, len(raw_results or []) - len(results)),
     )
 
 
@@ -824,6 +869,11 @@ def movie_candidates(
             cache_reusable=cached_key == reusable_key,
             search_query_used=search_query,
             attempted_queries=attempted_queries,
+            provider="Wikidata",
+            lookup_status="cache_hit",
+            raw_result_count=0,
+            candidate_count=len(results),
+            filtered_count=0,
         )
 
     if offline:
@@ -847,6 +897,12 @@ def movie_candidates(
             has_more=False,
             search_query_used=search_query,
             attempted_queries=attempted_queries,
+            provider="Wikidata",
+            lookup_status="offline_no_cache",
+            lookup_reason="Offline mode enabled and no cached movie match was available.",
+            raw_result_count=0,
+            candidate_count=0,
+            filtered_count=0,
         )
 
     if raw_results is None:
@@ -880,6 +936,11 @@ def movie_candidates(
                 search_time=0.0,
                 total_time=0.0,
                 attempted_queries=attempted_queries,
+                provider="Wikidata",
+                lookup_status="no_results",
+                raw_result_count=0,
+                candidate_count=0,
+                filtered_count=0,
             )
         query = queries[0]
         query_used = query
@@ -927,6 +988,12 @@ def movie_candidates(
                 total_time=total_time,
                 search_query_used=query_used,
                 attempted_queries=attempted_queries,
+                provider="Wikidata",
+                lookup_status=_lookup_status(reason=reason, raw_count=len(raw_results), candidate_count=0),
+                lookup_reason=reason,
+                raw_result_count=len(raw_results),
+                candidate_count=0,
+                filtered_count=0,
             )
         total_time = time.monotonic() - total_started
         log_event_fn(
@@ -1020,4 +1087,14 @@ def movie_candidates(
         total_time=total_time,
         search_query_used=query_used,
         attempted_queries=attempted_queries,
+        provider="Wikidata",
+        lookup_status=_lookup_status(
+            reason=wikidata.unavailable_reason(),
+            raw_count=len(raw_results or []),
+            candidate_count=len(results),
+        ),
+        lookup_reason=wikidata.unavailable_reason(),
+        raw_result_count=len(raw_results or []),
+        candidate_count=len(results),
+        filtered_count=max(0, len(raw_results or []) - len(results)),
     )

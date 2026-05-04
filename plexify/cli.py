@@ -197,6 +197,12 @@ class CandidatePage:
     search_query_used: str | None = None
     fallback_attempts: int = 0
     attempted_queries: list[str] | None = None
+    provider: str | None = None
+    lookup_status: str = "ok"
+    lookup_reason: str | None = None
+    raw_result_count: int | None = None
+    candidate_count: int | None = None
+    filtered_count: int | None = None
 
 
 @dataclass

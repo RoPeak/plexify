@@ -131,6 +131,20 @@ def test_infer_movie_generic_stem_uses_parent_folder_title() -> None:
     assert item.year == 2013
 
 
+def test_infer_numeric_movie_title_folder_does_not_become_year() -> None:
+    item = infer_item(Path("1917/B1_t00.mkv"))
+    assert item.media_type == "movie"
+    assert item.title == "1917"
+    assert item.year is None
+
+
+def test_infer_parent_title_prefixed_disc_suffix_uses_parent_title() -> None:
+    item = infer_item(Path("Cloudy With A Chance Of Meatballs 2/Cloudy With A Chance Of Meatballs 2-B1_t00.mkv"))
+    assert item.media_type == "movie"
+    assert item.title == "Cloudy With A Chance Of Meatballs 2"
+    assert item.year is None
+
+
 def test_infer_movie_generic_stem_with_multi_letter_prefix_uses_parent_folder_title() -> None:
     path = Path("Wallace and Gromit The Curse of the Were-Rabbit (2005)/PC1_t05.mkv")
     item = infer_item(path)

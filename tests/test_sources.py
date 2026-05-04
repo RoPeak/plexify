@@ -1,11 +1,28 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from plexify.sources import tvmaze, wikidata
 
 
 def _fixture(path: str) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _wikidata_entity_payload(instance_id: str) -> dict:
+    return {
+        "entities": {
+            "Q1": {
+                "labels": {"en": {"value": "Example"}},
+                "claims": {
+                    "P31": [
+                        {"mainsnak": {"datavalue": {"value": {"id": instance_id}}}},
+                    ],
+                },
+            },
+        },
+    }
 
 
 def test_tvmaze_parse_show_results():
@@ -58,6 +75,25 @@ def test_wikidata_parse_entity():
     payload = _fixture("tests/fixtures/wikidata_entity.json")
     film = wikidata.parse_entity("Q8337", payload)
     assert film.title == "The Matrix"
+
+
+@pytest.mark.parametrize(
+    "instance_id",
+    [
+        "Q11424",
+        "Q202866",
+        "Q28968258",
+        "Q120243801",
+    ],
+)
+def test_wikidata_parse_entity_accepts_film_like_instance_types(instance_id: str) -> None:
+    film = wikidata.parse_entity("Q1", _wikidata_entity_payload(instance_id))
+    assert film.is_film is True
+
+
+def test_wikidata_parse_entity_rejects_non_film_instance_type() -> None:
+    film = wikidata.parse_entity("Q1", _wikidata_entity_payload("Q482994"))
+    assert film.is_film is False
 
 
 def test_wikidata_year_prefers_preferred_rank() -> None:

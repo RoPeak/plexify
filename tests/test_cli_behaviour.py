@@ -606,6 +606,51 @@ def test_movie_candidates_retries_with_fallback_query(monkeypatch, tmp_path: Pat
     assert page.candidates[0].title == "Jack Reacher: Never Go Back"
 
 
+def test_movie_candidates_accepts_brave_when_wikidata_types_it_as_animated_film(monkeypatch, tmp_path: Path) -> None:
+    def _fake_fetch_entity(qid: str, *_args, **_kwargs):
+        payload = {
+            "entities": {
+                qid: {
+                    "labels": {"en": {"value": "Brave"}},
+                    "claims": {
+                        "P31": [
+                            {"mainsnak": {"datavalue": {"value": {"id": "Q202866"}}}},
+                        ],
+                        "P577": [
+                            {"mainsnak": {"datavalue": {"value": {"time": "+2012-06-10T00:00:00Z"}}}},
+                        ],
+                    },
+                },
+            },
+        }
+        return cli.wikidata.parse_entity(qid, payload)
+
+    monkeypatch.setattr(cli.wikidata, "fetch_entity", _fake_fetch_entity)
+
+    item = InferredItem(
+        path=tmp_path / "Brave" / "B1_t00.mkv",
+        media_type="movie",
+        title="Brave",
+        year=None,
+        episode_title=None,
+    )
+    page = cli._movie_candidates(
+        item=item,
+        session=requests.Session(),
+        cache=Cache(tmp_path / "cache.json"),
+        show_cache=False,
+        raw_results=[cli.wikidata.WikidataCandidate(qid="Q1", label="Brave", description="2012 animated film")],
+        movie_entity_cache={},
+    )
+
+    assert page.lookup_status == "ok"
+    assert page.raw_result_count == 1
+    assert page.candidate_count == 1
+    assert page.filtered_count == 0
+    assert page.candidates[0].title == "Brave"
+    assert page.candidates[0].year == 2012
+
+
 def test_prompt_search_blank_query_keeps_existing_title(monkeypatch, tmp_path: Path) -> None:
     answers = iter(["   ", ""])
     monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: next(answers))

@@ -86,6 +86,16 @@ class WikidataFilm:
     is_film: bool
 
 
+FILM_INSTANCE_IDS = frozenset(
+    {
+        "Q11424",  # film
+        "Q202866",  # animated film
+        "Q28968258",  # computer-animated film
+        "Q120243801",  # direct-to-video film
+    }
+)
+
+
 def _session() -> requests.Session:
     session = requests.Session()
     ua = _user_agent()
@@ -177,14 +187,13 @@ def _extract_description(entity: dict[str, Any]) -> str | None:
     return entity.get("descriptions", {}).get("en", {}).get("value")
 
 
+def _extract_instance_ids(entity: dict[str, Any]) -> list[str]:
+    return _extract_claim_ids(entity, "P31")
+
+
 def _is_film(entity: dict[str, Any]) -> bool:
-    claims = entity.get("claims", {})
-    instance = claims.get("P31") or []
-    for claim in instance:
-        mainsnak = claim.get("mainsnak", {})
-        datavalue = mainsnak.get("datavalue", {})
-        value = datavalue.get("value", {})
-        if value.get("id") == "Q11424":
+    for instance_id in _extract_instance_ids(entity):
+        if instance_id in FILM_INSTANCE_IDS:
             return True
     return False
 

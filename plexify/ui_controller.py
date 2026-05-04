@@ -59,6 +59,7 @@ class VideoUIConfig:
     library: Path
     mode: str = "dry-run"
     copy_mode: bool = True
+    copy_workers: int = 1
     extensions: str = ".mkv,.mp4,.avi,.m4v,.mov,.ts"
     min_confidence: float = 0.90
     use_cache: bool = True
@@ -634,7 +635,7 @@ class VideoUIController:
             unresolved_items=unresolved_items,
         )
 
-    def apply_preview(self, preview: PreviewState) -> ApplyResultState:
+    def apply_preview(self, preview: PreviewState, *, progress_callback=None, cancel_callback=None) -> ApplyResultState:
         report_path = self.config.library / ".plexify" / "reports" / f"{now_timestamp()}.json"
         apply_report_path: Path | None = None
         if self.config.mode == "apply" and preview.plans:
@@ -644,15 +645,37 @@ class VideoUIController:
                 copy_mode=self.config.copy_mode,
                 on_conflict=self.config.on_conflict,
                 report_path=report_path,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                copy_workers=self.config.copy_workers,
             )
         else:
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "starting",
+                        "completed": 0,
+                        "total": len(preview.plans),
+                        "message": "Applying preview without streamed file operations.",
+                    }
+                )
             result = execute_plans(
                 preview.plans,
                 apply=self.config.mode == "apply",
                 copy_mode=self.config.copy_mode,
                 on_conflict=self.config.on_conflict,
+                copy_workers=self.config.copy_workers,
             )
             write_report(report_path, preview.plans if self.config.mode == "dry-run" or not preview.plans else [], self.config.mode, self.config.copy_mode)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "phase": "done",
+                        "completed": len(preview.plans),
+                        "total": len(preview.plans),
+                        "message": "Organisation preview finished.",
+                    }
+                )
         return ApplyResultState(
             result=result,
             report_path=report_path,

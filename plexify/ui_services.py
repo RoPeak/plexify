@@ -397,11 +397,69 @@ def apply_with_streamed_report(
     copy_mode: bool,
     on_conflict: str,
     report_path: Path,
+    progress_callback=None,
+    cancel_callback=None,
+    copy_workers: int = 1,
 ) -> ExecutionResult:
+    total = len(plans)
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "phase": "starting",
+                "completed": 0,
+                "total": total,
+                "report_path": report_path,
+                "message": f"Opening organise report at {report_path}",
+            }
+        )
     stream = open_report_stream(report_path, mode="apply", copy_mode=copy_mode)
     try:
-        result = execute_plans(plans, apply=True, copy_mode=copy_mode, on_conflict=on_conflict, on_applied=stream.append)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "report-opened",
+                    "completed": 0,
+                    "total": total,
+                    "report_path": report_path,
+                    "message": "Organise report opened. Starting file operations.",
+                }
+            )
+        result = execute_plans(
+            plans,
+            apply=True,
+            copy_mode=copy_mode,
+            on_conflict=on_conflict,
+            on_applied=stream.append,
+            on_plan_event=(
+                lambda payload: progress_callback({**payload, "report_path": report_path})
+                if progress_callback is not None
+                else None
+            ),
+            cancel_callback=cancel_callback,
+            copy_workers=copy_workers,
+        )
+        completed_count = len(result.moved) + len(result.skipped) + len(result.errors)
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "finalizing-report",
+                    "completed": completed_count,
+                    "total": total,
+                    "report_path": report_path,
+                    "message": "Finalizing organise report.",
+                }
+            )
         stream.finalize()
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "phase": "done",
+                    "completed": completed_count,
+                    "total": total,
+                    "report_path": report_path,
+                    "message": f"Organisation file operations finished ({completed_count} of {total}).",
+                }
+            )
         return result
     finally:
         stream.close()

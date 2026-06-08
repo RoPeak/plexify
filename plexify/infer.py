@@ -23,6 +23,10 @@ SEASON_EP_RE = re.compile(
 )
 EPISODE_RE = re.compile(r"(?<![A-Za-z0-9])(?:episode|ep)[-_. ]*(\d{1,3})(?![A-Za-z0-9])", re.IGNORECASE)
 TV_HINT_RE = re.compile(r"\b(?:season|seaon|seson|seasn|episode|ep)\b", re.IGNORECASE)
+FILENAME_SHOW_GROUP_PATTERNS = [
+    re.compile(rf"^(?P<title>.+?)[-_. ]+{SEASON_TOKEN_RE}[-_. ]*\d{{1,2}}(?:[-_. ]+|$)", re.IGNORECASE),
+    re.compile(r"^(?P<title>.+?)[-_. ]+s\d{1,2}e\d{1,3}(?:[-_. ]+|$)", re.IGNORECASE),
+]
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 YEAR_RANGE_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*[-–]\s*(19\d{2}|20\d{2})(?!\d)")
 LEADING_EPISODE_RE = re.compile(r"^\s*(\d{1,3})\s*[-_. ]+\s*(.+?)\s*$")
@@ -71,6 +75,36 @@ class InferredItem:
 def _is_generic_tv_folder_name(name: str) -> bool:
     normalized = re.sub(r"[_\s]+", " ", name.strip().lower())
     return normalized in GENERIC_TV_FOLDERS
+
+
+def filename_show_group_title(path: Path) -> str | None:
+    stem = YEAR_RANGE_RE.sub("", path.stem)
+    stem = re.sub(r"[\u2013\u2014\u2212]", "-", stem)
+    for pattern in FILENAME_SHOW_GROUP_PATTERNS:
+        match = pattern.search(stem)
+        if not match:
+            continue
+        title = re.sub(r"[-_. ]+", " ", match.group("title")).strip()
+        if title:
+            return title
+    return None
+
+
+def filename_show_group_key(path: Path) -> str | None:
+    title = filename_show_group_title(path)
+    if not title:
+        return None
+    return normalize_title_for_similarity(title)
+
+
+def _filename_series_show_title(path: Path) -> str | None:
+    stem = YEAR_RANGE_RE.sub("", path.stem)
+    stem = re.sub(r"[\u2013\u2014\u2212]", "-", stem)
+    match = FILENAME_SHOW_GROUP_PATTERNS[0].search(stem)
+    if not match:
+        return None
+    title = re.sub(r"[-_. ]+", " ", match.group("title")).strip()
+    return title or None
 
 
 def _parent_show_name(path: Path) -> Optional[str]:
@@ -416,6 +450,8 @@ def infer_item(path: Path) -> InferredItem:
     year_override = None
     guess_title = guess.get("title")
     stem_for_tv = YEAR_RANGE_RE.sub("", path.stem)
+    filename_show_title = filename_show_group_title(path)
+    filename_series_show_title = _filename_series_show_title(path)
 
     if path.stem.isdigit() and 1 <= len(path.stem) <= 3 and _parent_has_multiple_videos(path):
         media_type = "tv"
@@ -561,7 +597,16 @@ def infer_item(path: Path) -> InferredItem:
             parent_name = path.parent.name
             if parent_name and not _is_generic_tv_folder_name(parent_name):
                 show_name = parent_name
-        title = title_override or show_name or title
+        if title_override:
+            title = title_override
+        elif filename_series_show_title:
+            title = filename_series_show_title
+        elif show_name:
+            title = show_name
+        elif filename_show_title:
+            title = filename_show_title
+        else:
+            title = title
         if season is not None:
             title = _strip_season_tokens(str(title))
 

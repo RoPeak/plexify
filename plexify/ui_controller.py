@@ -9,7 +9,7 @@ import requests
 from . import music as music_util
 from .cache import Cache, NullCache
 from .executor import execute_plans
-from .infer import InferredItem, infer_item
+from .infer import InferredItem, filename_show_group_key, infer_item
 from .planner import plan_movie, plan_tv_show
 from .report import write_report
 from .sources import musicbrainz, tvmaze, wikidata
@@ -99,6 +99,7 @@ class VideoReviewItem:
     search_time: float | None = None
     fetch_time: float | None = None
     total_time: float | None = None
+    suggested_group_decision: str | None = None
 
     @property
     def selected_candidate(self) -> UICandidate | None:
@@ -229,6 +230,7 @@ class VideoUIController:
         self.items: list[VideoReviewItem] = []
         self.errors: list[str] = []
         self.stats: dict[str, int] = {"cache_hits": 0}
+        self._group_decision_suggestions: dict[str, UICandidate] = {}
         self._episode_cache = EpisodeCache()
         self._cache = Cache(config.library / ".plexify" / "cache.json") if config.use_cache else NullCache()
         self._media_type_overrides: dict[str, str] = {}
@@ -393,6 +395,7 @@ class VideoUIController:
         state.skipped = False
         state.unresolved_reason = None
         state.decision_status = "accepted"
+        self._record_group_decision(index)
 
     def skip_item(self, index: int) -> None:
         state = self.items[index]
@@ -430,6 +433,7 @@ class VideoUIController:
         state.skipped = False
         state.unresolved_reason = None
         state.decision_status = "manual"
+        self._record_group_decision(index)
 
     def refine_search(self, index: int, query: str) -> None:
         state = self.items[index]
@@ -464,6 +468,29 @@ class VideoUIController:
         if state.has_more:
             self._load_video_candidates(state)
 
+    def filename_show_group_key(self, index: int) -> str | None:
+        if index < 0 or index >= len(self.items):
+            return None
+        return filename_show_group_key(self.items[index].item.path)
+
+    def items_in_filename_show_group(self, index: int) -> list[int]:
+        key = self.filename_show_group_key(index)
+        if not key:
+            return []
+        media_type = self.items[index].item.media_type
+        return [
+            idx
+            for idx, item in enumerate(self.items)
+            if item.item.media_type == media_type and filename_show_group_key(item.item.path) == key
+        ]
+
+    def bulk_apply_to_filename_show_group(self, index: int) -> BulkApplyResult:
+        affected = 0
+        for idx in self.items_in_filename_show_group(index):
+            self._copy_video_decision(self.items[index], self.items[idx])
+            affected += 1
+        return self._bulk_apply_result(affected)
+
     def apply_choice_to_folder(self, index: int) -> BulkApplyResult:
         state = self.items[index]
         parent = state.item.path.parent
@@ -483,6 +510,21 @@ class VideoUIController:
                 self._copy_video_decision(state, other)
                 affected += 1
         return self._bulk_apply_result(affected)
+
+    def _record_group_decision(self, index: int) -> None:
+        state = self.items[index]
+        if state.item.media_type != "tv":
+            return
+        key = filename_show_group_key(state.item.path)
+        selected = state.selected_candidate
+        if not key or selected is None:
+            return
+        self._group_decision_suggestions[key] = selected
+        for item in self.items:
+            if item is state or item.resolved or item.item.media_type != "tv":
+                continue
+            if filename_show_group_key(item.item.path) == key:
+                item.suggested_group_decision = selected.title
 
     def _copy_video_decision(self, source: VideoReviewItem, target: VideoReviewItem) -> None:
         if source.skipped:

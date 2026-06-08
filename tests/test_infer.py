@@ -2,7 +2,46 @@ from pathlib import Path
 
 import pytest
 
-from plexify.infer import infer_item
+from plexify.infer import filename_show_group_key, infer_item
+
+
+IPLAYER_RUN_FILENAMES = [
+    "Everest_-__m002k716_original.mp4",
+    "Half_Man_Series_1_-_02._Episode_2_m002w06w_editorial.mp4",
+    "Half_Man_Series_1_-_03._Episode_3_m002w8zg_editorial.mp4",
+    "Half_Man_Series_1_-_04._Episode_4_m002wbmk_technical.mp4",
+    "Half_Man_Series_1_-_05._Episode_5_m002wwhs_technical.mp4",
+    "Half_Man_Series_1_-_06._Episode_6_m002x6c4_original.mp4",
+    "Jailhouse_Rock_-__m0022n85_original.mp4",
+    "Knocked_Up_-__m002jlmx_original.mp4",
+    "Minions_-__m002nzt6_original.mp4",
+    "Minions_The_Rise_of_Gru_-__m0026d54_original.mp4",
+    "Mud_-__m001jp4k_original.mp4",
+    "Point_Break_-__b00dtjjp_original.mp4",
+    "Scot_Squad_Series_1_-_02._Episode_2_b04nz42h_editorial.mp4",
+    "Scot_Squad_Series_1_-_03._Episode_3_b04phymy_editorial.mp4",
+    "Scot_Squad_Series_1_-_04._Episode_4_b04pw80d_editorial.mp4",
+    "Scot_Squad_Series_2_-_01._Episode_1_b06jh4sw_original.mp4",
+    "Scot_Squad_Series_2_-_02._Episode_2_b06kqz7s_original.mp4",
+    "Scot_Squad_Series_2_-_03._Episode_3_b06mz5by_original.mp4",
+    "Scot_Squad_Series_2_-_04._Episode_4_b06nxrxp_original.mp4",
+    "Scot_Squad_Series_2_-_05._Episode_5_b06q61rt_editorial.mp4",
+    "Scot_Squad_Series_2_-_06._Episode_6_b06pdw8k_original.mp4",
+    "Shrek_-__b007c94f_original.mp4",
+    "Shrek_2_-__b008m7xk_original.mp4",
+    "Shrek_the_Third_-__b00wyj5y_original.mp4",
+    "The_Book_of_Life_-__m001tvh0_original.mp4",
+    "The_Iron_Claw_-__m002w9wy_original.mp4",
+    "The_Nice_Guys_-__m002x7n4_original.mp4",
+    "The_Silence_of_the_Lambs_-__m002hdd8_original.mp4",
+    "The_Theory_of_Everything_-__m001vfdn_original.mp4",
+    "The_Young_Offenders_Series_5_-_02._Episode_2_m002tfsl_editorial.mp4",
+    "The_Young_Offenders_Series_5_-_03._Episode_3_m002tfsm_editorial.mp4",
+    "The_Young_Offenders_Series_5_-_04._Episode_4_m002tfsp_editorial.mp4",
+    "The_Young_Offenders_Series_5_-_05._Episode_5_m002tfsr_editorial.mp4",
+    "The_Young_Offenders_Series_5_-_06._Episode_6_m002tft4_editorial.mp4",
+    "Unforgiven_-__m002p2fs_original.mp4",
+]
 
 
 def test_infer_tv_from_season_folder():
@@ -436,3 +475,34 @@ def test_infer_tv_root_level_season_folder_uses_folder_name_as_show_title(tmp_pa
     assert item.title == "DC's Legends of Tomorrow"
     assert item.season == 1
     assert item.episode == 1
+
+
+@pytest.mark.parametrize(
+    ("filename", "title", "season", "episode", "group_key"),
+    [
+        ("Half_Man_Series_1_-_02._Episode_2_m002w06w_editorial.mp4", "Half Man", 1, 2, "half man"),
+        ("Scot_Squad_Series_2_-_06._Episode_6_b06pdw8k_original.mp4", "Scot Squad", 2, 6, "scot squad"),
+        ("The_Young_Offenders_Series_5_-_03._Episode_3_m002tfsm_editorial.mp4", "The Young Offenders", 5, 3, "the young offenders"),
+    ],
+)
+def test_infer_iplayer_tv_series_filename_group(filename: str, title: str, season: int, episode: int, group_key: str) -> None:
+    path = Path("C:/Video/iPlayer Recordings") / filename
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.title == title
+    assert item.season == season
+    assert item.episode == episode
+    assert filename_show_group_key(path) == group_key
+
+
+def test_reported_run_tv_filename_groups_are_distinct() -> None:
+    groups = {
+        filename: filename_show_group_key(Path("C:/Video/iPlayer Recordings") / filename)
+        for filename in IPLAYER_RUN_FILENAMES
+        if "Series_" in filename
+    }
+
+    assert {key for key in groups.values() if key} == {"half man", "scot squad", "the young offenders"}
+    assert all(groups[filename] == "half man" for filename in groups if filename.startswith("Half_Man"))
+    assert all(groups[filename] == "scot squad" for filename in groups if filename.startswith("Scot_Squad"))
+    assert all(groups[filename] == "the young offenders" for filename in groups if filename.startswith("The_Young_Offenders"))

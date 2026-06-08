@@ -176,6 +176,100 @@ def test_video_bulk_show_apply_reuses_show_and_keeps_episode_inference(monkeypat
         shutil.rmtree(workspace, ignore_errors=True)
 
 
+def test_video_filename_show_group_bulk_does_not_cross_other_iplayer_groups(monkeypatch) -> None:
+    def _fake_tv_page(*_args, **kwargs) -> ui_services.UICandidatePage:
+        item = kwargs["item"]
+        return ui_services.UICandidatePage(
+            candidates=[
+                ui_services.UICandidate(
+                    title=item.title,
+                    year=2020,
+                    source="TVMaze",
+                    confidence=1.0,
+                    metadata={"id": item.title, "name": item.title, "year": 2020},
+                )
+            ],
+            raw_results=[],
+            next_offset=0,
+            has_more=False,
+        )
+
+    monkeypatch.setattr(ui_controller, "load_tv_candidates", _fake_tv_page)
+    monkeypatch.setattr(ui_controller, "load_movie_candidates", _fake_movie_page)
+    monkeypatch.setattr(ui_controller.VideoUIController, "_maybe_fetch_episode_title", lambda *_args, **_kwargs: None)
+
+    workspace = _local_tmp("video-iplayer-groups")
+    try:
+        incoming = workspace / "incoming" / "iPlayer Recordings"
+        library = workspace / "library"
+        incoming.mkdir(parents=True)
+        library.mkdir()
+        filenames = [
+            "Half_Man_Series_1_-_02._Episode_2_m002w06w_editorial.mp4",
+            "Scot_Squad_Series_2_-_06._Episode_6_b06pdw8k_original.mp4",
+            "The_Young_Offenders_Series_5_-_02._Episode_2_m002tfsl_editorial.mp4",
+            "The_Young_Offenders_Series_5_-_03._Episode_3_m002tfsm_editorial.mp4",
+        ]
+        for filename in filenames:
+            (incoming / filename).write_text("x", encoding="utf-8")
+
+        controller = VideoUIController(VideoUIConfig(incoming=workspace / "incoming", library=library))
+        controller.scan()
+        young_index = next(idx for idx, item in enumerate(controller.items) if item.item.title == "The Young Offenders")
+        controller.accept_candidate(young_index, 0)
+
+        result = controller.bulk_apply_to_filename_show_group(young_index)
+
+        assert result.affected_count == 2
+        assert controller.items_in_filename_show_group(young_index) == [2, 3]
+        assert controller.items[0].decision_status == "pending"
+        assert controller.items[1].decision_status == "pending"
+        assert controller.items[2].decision_status == "accepted"
+        assert controller.items[3].decision_status == "accepted"
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+def test_video_accepting_show_suggests_same_filename_group_decision(monkeypatch) -> None:
+    def _fake_tv_page(*_args, **kwargs) -> ui_services.UICandidatePage:
+        item = kwargs["item"]
+        return ui_services.UICandidatePage(
+            candidates=[
+                ui_services.UICandidate(
+                    title=item.title,
+                    year=2020,
+                    source="TVMaze",
+                    confidence=1.0,
+                    metadata={"id": item.title, "name": item.title, "year": 2020},
+                )
+            ],
+            raw_results=[],
+            next_offset=0,
+            has_more=False,
+        )
+
+    monkeypatch.setattr(ui_controller, "load_tv_candidates", _fake_tv_page)
+    monkeypatch.setattr(ui_controller.VideoUIController, "_maybe_fetch_episode_title", lambda *_args, **_kwargs: None)
+
+    workspace = _local_tmp("video-iplayer-suggest")
+    try:
+        incoming = workspace / "incoming" / "iPlayer Recordings"
+        library = workspace / "library"
+        incoming.mkdir(parents=True)
+        library.mkdir()
+        (incoming / "Half_Man_Series_1_-_02._Episode_2_m002w06w_editorial.mp4").write_text("x", encoding="utf-8")
+        (incoming / "Half_Man_Series_1_-_03._Episode_3_m002w8zg_editorial.mp4").write_text("x", encoding="utf-8")
+
+        controller = VideoUIController(VideoUIConfig(incoming=workspace / "incoming", library=library))
+        controller.scan()
+        controller.accept_candidate(0, 0)
+
+        assert controller.items[1].decision_status == "pending"
+        assert controller.items[1].suggested_group_decision == "Half Man"
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 def test_video_manual_tv_selection_with_explicit_episode_resolves_preview(monkeypatch) -> None:
     def _fake_tv_page(*_args, **_kwargs) -> ui_services.UICandidatePage:
         return ui_services.UICandidatePage(

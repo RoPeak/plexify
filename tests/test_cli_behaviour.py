@@ -751,6 +751,13 @@ def test_build_movie_fallback_queries_adds_safe_prefix_for_subtitle_style_titles
     ]
 
 
+def test_build_movie_fallback_queries_adds_punctuation_loss_prefix() -> None:
+    queries = cli.plan_flow.build_movie_fallback_queries("Are You There God Its Me Margaret", None, None)
+
+    assert queries[0] == "are you there god its me margaret"
+    assert "are you there god" in queries[1:]
+
+
 def test_build_tv_fallback_queries_strip_year_and_add_shorter_retry() -> None:
     queries = cli.plan_flow.build_tv_fallback_queries("Louis Theroux's Forbidden America (2022)", None, 2022)
     assert queries[0] == "louis therouxs forbidden america"

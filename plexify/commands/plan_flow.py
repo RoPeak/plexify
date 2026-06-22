@@ -25,7 +25,7 @@ def build_movie_fallback_queries(title: str, hint: str | None, year: int | None 
     canonical = build_search_query(base_title, hint_text)
     title_variants: list[str] = [base_title]
     sequel_markers = {"chapter", "part", "volume", "vol", "episode", "tournament", "returns", "return"}
-    subtitle_boundary_tokens = {"the", "a", "an"}
+    subtitle_boundary_tokens = {"the", "a", "an", "its", "it's", "me"}
 
     if ":" in base_title:
         title_variants.append(base_title.split(":", 1)[0].strip())

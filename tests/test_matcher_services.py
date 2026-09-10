@@ -4,7 +4,10 @@ from plexify.services import selection_policy
 from plexify.services.movie_matcher import (
     auto_acceptable,
     broadened_search_query,
+    candidate_lost_title_tokens,
     confidence_score,
+    looks_episodic_movie_filename,
+    risky_movie_candidate,
     search_lost_sequel_marker,
     search_lost_subtitle_tokens,
 )
@@ -52,6 +55,57 @@ def test_movie_auto_acceptable_blocks_lost_subtitle_tokens() -> None:
         )
         is False
     )
+
+
+def test_movie_candidate_subset_does_not_score_as_perfect_match() -> None:
+    score = confidence_score(
+        "Interview with the Vampire The Vampire Lestat",
+        "Interview with the Vampire",
+        None,
+        1994,
+    )
+
+    assert score < 0.9
+    assert candidate_lost_title_tokens(
+        "Interview with the Vampire The Vampire Lestat",
+        "Interview with the Vampire",
+    ) is True
+    assert risky_movie_candidate(
+        "Interview with the Vampire The Vampire Lestat - 03. Toronto",
+        "Interview with the Vampire",
+    ) is True
+
+
+def test_movie_auto_acceptable_blocks_episodic_looking_movie_title() -> None:
+    assert looks_episodic_movie_filename("Interview with the Vampire The Vampire Lestat - 03. Toronto") is True
+    assert (
+        auto_acceptable(
+            top_confidence=0.99,
+            second_confidence=None,
+            top_year=1994,
+            min_confidence=0.9,
+            title="Interview with the Vampire The Vampire Lestat - 03. Toronto",
+            search_query="interview with the vampire the vampire lestat",
+            target_year=None,
+        )
+        is False
+    )
+
+
+def test_movie_auto_acceptable_still_allows_normal_exact_movie_matches() -> None:
+    for title, year in [("Chicken Run", 2000), ("Paddington 2", 2017)]:
+        assert (
+            auto_acceptable(
+                top_confidence=confidence_score(title, title, year, year),
+                second_confidence=None,
+                top_year=year,
+                min_confidence=0.9,
+                title=title,
+                search_query=title.lower(),
+                target_year=year,
+            )
+            is True
+        )
 
 
 def test_tv_confidence_score_rewards_matching_year() -> None:

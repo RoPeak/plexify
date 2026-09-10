@@ -222,6 +222,7 @@ def auto_acceptable(
         title=title,
         search_query=search_query,
         target_year=target_year,
+        top_title=candidates[0].title,
         min_gap=AUTO_ACCEPT_GAP,
     )
 

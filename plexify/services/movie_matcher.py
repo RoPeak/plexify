@@ -52,10 +52,12 @@ def title_similarity(title_guess: str, title_actual: str) -> float:
     best = 0.0
     for left in forms_left:
         for right in forms_right:
-            score = max(
-                fuzz.WRatio(left, right),
-                fuzz.partial_ratio(left, right),
-            ) / 100.0
+            ratio = fuzz.WRatio(left, right) / 100.0
+            partial = fuzz.partial_ratio(left, right) / 100.0
+            if _significant_query_tokens(left) != _significant_query_tokens(right):
+                ratio = min(ratio, 0.88)
+                partial = min(partial, 0.88)
+            score = max(ratio, partial)
             if score > best:
                 best = score
     return best
@@ -115,6 +117,28 @@ def search_lost_subtitle_tokens(title: str, search_query: str) -> bool:
     return bool(missing)
 
 
+def candidate_lost_title_tokens(title: str, candidate_title: str) -> bool:
+    title_tokens = _significant_query_tokens(title)
+    candidate_tokens = _significant_query_tokens(candidate_title)
+    if not title_tokens or not candidate_tokens:
+        return False
+    return bool(title_tokens - candidate_tokens)
+
+
+def looks_episodic_movie_filename(title: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:^|[\s_.-])\d{1,3}[\s_.-]+[A-Za-z][A-Za-z0-9']+",
+            title.strip(),
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def risky_movie_candidate(title: str, candidate_title: str) -> bool:
+    return candidate_lost_title_tokens(title, candidate_title) or looks_episodic_movie_filename(title)
+
+
 def broadened_search_query(title: str, search_query: str) -> bool:
     return search_lost_sequel_marker(title, search_query) or search_lost_subtitle_tokens(title, search_query)
 
@@ -128,11 +152,16 @@ def auto_acceptable(
     title: str,
     search_query: str,
     target_year: int | None,
+    top_title: str | None = None,
     min_gap: float = 0.08,
 ) -> bool:
     if top_confidence < min_confidence:
         return False
     if broadened_search_query(title, search_query):
+        return False
+    if top_title and candidate_lost_title_tokens(title, top_title):
+        return False
+    if looks_episodic_movie_filename(title):
         return False
     if second_confidence is None:
         return True

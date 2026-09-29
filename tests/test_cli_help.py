@@ -11,9 +11,8 @@ HELP_ENV = {"TERM": "dumb", "NO_COLOR": "1", "COLUMNS": "120"}
 
 def _normalise_help_output(output: str) -> str:
     text = ANSI_RE.sub("", output)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n+", "\n", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("│", " ")
+    text = re.sub(r"\s+", " ", text)
     return text.casefold()
 
 

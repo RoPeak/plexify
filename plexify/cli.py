@@ -19,6 +19,8 @@ from rich.table import Table
 from rich.tree import Tree
 
 from .cache import Cache, NullCache
+from .configuration import ConfigurationError, VideoConfig, format_effective_config, load_config, state_paths
+from .preflight import PreflightError, validate_paths
 from . import music as music_util
 from .commands import candidate_flow, confirmations as confirm_cmd
 from .commands import music_flow, plan_flow, video_flow, wizard_flow
@@ -152,6 +154,10 @@ WIZARD_ORGANISE_CHOICES = {
     "m": "music",
     "music": "music",
 }
+VIDEO_INGEST_CHOICES = {"1": "movie", "movies": "movie", "movie": "movie", "2": "tv", "tv": "tv", "shows": "tv", "3": "exit", "exit": "exit", "q": "exit"}
+VIDEO_MODE_CHOICES = {"dry-run": "dry-run", "dry run": "dry-run", "dry": "dry-run", "apply": "apply"}
+VIDEO_PUBLICATION_CHOICES = {"copy": "copy", "c": "copy", "move": "move", "m": "move"}
+VIDEO_CONFLICT_CHOICES = {"rename": "rename", "skip": "skip", "overwrite": "overwrite"}
 WIZARD_LOG_LEVEL_CHOICES = {
     "debug": "DEBUG",
     "info": "INFO",
@@ -264,6 +270,7 @@ class BuildCommandConfig:
     strict_safe: bool = False
     plain_output: bool = False
     platform: str = "auto"
+    category_root: bool = False
 
 
 @dataclass
@@ -295,6 +302,8 @@ class OrganiseOptions:
     strict_safe: bool = False
     plain_output: bool = False
     platform: str = "auto"
+    require_same_filesystem: bool = False
+    category_root: bool = False
 
 
 @dataclass(frozen=True)
@@ -2020,6 +2029,7 @@ def _print_run_summary(
     cache_path: Path | None,
     report_path: Path | None,
     apply_report_path: Path | None = None,
+    copy_mode: bool = True,
 ) -> None:
     video_flow.print_run_summary(
         console=console,
@@ -2031,6 +2041,7 @@ def _print_run_summary(
         cache_path=cache_path,
         report_path=report_path,
         apply_report_path=apply_report_path,
+        copy_mode=copy_mode,
     )
 
 
@@ -2122,6 +2133,7 @@ def _build_command(config: BuildCommandConfig) -> str:
         strict_safe=config.strict_safe,
         plain_output=config.plain_output,
         platform=config.platform,
+        category_root=config.category_root,
     )
 
 
@@ -2264,7 +2276,7 @@ def run_organise(options: OrganiseOptions) -> None:
     strict_safe = _coerce_bool_flag(options.strict_safe, default=False)
     plain_output = _coerce_bool_flag(options.plain_output, default=False)
 
-    if mode not in {"dry-run", "apply"}:
+    if not isinstance(mode, str) or mode not in {"dry-run", "apply"}:
         console.print("Invalid mode. Use dry-run or apply.")
         raise typer.Exit(code=2)
     if media_type not in {"auto", "movie", "tv"}:
@@ -2277,16 +2289,19 @@ def run_organise(options: OrganiseOptions) -> None:
         console.print("Strict-safe mode enabled: cache disabled, auto-accept disabled, confidence floor set to 0.95.")
 
     try:
-        ensure_non_overlapping_paths(
+        preflight = validate_paths(
             incoming,
             library,
-            label_source="Incoming",
-            label_library="Library",
+            apply=mode == "apply",
+            require_same_filesystem=options.require_same_filesystem,
             platform=effective_platform,
         )
-    except PathOverlapError as exc:
-        _print_overlap_error(exc)
-        raise typer.Exit(code=2)
+    except PreflightError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=2) from exc
+    console.print(f"Preflight passed: incoming {preflight.incoming}")
+    console.print(f"Preflight passed: library  {preflight.library}")
+    console.print(f"Same filesystem: {'yes' if preflight.same_filesystem else 'no'}")
 
     if not isinstance(quiet, bool):
         quiet = False
@@ -2347,33 +2362,34 @@ def run_organise(options: OrganiseOptions) -> None:
 
 @app.command()
 def organise(
-    incoming: Path = typer.Option(..., exists=True, file_okay=False, dir_okay=True, help="Folder to scan"),
-    library: Path = typer.Option(..., file_okay=False, dir_okay=True, help="Library root"),
-    mode: str = typer.Option("dry-run", help="dry-run or apply"),
+    incoming: Path | None = typer.Option(None, exists=False, file_okay=False, dir_okay=True, help="Folder to scan (overrides config)"),
+    library: Path | None = typer.Option(None, exists=False, file_okay=False, dir_okay=True, help="Existing library root (overrides config)"),
+    mode: str | None = typer.Option(None, help="dry-run or apply; defaults to config"),
+    config_file: Path | None = typer.Option(None, "--config", help="Configuration TOML path"),
     move: bool = typer.Option(False, "--move", help="Move files (overrides default copy)"),
     copy: bool = typer.Option(False, "--copy", help="Copy files (default behaviour for apply)"),
     extensions: str = typer.Option(DEFAULT_EXTENSIONS, help="Comma-separated extensions"),
-    min_confidence: float = typer.Option(
-        DEFAULT_MIN_CONFIDENCE,
-        help="Minimum confidence for unambiguous auto acceptance",
+    min_confidence: float | None = typer.Option(
+        None,
+        help="Minimum confidence for unambiguous auto acceptance (defaults to config)",
     ),
     cache: Path = typer.Option(None, help="Cache path"),
     report: Path = typer.Option(None, help="Report path"),
     yes: bool = typer.Option(
         False,
         "--yes",
-        help="Auto-accept unambiguous top result when confidence >= 0.90",
+        help="Auto-accept unambiguous top; result when confidence >= 0.90",
     ),
     limit: int = typer.Option(None, help="Limit number of files"),
     print_tree: bool = typer.Option(False, "--print-tree", help="Print planned destination tree"),
     interactive: bool = typer.Option(False, "--interactive", help="Force interactive mode"),
     no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive prompts"),
     media_type: str = typer.Option("auto", "--media-type", help="Filter by media type: auto/movie/tv"),
-    no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes"),
+    no_cache: bool | None = typer.Option(None, "--no-cache/--use-cache", help="Disable or enable cache reads/writes (defaults to config)"),
     clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running"),
     offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run"),
     quiet: bool = typer.Option(False, "--quiet", "--batch", help="Reduce per-file output; show errors and summary"),
-    on_conflict: str = typer.Option("rename", "--on-conflict", help="On destination conflict: rename/skip/overwrite"),
+    on_conflict: str | None = typer.Option(None, "--on-conflict", help="On destination conflict: rename/skip/overwrite (defaults to config)"),
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
@@ -2383,43 +2399,73 @@ def organise(
         "--prune-ignore",
         help="Comma-separated ignorable filenames for prune-empty-dirs",
     ),
-    allow_risky_enter_accept: bool = typer.Option(
-        False,
-        "--allow-risky-enter-accept",
-        help="Allow Enter to accept top match in risky candidate prompts",
+    allow_risky_enter_accept: bool | None = typer.Option(
+        None,
+        "--allow-risky-enter-accept/--disallow-risky-enter-accept",
+        help="Allow Enter to accept top match in risky candidate prompts (defaults to config)",
     ),
     strict_safe: bool = typer.Option(
         False,
         "--strict-safe",
         help="Use conservative matching defaults (disable cache reuse, disable auto-accept, higher confidence floor)",
     ),
-    plain_output: bool = typer.Option(
-        False,
-        "--plain-output",
-        help="Use transcript-friendly plain text output instead of Rich panels and tables",
+    plain_output: bool | None = typer.Option(
+        None,
+        "--plain-output/--rich-output",
+        help="Use transcript-friendly plain text output or Rich panels and tables (defaults to config)",
     ),
     platform: str = typer.Option(
         "auto",
         "--platform",
         help=f"Platform mode: auto/windows/linux (env: {PLEXIFY_PLATFORM_ENV})",
     ),
+    require_same_filesystem: bool | None = typer.Option(None, "--require-same-filesystem/--allow-cross-filesystem"),
+    library_is_category_root: bool = typer.Option(False, "--library-is-category-root", hidden=True),
 ) -> None:
-    """Organise video files for Plex.
+    """Organise video files using Plexify's recognition and planning pipeline.
 
     Logging flags: --log-level, --log-format, --log-file.
     """
+    try:
+        config = load_config(config_file if isinstance(config_file, Path) else None)
+    except ConfigurationError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=2) from exc
+    media_configured = False
+    category_root = False
+    if incoming is None or library is None:
+        if media_type not in {"movie", "tv"}:
+            console.print("Configured paths require --media-type movie or --media-type tv.")
+            raise typer.Exit(code=2)
+        roots = config.roots_for(media_type)
+        if incoming is None:
+            incoming = roots.incoming
+            media_configured = True
+        if library is None:
+            library = roots.library
+            media_configured = True
+        category_root = media_configured
+    if incoming is None or library is None:
+        console.print(f"Incoming and library paths are required. Inspect or edit: {config.path}")
+        raise typer.Exit(code=2)
+    mode = mode or config.mode
+    min_confidence = config.min_confidence if min_confidence is None else min_confidence
+    on_conflict = on_conflict or config.on_conflict
+    plain_output = config.plain_output if plain_output is None else plain_output
+    if not move and not copy:
+        move = config.publication == "move"
     move = _coerce_bool_flag(move, default=False)
     copy = _coerce_bool_flag(copy, default=False)
     interactive = _coerce_bool_flag(interactive, default=False)
     no_interactive = _coerce_bool_flag(no_interactive, default=False)
     yes = _coerce_bool_flag(yes, default=False)
     print_tree = _coerce_bool_flag(print_tree, default=False)
-    no_cache = _coerce_bool_flag(no_cache, default=False)
+    no_cache = _coerce_bool_flag(no_cache, default=not config.use_cache)
     clear_cache = _coerce_bool_flag(clear_cache, default=False)
     offline = _coerce_bool_flag(offline, default=False)
     quiet = _coerce_bool_flag(quiet, default=False)
     prune_empty_dirs = _coerce_bool_flag(prune_empty_dirs, default=False)
-    allow_risky_enter_accept = _coerce_bool_flag(allow_risky_enter_accept, default=False)
+    allow_risky_enter_accept = _coerce_bool_flag(allow_risky_enter_accept, default=config.allow_risky_enter_accept)
     strict_safe = _coerce_bool_flag(strict_safe, default=False)
     plain_output = _coerce_bool_flag(plain_output, default=False)
 
@@ -2460,6 +2506,8 @@ def organise(
         strict_safe=strict_safe,
         plain_output=plain_output,
         platform=platform,
+        require_same_filesystem=(config.require_same_filesystem if not isinstance(require_same_filesystem, bool) else require_same_filesystem),
+        category_root=category_root or _coerce_bool_flag(library_is_category_root, default=False),
     )
     run_organise(options)
 
@@ -2963,7 +3011,7 @@ def _resolve_cache_path_from_options(cache: Path | None, library: Path | None) -
     if cache is not None:
         return cache
     if library is not None:
-        return library / ".plexify" / "cache.json"
+        return state_paths(library)[0]
     console.print("Provide --cache or --library.")
     raise typer.Exit(code=2)
 
@@ -2971,7 +3019,7 @@ def _resolve_cache_path_from_options(cache: Path | None, library: Path | None) -
 @cache_app.command("stats")
 def cache_stats(
     cache: Path = typer.Option(None, "--cache", help="Cache path"),
-    library: Path = typer.Option(None, "--library", help="Library root (uses .plexify/cache.json)"),
+    library: Path = typer.Option(None, "--library", help="Library root (uses the XDG video-ingest cache)"),
 ) -> None:
     cache_path = _resolve_cache_path_from_options(cache, library)
     store = Cache(cache_path)
@@ -2992,7 +3040,7 @@ def cache_stats(
 @cache_app.command("prune")
 def cache_prune(
     cache: Path = typer.Option(None, "--cache", help="Cache path"),
-    library: Path = typer.Option(None, "--library", help="Library root (uses .plexify/cache.json)"),
+    library: Path = typer.Option(None, "--library", help="Library root (uses the XDG video-ingest cache)"),
 ) -> None:
     cache_path = _resolve_cache_path_from_options(cache, library)
     store = Cache(cache_path)
@@ -3020,7 +3068,7 @@ def cache_prune(
 def cache_delete(
     query: str = typer.Argument(..., help="Substring to match cache keys"),
     cache: Path = typer.Option(None, "--cache", help="Cache path"),
-    library: Path = typer.Option(None, "--library", help="Library root (uses .plexify/cache.json)"),
+    library: Path = typer.Option(None, "--library", help="Library root (uses the XDG video-ingest cache)"),
 ) -> None:
     cache_path = _resolve_cache_path_from_options(cache, library)
     store = Cache(cache_path)
@@ -3063,6 +3111,18 @@ def _infer_library_root_from_report(report: Path) -> Path | None:
     return plexify_dir.parent
 
 
+@app.command("config")
+def show_config(file: Path | None = typer.Option(None, "--file", help="Inspect another TOML configuration")) -> None:
+    """Show effective Video Ingest settings without changing the filesystem."""
+    try:
+        config = load_config(file)
+    except ConfigurationError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=2) from exc
+    console.print(format_effective_config(config))
+    raise typer.Exit(code=0)
+
+
 @app.command()
 def ui(
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
@@ -3084,13 +3144,13 @@ def undo(report: Path = typer.Option(None, help="Report path"), library: Path = 
         if library is None:
             console.print("Provide --report or --library to locate reports.")
             raise typer.Exit(code=2)
-        reports_dir = library / ".plexify" / "reports"
-        if not reports_dir.exists():
-            console.print("No reports directory found.")
-            raise typer.Exit(code=2)
-        reports = sorted(reports_dir.glob("*.json"), reverse=True)
+        xdg_reports_dir = state_paths(library)[1]
+        legacy_reports_dir = library / ".plexify" / "reports"
+        reports = sorted(xdg_reports_dir.glob("*.json"), reverse=True)
         if not reports:
-            console.print("No reports found.")
+            reports = sorted(legacy_reports_dir.glob("*.json"), reverse=True)
+        if not reports:
+            console.print("No reports directory or reports found.")
             raise typer.Exit(code=2)
         report = reports[0]
     elif library is None:
@@ -3197,6 +3257,104 @@ def wizard(
             log_file=selected_log_file,
             platform=requested_platform,
         )
+
+
+def video_ingest() -> None:
+    """Console entry point: guide bare use, preserve the advanced Typer CLI."""
+    if len(sys.argv) <= 1:
+        _video_ingest_wizard()
+    else:
+        app()
+
+
+def _video_ingest_wizard() -> None:
+    try:
+        config = load_config()
+    except ConfigurationError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=2) from exc
+
+    console.print("Video Ingest")
+    console.print(f"Movies incoming: {config.movies.incoming or '<not configured>'}")
+    console.print(f"Movies library:  {config.movies.library or '<not configured>'}")
+    console.print(f"TV incoming:     {config.tv.incoming or '<not configured>'}")
+    console.print(f"TV library:      {config.tv.library or '<not configured>'}")
+    choice = _prompt_choice_loop(
+        "Choose [1] Movies, [2] TV Shows, [3] Exit",
+        VIDEO_INGEST_CHOICES,
+        None,
+        allow_empty=True,
+        error="Enter 1 for Movies, 2 for TV Shows, or 3 to exit.",
+        default="exit",
+    )
+    if choice == "exit":
+        return
+
+    try:
+        roots = config.roots_for(choice)
+    except ConfigurationError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=2) from exc
+    if roots.incoming is None or roots.library is None:
+        console.print(f"Configure both paths in {config.path}, then run `video-ingest config` to inspect them.")
+        console.print("No changes made.")
+        raise typer.Exit(code=2)
+
+    label = "Movies" if choice == "movie" else "TV Shows"
+    mode = _prompt_choice_loop(
+        "Mode (dry-run/apply)", VIDEO_MODE_CHOICES, None, allow_empty=True,
+        error="Enter dry-run or apply.", default=config.mode,
+    )
+    publication = _prompt_choice_loop(
+        "Publication (copy preserves source / move removes source)", VIDEO_PUBLICATION_CHOICES, None,
+        allow_empty=True, error="Enter copy or move.", default=config.publication,
+    )
+    conflict = _prompt_choice_loop(
+        "Destination conflict policy (rename/skip/overwrite)", VIDEO_CONFLICT_CHOICES, None,
+        allow_empty=True, error="Enter rename, skip, or overwrite.", default=config.on_conflict,
+    )
+    copy_mode = publication == "copy"
+    console.print(f"Media type: {label}")
+    console.print(f"Incoming: {roots.incoming}")
+    console.print(f"Library:  {roots.library}")
+    console.print(f"Mode: {mode}")
+    console.print(f"Publication: {'COPY' if copy_mode else 'MOVE'}")
+    console.print(f"Conflict policy: {conflict}")
+    console.print(f"Source lifecycle: {'preserved' if copy_mode else 'removed after successful move'}")
+    console.print("Preflight will validate both configured roots before discovery.")
+
+    options = OrganiseOptions(
+        incoming=roots.incoming,
+        library=roots.library,
+        mode=mode,
+        copy_mode=copy_mode,
+        extensions=DEFAULT_EXTENSIONS,
+        min_confidence=config.min_confidence,
+        cache=None,
+        report=None,
+        yes=True,
+        limit=None,
+        print_tree=False,
+        interactive_mode=True,
+        media_type=choice,
+        no_cache=not config.use_cache,
+        clear_cache=False,
+        offline=False,
+        on_conflict=conflict,
+        log_level="WARNING",
+        log_format="text",
+        log_file=None,
+        prune_empty_dirs=False,
+        prune_ignore=DEFAULT_PRUNE_IGNORE,
+        quiet=False,
+        allow_risky_enter_accept=config.allow_risky_enter_accept,
+        strict_safe=False,
+        plain_output=config.plain_output,
+        platform="auto",
+        require_same_filesystem=config.require_same_filesystem,
+        category_root=True,
+    )
+    run_organise(options)
 
 
 def _prompt_non_overlapping_paths(

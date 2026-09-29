@@ -1441,6 +1441,7 @@ def _finalize_tv_selection(
             "episode_end": int(episode_end) if episode_end is not None else None,
             "episode_title": metadata.get("episode_title") or episode_title,
             "selection": {
+                "confidence": selected.confidence,
                 "source": selected.source,
                 "mode": outcome,
                 "reference_title": reference_title,
@@ -1586,6 +1587,7 @@ def _finalize_movie_selection(
             "title": metadata.get("title") or selected.title,
             "year": year,
             "selection": {
+                "confidence": selected.confidence,
                 "source": selected.source,
                 "mode": outcome,
                 "reference_title": reference_title,

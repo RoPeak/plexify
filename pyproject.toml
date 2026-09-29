@@ -17,10 +17,12 @@ dependencies = [
   "guessit==3.8.0",
   "rapidfuzz==3.9.6",
   "prompt_toolkit==3.0.47",
+  "tomli==2.2.1; python_version < '3.11'",
 ]
 
 [project.scripts]
 plexify = "plexify.cli:app"
+video-ingest = "plexify.cli:video_ingest"
 
 [project.optional-dependencies]
 dev = [

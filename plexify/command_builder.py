@@ -42,6 +42,7 @@ def build_organise_command(
     strict_safe: bool = False,
     plain_output: bool = False,
     platform: str = "auto",
+    category_root: bool = False,
 ) -> str:
     parts = [
         "python -m plexify.cli organise",
@@ -88,6 +89,8 @@ def build_organise_command(
         parts.append("--strict-safe")
     if plain_output:
         parts.append("--plain-output")
+    if category_root:
+        parts.append("--library-is-category-root")
     if not interactive:
         parts.append("--no-interactive")
     return " ".join(parts)

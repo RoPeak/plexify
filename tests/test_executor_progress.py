@@ -69,12 +69,11 @@ def test_execute_plans_reports_verification_error_without_successful_apply(
     destination = tmp_path / "library" / "Movie.mp4"
     applied: list[object] = []
 
-    def _short_copy(source: Path, destination: Path, *, overwrite: bool, progress_callback=None) -> int:
-        destination.parent.mkdir(parents=True, exist_ok=True)
+    def _short_copy(source: Path, destination: Path, *, progress_callback=None) -> int:
         destination.write_bytes(b"abc")
         return 3
 
-    monkeypatch.setattr(executor_module, "_copy_to_destination", _short_copy)
+    monkeypatch.setattr(executor_module, "_copy_with_progress", _short_copy)
 
     result = execute_plans(
         [_plan(source, destination)],
@@ -197,7 +196,7 @@ def test_apply_with_streamed_report_finalizes_after_cancel(tmp_path: Path) -> No
     payload = read_report(report_path)
     assert len(result.moved) == 1
     assert payload["mode"] == "apply"
-    assert len(payload["plans"]) == 1
+    assert len(payload["operations"]) == 1
     assert any(event["phase"] == "cancelled" for event in events)
     assert events[-1]["phase"] == "done"
     assert events[-1]["completed"] == 1

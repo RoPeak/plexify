@@ -8,3 +8,4 @@ rapidfuzz==3.9.6
 pytest==8.2.2
 pre-commit>=3.7,<5
 prompt_toolkit==3.0.47
+tomli==2.2.1; python_version < '3.11'

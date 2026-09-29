@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,13 +21,14 @@ COPY_BUFFER_SIZE = 8 * 1024 * 1024
 
 
 def _overwrite_temp_path(destination: Path) -> Path:
-    return destination.with_name(f"{destination.name}.plexify.tmp")
+    return destination.with_name(f".{destination.name}.plexify-{uuid.uuid4().hex}.tmp")
 
 
 def _replace_destination_atomically(source: Path, destination: Path, *, remove_source_after: bool) -> None:
     tmp_destination = _overwrite_temp_path(destination)
-    shutil.copy2(source, tmp_destination)
     try:
+        shutil.copy2(source, tmp_destination)
+        _verify_applied(source, tmp_destination, copy_mode=True)
         os.replace(tmp_destination, destination)
     except Exception:
         try:
@@ -76,21 +78,53 @@ def _copy_to_destination(
     destination: Path,
     *,
     overwrite: bool,
+    on_conflict: str = "rename",
     progress_callback: Callable[[int], None] | None = None,
-) -> int:
-    if overwrite:
-        tmp_destination = _overwrite_temp_path(destination)
-        try:
-            copied = _copy_with_progress(source, tmp_destination, progress_callback=progress_callback)
+) -> tuple[int, Path]:
+    """Copy and verify a hidden sibling before publishing its media name.
+
+    No-clobber publication uses a same-filesystem hard link. This is an
+    atomic create-if-absent operation on Linux and Windows. If unsupported,
+    publication fails closed rather than falling back to check-then-rename.
+    """
+    tmp_destination = _overwrite_temp_path(destination)
+    with tmp_destination.open("xb"):
+        pass
+    try:
+        copied = _copy_with_progress(source, tmp_destination, progress_callback=progress_callback)
+        _verify_applied(source, tmp_destination, copy_mode=True)
+        if overwrite:
             os.replace(tmp_destination, destination)
-            return copied
-        except Exception:
+            published = destination
+        else:
+            published = destination
+            while True:
+                try:
+                    os.link(tmp_destination, published)
+                    break
+                except FileExistsError:
+                    if on_conflict != "rename":
+                        raise
+                    published = unique_path(published)
             try:
-                tmp_destination.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("overwrite_temp_cleanup_failed", extra={"path": str(tmp_destination)})
-            raise
-    return _copy_with_progress(source, destination, progress_callback=progress_callback)
+                tmp_destination.unlink()
+            except OSError as cleanup_error:
+                # Publication succeeded; the final file is complete. Report it
+                # as success and leave the hidden recovery file for inspection.
+                logger.warning(
+                    "copy_temp_cleanup_failed",
+                    extra={"path": str(tmp_destination), "error": str(cleanup_error)},
+                )
+        return copied, published
+    except Exception:
+        try:
+            tmp_destination.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            logger.warning(
+                "copy_temp_cleanup_failed",
+                extra={"path": str(tmp_destination), "error": str(cleanup_error)},
+            )
+        raise
 
 
 def execute_plans(
@@ -257,10 +291,11 @@ def execute_plans(
             planned = MovePlan(plan.source, destination, plan.mode, plan.media_type, plan.metadata)
             if destination.exists() and on_conflict == "overwrite":
                 if copy_mode:
-                    copied = _copy_to_destination(
+                    copied, destination = _copy_to_destination(
                         plan.source,
                         destination,
                         overwrite=True,
+                        on_conflict=on_conflict,
                         progress_callback=(
                             lambda copied_bytes, active_plan=planned: _emit_copy_progress(
                                 on_plan_event,
@@ -281,10 +316,11 @@ def execute_plans(
                     _replace_destination_atomically(plan.source, destination, remove_source_after=True)
                     copied = _safe_source_size(plan.source)
             elif copy_mode:
-                copied = _copy_to_destination(
+                copied, destination = _copy_to_destination(
                     plan.source,
                     destination,
                     overwrite=False,
+                    on_conflict=on_conflict,
                     progress_callback=(
                         lambda copied_bytes, active_plan=planned: _emit_copy_progress(
                             on_plan_event,
@@ -306,7 +342,7 @@ def execute_plans(
                 copied = _safe_source_size(destination)
             _verify_applied(plan.source, destination, copy_mode=copy_mode)
             completed_bytes += copied if copy_mode else _safe_source_size(destination)
-            applied = planned
+            applied = MovePlan(plan.source, destination, plan.mode, plan.media_type, plan.metadata)
             moved.append(applied)
             if on_applied is not None:
                 on_applied(applied)
@@ -533,13 +569,15 @@ def _execute_copy_plans_parallel(
                     )
                 )
 
-            copied = _copy_to_destination(
+            copied, destination = _copy_to_destination(
                 plan.source,
                 destination,
                 overwrite=destination.exists() and on_conflict == "overwrite",
+                on_conflict=on_conflict,
                 progress_callback=_progress,
             )
             _verify_applied(plan.source, destination, copy_mode=True)
+            applied = MovePlan(plan.source, destination, plan.mode, plan.media_type, plan.metadata)
             return "moved", applied, copied, None
         except (OSError, shutil.Error, ValueError) as exc:
             logger.exception("plan_execution_failed", extra={"source": plan.source, "destination": plan.destination})

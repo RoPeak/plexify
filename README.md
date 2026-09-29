@@ -8,7 +8,7 @@ Plexify is a CLI that organises movie and TV files into a Plex-friendly folder s
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10+ (CI covers Python 3.10, 3.11, 3.12, and 3.14)
 - Windows and Linux tested in CI
 
 ## Installation
@@ -29,17 +29,54 @@ python -m pip install -r requirements.txt
 python -m pip install -e .[dev]
 ```
 
-After editable install, you can run the console script directly:
+After editable install, `video-ingest` is the preferred operator command. `plexify` remains available for compatibility:
 
-```powershell
+```bash
+video-ingest --help
 plexify --help
 ```
+
+For a per-user editable install from a checkout with pipx:
+
+```bash
+pipx install --editable --python "$(command -v python3.14)" ~/server-tools/plexify
+```
+
+The checkout remains the source of truth; update it with `git pull` in the repository and then run `pipx reinstall plexify` only if dependencies changed. Both commands are installed into the user's pipx environment.
 
 CI uses the same local verification command:
 
 ```powershell
 python -m pytest -q
 ```
+
+## Headless video ingest
+
+Bare `video-ingest` opens a Movies/TV workflow. It reads `~/.config/video-ingest/config.toml` (or `$XDG_CONFIG_HOME/video-ingest/config.toml`; `VIDEO_INGEST_CONFIG` overrides the file path). Run `video-ingest config` to inspect effective settings. A missing config uses safe built-in defaults and does not create media folders.
+
+Example configuration:
+
+```toml
+[defaults]
+mode = "dry-run"
+publication = "copy"
+on_conflict = "rename"
+min_confidence = 0.90
+use_cache = true
+require_same_filesystem = true
+
+[movies]
+incoming = "/path/to/ingest/movies"
+library = "/path/to/media/Movies"
+
+[tv]
+incoming = "/path/to/ingest/tv"
+library = "/path/to/media/TV Shows"
+```
+
+Explicit CLI options override config. Config overrides built-in defaults. The guided flow validates both roots before discovery, shows the complete source-to-destination plan and asks for a separate plan-level approval immediately before apply. COPY/PRESERVE is the default. MOVE removes incoming files only after successful publication and requires stronger confirmation; overwrite also requires its typed confirmation. No automatic cleanup is performed.
+
+Copies stage to a hidden `.plexify-<id>.tmp` sibling, verify completion by size, then publish atomically. New video state is outside media libraries: cache in `$XDG_CACHE_HOME/video-ingest/<library-id>/cache.json` (default `~/.cache`) and reports in `$XDG_STATE_HOME/video-ingest/<library-id>/reports` (default `~/.local/state`). Explicit cache/report paths still work. Existing legacy `.plexify` files are not deleted or migrated automatically. A legacy cache can still be inspected explicitly with `--cache PATH`; new runs use the separate XDG cache. `video-ingest undo --library PATH` searches the library-scoped XDG reports first, then legacy reports; `--report` selects an exact report.
 
 ## Quick start
 

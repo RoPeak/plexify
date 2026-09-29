@@ -104,11 +104,17 @@ def print_run_summary(
     cache_path: Path | None,
     report_path: Path | None,
     apply_report_path: Path | None = None,
+    copy_mode: bool = True,
 ) -> None:
     failures = len(errors) + len(result.errors)
     console.print("Summary:")
     console.print(f"Planned: {len(plans)}")
-    console.print(f"Skipped: {stats.skipped}")
+    console.print(f"Published: {len(result.moved)}")
+    console.print(f"Source lifecycle: {'preserved (COPY)' if copy_mode else 'removed after successful MOVE'}")
+    console.print("Apply verification: destination existence and file size checked; Jellyfin playback is not checked")
+    console.print(f"Skipped: {stats.skipped + len(result.skipped)}")
+    if result.skipped or result.errors:
+        console.print(f"Publication conflicts: {len(result.skipped) + len(result.errors)}")
     for line in skip_reason_lines(stats):
         console.print(line)
     console.print(f"Cache hits: {stats.cache_hits}")

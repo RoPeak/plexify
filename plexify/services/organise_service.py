@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+from ..configuration import state_paths
 from typing import Any
 
 
@@ -57,15 +59,17 @@ def run_video_workflow(
     run_id = options.run_id
 
     ignored_prune_files = parse_prune_ignore_fn(prune_ignore)
-    cache_path = cache or library / ".plexify" / "cache.json"
-    report_path = report or library / ".plexify" / "reports" / f"{now_timestamp_fn()}.json"
+    default_cache_path, reports_dir = state_paths(library)
+    cache_path = cache or default_cache_path
+    report_path = report or reports_dir / f"{now_timestamp_fn()}.json"
     if clear_cache:
         cache_path.unlink(missing_ok=True)
 
     media_type_filter = None if media_type == "auto" else media_type
+    planning_library = library.parent if getattr(options, "category_root", False) else library
     plans, errors, stats = plan_items_fn(
         incoming=incoming,
-        library=library,
+        library=planning_library,
         mode=mode,
         copy_mode=copy_mode,
         interactive=interactive_mode,
@@ -100,15 +104,33 @@ def run_video_workflow(
         for line in options.skip_reason_lines_fn(stats):
             console.print(line)
         console.print(f"Errors: {stats.errors + len(errors)}")
-        preview = select_preview_plans_fn(plans, limit=5)
-        if preview:
-            if preview_spans_multiple_groups_fn(preview):
-                console.print("Preview (sampled across shows/titles):")
-            else:
-                console.print("Preview:")
-            for plan in preview:
-                console.print(f"FROM: {format_path_fn(plan.source)}")
-                console.print(f"TO:   {format_path_fn(plan.destination)}")
+        console.print("Complete filesystem plan:")
+        for index, plan in enumerate(plans, start=1):
+            metadata = plan.metadata
+            identity = metadata.get("show") or metadata.get("title") or "Unknown title"
+            year = metadata.get("year")
+            if year:
+                identity = f"{identity} ({year})"
+            if plan.media_type == "tv":
+                season = metadata.get("season")
+                episode = metadata.get("episode")
+                identity += f" — Season {season}, Episode {episode}"
+            selection = metadata.get("selection") or {}
+            confidence = selection.get("confidence") if isinstance(selection, dict) else None
+            confidence_text = f" | confidence {confidence:.3f}" if isinstance(confidence, (int, float)) else ""
+            warnings = []
+            if isinstance(selection, dict) and selection.get("risky_search_query"):
+                warnings.append("broadened/risky search")
+            if isinstance(selection, dict) and selection.get("fallback_attempts"):
+                warnings.append(f"{selection['fallback_attempts']} fallback search(es)")
+            warning_text = f" | warning: {', '.join(warnings)}" if warnings else ""
+            conflict = "existing destination will be overwritten" if plan.destination.exists() and on_conflict == "overwrite" else f"conflict policy {on_conflict}"
+            action = "COPY" if copy_mode else "MOVE"
+            lifecycle = "source preserved" if copy_mode else "source removed after successful move"
+            console.print(f"[{index}/{len(plans)}] {identity}{confidence_text}{warning_text}")
+            console.print(f"  SOURCE: {format_path_fn(plan.source)}")
+            console.print(f"  {action} → DESTINATION: {format_path_fn(plan.destination)}")
+            console.print(f"  Conflict: {conflict} | {lifecycle}")
         if not copy_mode:
             console.print("Warning: move will remove the original files from the incoming folder.")
             if not confirm_move_fn(None):
@@ -147,11 +169,36 @@ def run_video_workflow(
         result=result,
         cache_path=None if no_cache else cache_path,
         report_path=report_path,
+        copy_mode=copy_mode,
     )
 
     apply_report_path = None
     if not apply_mode and interactive_mode and plans:
-        if confirm_fn("Apply these changes now? [y/N]", False, None, show_default=False):
+        console.print("Complete filesystem plan before approval:")
+        for index, plan in enumerate(plans, start=1):
+            metadata = plan.metadata
+            identity = metadata.get("show") or metadata.get("title") or "Unknown title"
+            year = metadata.get("year")
+            if year:
+                identity = f"{identity} ({year})"
+            if plan.media_type == "tv":
+                identity += f" — Season {metadata.get('season')}, Episode {metadata.get('episode')}"
+            selection = metadata.get("selection") or {}
+            confidence = selection.get("confidence") if isinstance(selection, dict) else None
+            confidence_text = f" | confidence {confidence:.3f}" if isinstance(confidence, (int, float)) else ""
+            warnings = []
+            if isinstance(selection, dict) and selection.get("risky_search_query"):
+                warnings.append("broadened/risky search")
+            if isinstance(selection, dict) and selection.get("fallback_attempts"):
+                warnings.append(f"{selection['fallback_attempts']} fallback search(es)")
+            warning_text = f" | warning: {', '.join(warnings)}" if warnings else ""
+            action = "COPY" if copy_mode else "MOVE"
+            lifecycle = "source preserved" if copy_mode else "source removed after successful move"
+            console.print(f"[{index}/{len(plans)}] {identity}{confidence_text}{warning_text}")
+            console.print(f"  SOURCE: {format_path_fn(plan.source)}")
+            console.print(f"  {action} → DESTINATION: {format_path_fn(plan.destination)}")
+            console.print(f"  Conflict: {on_conflict} | {lifecycle}")
+        if confirm_fn("Apply this complete plan now? [y/N]", False, None, show_default=False):
             if on_conflict == "overwrite" and not confirm_overwrite_apply_fn(plans, copy_mode):
                 console.print("Cancelled. No changes were made.")
             elif not copy_mode:
@@ -159,14 +206,14 @@ def run_video_workflow(
                 if not confirm_move_fn(None):
                     console.print("Cancelled. No changes were made.")
                 else:
-                    apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp_fn()}.json"
+                    apply_report_path = reports_dir / f"{now_timestamp_fn()}.json"
                     result = apply_with_streamed_report_fn(
                         plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path
                     )
                     if prune_empty_dirs:
                         prune_empty_dirs_fn(result.moved, incoming, dry_run=False, ignored_files=ignored_prune_files)
             else:
-                apply_report_path = library / ".plexify" / "reports" / f"{now_timestamp_fn()}.json"
+                apply_report_path = reports_dir / f"{now_timestamp_fn()}.json"
                 result = apply_with_streamed_report_fn(
                     plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path
                 )
@@ -197,6 +244,7 @@ def run_video_workflow(
             strict_safe=strict_safe,
             plain_output=plain_output,
             platform=platform,
+            category_root=getattr(options, "category_root", False),
         )
         console.print("Apply command:")
         console.print(build_command_fn(apply_config))

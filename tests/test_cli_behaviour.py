@@ -3321,6 +3321,7 @@ def test_no_tv_candidates_can_switch_to_movie_search(monkeypatch) -> None:
     confirms = iter([True, True])
     monkeypatch.setattr(cli, "_tv_candidates", _fake_tv_candidates)
     monkeypatch.setattr(cli, "_movie_candidates", _fake_movie_candidates)
+    monkeypatch.setattr(cli.wikidata, "fetch_enrichment", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: next(confirms))
 
     incoming = Path("plexify")

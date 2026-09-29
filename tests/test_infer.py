@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from plexify.infer import filename_show_group_key, infer_item
+from plexify.infer import _extract_episode_title, filename_show_group_key, infer_item
 
 
 IPLAYER_RUN_FILENAMES = [
@@ -506,3 +506,15 @@ def test_reported_run_tv_filename_groups_are_distinct() -> None:
     assert all(groups[filename] == "half man" for filename in groups if filename.startswith("Half_Man"))
     assert all(groups[filename] == "scot squad" for filename in groups if filename.startswith("Scot_Squad"))
     assert all(groups[filename] == "the young offenders" for filename in groups if filename.startswith("The_Young_Offenders"))
+
+
+@pytest.mark.parametrize(
+    "stem, episode, expected",
+    [
+        ("Banshee.S01E01.Pilot.1080p.BluRay.x264.10bit-MRSK", 1, "Pilot"),
+        ("Show.S02E03.The.Long.Awaited.Day.WEB-DL.DD5.1.H264-GRP", 3, "The Long Awaited Day"),
+        ("Show.S01E02", 2, None),
+    ],
+)
+def test_episode_title_stops_before_release_tokens(stem: str, episode: int, expected: str | None) -> None:
+    assert _extract_episode_title(stem, episode) == expected

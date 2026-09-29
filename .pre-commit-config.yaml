@@ -3,13 +3,13 @@ repos:
     hooks:
       - id: plexify-fast-gate
         name: plexify fast local gate
-        entry: python scripts/local_ci.py fast
+        entry: scripts/run_local_ci.sh fast
         language: system
         pass_filenames: false
         stages: [pre-commit]
       - id: plexify-pre-push
         name: plexify pre-push pytest gate
-        entry: python scripts/local_ci.py push
+        entry: scripts/run_local_ci.sh push
         language: system
         pass_filenames: false
         always_run: true

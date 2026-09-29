@@ -1,4 +1,5 @@
 import os
+import traceback
 import re
 import sys
 import time
@@ -10,6 +11,7 @@ from typing import Any, Callable, Optional
 
 import requests
 import typer
+import click
 from rapidfuzz import fuzz
 from rich.console import Console
 from rich.panel import Panel
@@ -213,6 +215,8 @@ class CandidatePage:
 
 @dataclass
 class PlanStats:
+    discovered: int = 0
+    renamed_conflicts: int = 0
     auto_matched: int = 0
     user_confirmed: int = 0
     manual: int = 0
@@ -334,6 +338,11 @@ class CandidatePromptPolicy:
 
 class BackRequested(Exception):
     pass
+
+
+class PlanningCancelled(Exception):
+    """Normal operator cancellation while selecting candidates."""
+
 
 
 def _resolve_platform_context(platform: str | None) -> tuple[str, str, str | None]:
@@ -800,6 +809,13 @@ def _print_candidates(
     *,
     item: InferredItem | None = None,
 ) -> None:
+    if media_type == "movie" and item is not None and item.year is not None:
+        top = candidates[0] if candidates else None
+        if top is not None and top.year is not None and top.year != item.year:
+            _safe_print(
+                f"Year mismatch: filename {item.year}, provider {top.year}. The title may match strongly; review explicitly.",
+                progress,
+            )
     prompting_ui.print_candidates(
         console=_console_for(progress),
         media_type=media_type,
@@ -1091,14 +1107,50 @@ def _prompt_manual_tv(item: InferredItem, progress: Progress | None) -> Candidat
 
 
 def _prompt_manual_movie(item: InferredItem, progress: Progress | None) -> tuple[Candidate, str]:
-    title = _prompt_text("Movie title", item.title, progress)
-    year = _prompt_optional_int(
-        "Movie year (optional, helps disambiguate)",
-        "",
-        progress,
-        show_default=False,
-    )
-    hint = _prompt_text("Hint (optional, director/cast/keyword)", "", progress, show_default=False)
+    inferred_title = item.title
+    title = _prompt_text("Manual movie title (Enter keeps inferred title; q=quit)", inferred_title, progress).strip()
+    if title.casefold() == "q":
+        raise PlanningCancelled
+    if title.casefold() == "b":
+        raise BackRequested
+    year_default = str(item.year) if item.year else ""
+    if re.fullmatch(r"(?:18|19|20|21)\d{2}", title):
+        looks_like_year = int(title)
+        if _confirm(
+            f'"{title}" looks like a year, not a movie title. Use it as the year for "{inferred_title}"? [Y/n]',
+            True,
+            progress,
+            show_default=False,
+        ):
+            title = inferred_title
+            year_default = str(looks_like_year)
+        else:
+            _safe_print(f"Keeping the inferred title: {inferred_title}", progress)
+            title = inferred_title
+    title = title or inferred_title
+    while True:
+        year_text = _prompt_text(
+            "Movie year (optional, helps disambiguate; q=quit; b=back)",
+            year_default,
+            progress,
+            show_default=bool(year_default),
+        ).strip()
+        if year_text.casefold() == "q":
+            raise PlanningCancelled
+        if year_text.casefold() == "b":
+            raise BackRequested
+        if not year_text:
+            year = None
+            break
+        if re.fullmatch(r"(?:18|19|20|21)\d{2}", year_text):
+            year = int(year_text)
+            break
+        _safe_print("Enter a four-digit year or leave it blank.", progress)
+    hint = _prompt_text("Hint (optional, director/cast/keyword; q=quit; b=back)", "", progress, show_default=False).strip()
+    if hint.casefold() == "q":
+        raise PlanningCancelled
+    if hint.casefold() == "b":
+        raise BackRequested
     metadata = {"qid": None, "title": title, "year": year, "manual": True}
     return Candidate(title=title, year=year, source="Manual", confidence=1.0, metadata=metadata), hint
 
@@ -1157,6 +1209,8 @@ def _record_cache_hit(stats: PlanStats | None) -> None:
 
 def _snapshot_stats(stats: PlanStats) -> PlanStats:
     return PlanStats(
+        discovered=stats.discovered,
+        renamed_conflicts=stats.renamed_conflicts,
         auto_matched=stats.auto_matched,
         user_confirmed=stats.user_confirmed,
         manual=stats.manual,
@@ -1240,7 +1294,11 @@ def _maybe_auto_select_candidate(
     target_year: int | None,
     progress: Progress | None,
 ) -> Candidate | None:
-    if not auto_accept or not _auto_acceptable(
+    if not auto_accept:
+        return None
+    if candidates and target_year is not None and candidates[0].year is not None and candidates[0].year != target_year:
+        return None
+    if not _auto_acceptable(
         candidates,
         min_confidence,
         title=title,
@@ -2030,6 +2088,7 @@ def _print_run_summary(
     report_path: Path | None,
     apply_report_path: Path | None = None,
     copy_mode: bool = True,
+    mode: str = "dry-run",
 ) -> None:
     video_flow.print_run_summary(
         console=console,
@@ -2042,6 +2101,7 @@ def _print_run_summary(
         report_path=report_path,
         apply_report_path=apply_report_path,
         copy_mode=copy_mode,
+        mode=mode,
     )
 
 
@@ -2330,7 +2390,8 @@ def run_organise(options: OrganiseOptions) -> None:
     PLAIN_OUTPUT = plain_output
     CURRENT_EFFECTIVE_PLATFORM = effective_platform
     try:
-        organise_service.run_video_workflow(
+        try:
+            organise_service.run_video_workflow(
             options=options,
             console=console,
             plan_items_fn=_plan_items,
@@ -2352,8 +2413,11 @@ def run_organise(options: OrganiseOptions) -> None:
             now_timestamp_fn=now_timestamp,
             log_event_fn=log_event,
             logger=logger,
-            typer_module=typer,
-        )
+                typer_module=typer,
+            )
+        except PlanningCancelled:
+            log_event(logger, "run_cancelled", run_id=run_id, command="organise", level=20)
+            console.print("Planning cancelled. No filesystem changes were made.")
     finally:
         QUIET_OUTPUT = previous_quiet_output
         PLAIN_OUTPUT = previous_plain_output
@@ -3260,11 +3324,32 @@ def wizard(
 
 
 def video_ingest() -> None:
-    """Console entry point: guide bare use, preserve the advanced Typer CLI."""
-    if len(sys.argv) <= 1:
-        _video_ingest_wizard()
-    else:
-        app()
+    """Console entry point that translates Click control flow into clean exits."""
+    argv = list(sys.argv[1:])
+    debug = "--debug" in argv or os.getenv("VIDEO_INGEST_DEBUG", "").lower() in {"1", "true", "yes"}
+    argv = [argument for argument in argv if argument != "--debug"]
+    try:
+        if not argv:
+            _video_ingest_wizard()
+        else:
+            app(args=argv, standalone_mode=False)
+    except click.exceptions.Exit as exc:
+        if exc.exit_code:
+            raise SystemExit(exc.exit_code) from None
+    except click.exceptions.Abort:
+        console.print("Interrupted. No filesystem changes were made.")
+        raise SystemExit(130) from None
+    except KeyboardInterrupt:
+        console.print("Interrupted. No filesystem changes were made.")
+        raise SystemExit(130) from None
+    except EOFError:
+        console.print("Cancelled at end of input. No filesystem changes were made.")
+    except Exception as exc:
+        logger.error("video_ingest_unexpected_error: %s", exc, exc_info=debug)
+        console.print(f"Error: {type(exc).__name__}: {exc}")
+        if debug:
+            traceback.print_exc()
+        raise SystemExit(1) from None
 
 
 def _video_ingest_wizard() -> None:
@@ -3306,9 +3391,19 @@ def _video_ingest_wizard() -> None:
         error="Enter dry-run or apply.", default=config.mode,
     )
     publication = _prompt_choice_loop(
-        "Publication (copy preserves source / move removes source)", VIDEO_PUBLICATION_CHOICES, None,
-        allow_empty=True, error="Enter copy or move.", default=config.publication,
+        "Publication: [1] COPY - preserve incoming files (recommended/default), [2] MOVE - remove after publication",
+        {"1": "copy", "copy": "copy", "c": "copy", "2": "move", "move": "move", "m": "move"},
+        None,
+        allow_empty=True,
+        error="Enter 1 for COPY or 2 for MOVE.",
+        default="copy" if config.publication == "copy" else "move",
     )
+    if publication == "move":
+        console.print("MOVE mode selected. Successful publications will remove files from Incoming.")
+        console.print("For normal server ingestion, COPY is recommended.")
+        if not _confirm("Continue with MOVE? [y/N]", False, None, show_default=False):
+            console.print("Cancelled. No filesystem changes were made.")
+            return
     conflict = _prompt_choice_loop(
         "Destination conflict policy (rename/skip/overwrite)", VIDEO_CONFLICT_CHOICES, None,
         allow_empty=True, error="Enter rename, skip, or overwrite.", default=config.on_conflict,

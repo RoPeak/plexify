@@ -28,6 +28,10 @@ FILENAME_SHOW_GROUP_PATTERNS = [
     re.compile(r"^(?P<title>.+?)[-_. ]+s\d{1,2}e\d{1,3}(?:[-_. ]+|$)", re.IGNORECASE),
 ]
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
+TECHNICAL_RELEASE_TOKEN_RE = re.compile(
+    r"^(?:2160p|1440p|1080[pi]|720p|576p|480p|4k|8k|x26[45]|h26[45]|hevc|av1|avc|bluray|bdrip|brrip|web|dl|web[- ]?dl|webrip|hdtv|pdtv|dvdrip|hdr10?|dolbyvision|10bit|8bit|aac|ac3|eac3|dd5(?:\.1)?|ddp(?:\.5\.1)?|dts(?:hd)?|truehd|atmos|proper|repack|remux|limited|internal)$",
+    re.IGNORECASE,
+)
 YEAR_RANGE_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})\s*[-–]\s*(19\d{2}|20\d{2})(?!\d)")
 LEADING_EPISODE_RE = re.compile(r"^\s*(\d{1,3})\s*[-_. ]+\s*(.+?)\s*$")
 LEADING_EPISODE_RANGE_RE = re.compile(
@@ -407,6 +411,9 @@ def _extract_episode_title(stem: str, episode: Optional[int]) -> Optional[str]:
     cleaned: list[str] = []
     for token in tokens[start_idx:]:
         lower = token.lower()
+        # Release metadata begins here; stop treating technical tags as title text.
+        if TECHNICAL_RELEASE_TOKEN_RE.fullmatch(lower):
+            break
         if YEAR_RE.fullmatch(token):
             continue
         if lower in NOISE_TOKENS:

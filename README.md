@@ -88,9 +88,12 @@ python -m plexify.cli
 
 The wizard guides you through incoming/library folders, media type, dry-run vs apply, copy vs move,
 auto-accept settings, risky Enter acceptance, confidence threshold, cache usage, and plain transcript output.
-It prints the exact command it runs.
-Move mode requires typing MOVE to confirm. During a dry run, it prints a loud warning that no files
-will be moved or copied, and it offers to apply the plan immediately at the end.
+It prints the selected command and runs it directly. COPY is the default; MOVE requires a separate
+confirmation. During a dry run, the workflow prints a complete review and can apply that same plan immediately
+without repeating metadata selection. Declining leaves every source and destination untouched.
+Movie year differences are called out and block auto-acceptance. TV episodes from a folder are reviewed as
+a grouped show/season plan with exact source-to-destination mappings. Normal quit, cancel, Ctrl-C, and EOF
+exit cleanly without tracebacks; set `VIDEO_INGEST_DEBUG=1` for unexpected-error tracebacks.
 
 Organise (dry run):
 
@@ -115,8 +118,8 @@ python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Med
 ```
 
 Warning: move will remove files from the incoming folder. Use copy first.
-When running in dry-run with interactive mode, Plexify offers to apply the plan at the end without
-redoing the selections. It also prints the exact apply command so you can rerun later.
+When running in dry-run with interactive mode, Plexify offers to apply the reviewed plan at the end without
+redoing the selections. It does not print a separate apply command after the review.
 
 Optional cleanup (move only):
 

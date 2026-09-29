@@ -625,7 +625,7 @@ def _handle_tv_no_candidates(
         helpers._record_stat(stats, "skipped", reason="manual_skip")
         return "return", (None, False)
     if choice == "q":
-        raise helpers.typer.Exit(code=0)
+        raise helpers.PlanningCancelled
     if choice == "b":
         raise helpers.BackRequested
     return "continue", None
@@ -775,7 +775,7 @@ def _handle_tv_candidate_choice(
         helpers._record_stat(stats, "skipped", reason="manual_skip")
         return "return", (None, False)
     if choice == "q":
-        raise helpers.typer.Exit(code=0)
+        raise helpers.PlanningCancelled
     if choice == "b":
         raise helpers.BackRequested
     return "continue", None
@@ -797,8 +797,10 @@ def _resolve_movie_manual_fallback(
     stats: Any,
     helpers: Any,
 ) -> tuple[str, Any, Any, str]:
-    if manual_fallback is None:
-        manual_fallback, manual_hint = helpers._prompt_manual_movie(state.item, progress)
+    # Every explicit manual choice starts fresh; a prior manual result may be stale.
+    manual_fallback, manual_hint = helpers._prompt_manual_movie(
+        helpers._with_title(state.item, state.reference_title), progress
+    )
     if manual_fallback.year is None and interactive:
         new_state = _reload_movie_loop_state(
             state=_CandidateLoopState(
@@ -1005,7 +1007,7 @@ def _handle_movie_no_candidates(
         helpers._record_stat(stats, "skipped", reason="manual_skip")
         return "return", (None, False), manual_fallback, manual_hint
     if choice == "q":
-        raise helpers.typer.Exit(code=0)
+        raise helpers.PlanningCancelled
     if choice == "b":
         raise helpers.BackRequested
     return "continue", None, manual_fallback, manual_hint
@@ -1173,7 +1175,7 @@ def _handle_movie_candidate_choice(
         helpers._record_stat(stats, "skipped", reason="manual_skip")
         return "return", (None, False), manual_fallback, manual_hint
     if choice == "q":
-        raise helpers.typer.Exit(code=0)
+        raise helpers.PlanningCancelled
     if choice == "b":
         raise helpers.BackRequested
     return "continue", None, manual_fallback, manual_hint
@@ -1272,14 +1274,14 @@ def _finalize_tv_selection(
             )
             return None, False
         if season_prompt == "q":
-            raise helpers.typer.Exit(code=0)
+            raise helpers.PlanningCancelled
         season = season_prompt
         episode_prompt = helpers._prompt_int_or_control("Episode", item.episode or 1, progress)
         if episode_prompt == "k":
             helpers._record_stat(stats, "skipped")
             return None, False
         if episode_prompt == "q":
-            raise helpers.typer.Exit(code=0)
+            raise helpers.PlanningCancelled
         episode = episode_prompt
         if not episode_title:
             episode_title = helpers._prompt_text("Episode title (optional)", item.episode_title or "", progress)
@@ -1453,7 +1455,10 @@ def _finalize_tv_selection(
             },
         },
     )
-    helpers._print_plan(plan, progress)
+    # In an interactive batch, the final grouped review lists every exact mapping.
+    # Avoid repeating a standalone plan panel for each episode during selection.
+    if not interactive:
+        helpers._print_plan(plan, progress)
     helpers.log_event(
         helpers.logger,
         "plan_created",
@@ -1595,6 +1600,9 @@ def _finalize_movie_selection(
                 "search_refined": search_refined,
                 "risky_search_query": risky_search_query,
                 "fallback_attempts": fallback_attempts,
+                "filename_year": item.year,
+                "provider_year": selected.year,
+                "year_mismatch": item.year is not None and selected.year is not None and item.year != selected.year,
             },
         },
     )

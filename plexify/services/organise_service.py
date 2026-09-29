@@ -7,6 +7,72 @@ from ..configuration import state_paths
 from typing import Any
 
 
+def _print_complete_plan(console: Any, plans: list[Any], *, on_conflict: str, copy_mode: bool, format_path_fn: Any, heading: str) -> None:
+    console.print(heading)
+    tv_groups: dict[tuple[str, Any], list[Any]] = {}
+    ordered: list[tuple[str, Any]] = []
+    for plan in plans:
+        if plan.media_type == "tv":
+            metadata = plan.metadata
+            key = (str(metadata.get("show") or "Unknown show"), metadata.get("year"))
+            if key not in tv_groups:
+                tv_groups[key] = []
+                ordered.append(("tv", key))
+            tv_groups[key].append(plan)
+        else:
+            ordered.append(("movie", plan))
+
+    def warning_for(plan: Any) -> str:
+        selection = plan.metadata.get("selection") or {}
+        if not isinstance(selection, dict):
+            return ""
+        warnings = []
+        if selection.get("risky_search_query"):
+            warnings.append("broadened/risky search")
+        if selection.get("fallback_attempts"):
+            warnings.append(f"{selection['fallback_attempts']} fallback search(es)")
+        if selection.get("year_mismatch"):
+            warnings.append(f"year mismatch: filename {selection.get('filename_year')}, provider {selection.get('provider_year')}")
+        confidence = selection.get("confidence")
+        suffix = f"confidence {confidence:.3f}" if isinstance(confidence, (int, float)) else ""
+        if warnings:
+            suffix = (suffix + "; " if suffix else "") + "warning: " + ", ".join(warnings)
+        return suffix
+
+    action = "COPY" if copy_mode else "MOVE"
+    lifecycle = "source preserved" if copy_mode else "source removed after successful move"
+    for kind, value in ordered:
+        if kind == "tv":
+            show, year = value
+            group = tv_groups[value]
+            label = f"{show} ({year})" if year else show
+            lifecycle = "COPY / source preserved" if copy_mode else "MOVE / source removed after successful move"
+            console.print(f"{label} — {len(group)} episode(s) | {lifecycle} | conflict policy {on_conflict}:")
+            for plan in sorted(group, key=lambda item: (item.metadata.get("season") or 0, item.metadata.get("episode") or 0, str(item.source))):
+                meta = plan.metadata
+                start = int(meta.get("episode") or 0)
+                end = meta.get("episode_end")
+                episode = f"S{int(meta.get('season') or 0):02d}E{start:02d}"
+                if end and int(end) > start:
+                    episode += f"-E{int(end):02d}"
+                details = warning_for(plan)
+                conflict = "destination exists and will be overwritten" if plan.destination.exists() and on_conflict == "overwrite" else f"conflict: {on_conflict}"
+                detail = f" | {details}" if details else ""
+                console.print(f"  {episode} | {format_path_fn(plan.source)} → {format_path_fn(plan.destination)} | {conflict}{detail}")
+            continue
+        plan = value
+        metadata = plan.metadata
+        identity = metadata.get("title") or "Unknown title"
+        if metadata.get("year"):
+            identity = f"{identity} ({metadata['year']})"
+        details = warning_for(plan)
+        detail = f" | {details}" if details else ""
+        conflict = "existing destination will be overwritten" if plan.destination.exists() and on_conflict == "overwrite" else f"conflict policy {on_conflict}"
+        console.print(f"{identity}{detail}")
+        console.print(f"  SOURCE: {format_path_fn(plan.source)}")
+        console.print(f"  {action} → DESTINATION: {format_path_fn(plan.destination)}")
+        console.print(f"  Conflict: {conflict} | {lifecycle}")
+
 def run_video_workflow(
     *,
     options: Any,
@@ -104,49 +170,23 @@ def run_video_workflow(
         for line in options.skip_reason_lines_fn(stats):
             console.print(line)
         console.print(f"Errors: {stats.errors + len(errors)}")
-        console.print("Complete filesystem plan:")
-        for index, plan in enumerate(plans, start=1):
-            metadata = plan.metadata
-            identity = metadata.get("show") or metadata.get("title") or "Unknown title"
-            year = metadata.get("year")
-            if year:
-                identity = f"{identity} ({year})"
-            if plan.media_type == "tv":
-                season = metadata.get("season")
-                episode = metadata.get("episode")
-                identity += f" — Season {season}, Episode {episode}"
-            selection = metadata.get("selection") or {}
-            confidence = selection.get("confidence") if isinstance(selection, dict) else None
-            confidence_text = f" | confidence {confidence:.3f}" if isinstance(confidence, (int, float)) else ""
-            warnings = []
-            if isinstance(selection, dict) and selection.get("risky_search_query"):
-                warnings.append("broadened/risky search")
-            if isinstance(selection, dict) and selection.get("fallback_attempts"):
-                warnings.append(f"{selection['fallback_attempts']} fallback search(es)")
-            warning_text = f" | warning: {', '.join(warnings)}" if warnings else ""
-            conflict = "existing destination will be overwritten" if plan.destination.exists() and on_conflict == "overwrite" else f"conflict policy {on_conflict}"
-            action = "COPY" if copy_mode else "MOVE"
-            lifecycle = "source preserved" if copy_mode else "source removed after successful move"
-            console.print(f"[{index}/{len(plans)}] {identity}{confidence_text}{warning_text}")
-            console.print(f"  SOURCE: {format_path_fn(plan.source)}")
-            console.print(f"  {action} → DESTINATION: {format_path_fn(plan.destination)}")
-            console.print(f"  Conflict: {conflict} | {lifecycle}")
+        _print_complete_plan(console, plans, on_conflict=on_conflict, copy_mode=copy_mode, format_path_fn=format_path_fn, heading="Complete filesystem plan:")
         if not copy_mode:
             console.print("Warning: move will remove the original files from the incoming folder.")
             if not confirm_move_fn(None):
-                console.print("Cancelled. No changes were made.")
-                raise typer_module.Exit(code=0)
+                console.print("Cancelled. No filesystem changes were made.")
+                return
         else:
             if not confirm_fn("Apply this plan now? [y/N]", False, None, show_default=False):
-                console.print("Cancelled. No changes were made.")
-                raise typer_module.Exit(code=0)
+                console.print("Cancelled. No filesystem changes were made.")
+                return
     if apply_mode and plans and on_conflict == "overwrite":
         if not interactive_mode and not sys.stdin.isatty():
             console.print("Overwrite mode requires an interactive confirmation token (OVERWRITE).")
             raise typer_module.Exit(code=2)
         if not confirm_overwrite_apply_fn(plans, copy_mode):
-            console.print("Cancelled. No changes were made.")
-            raise typer_module.Exit(code=0)
+            console.print("Cancelled. No filesystem changes were made.")
+            return
     if apply_mode and plans:
         result = apply_with_streamed_report_fn(plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=report_path)
     else:
@@ -170,41 +210,21 @@ def run_video_workflow(
         cache_path=None if no_cache else cache_path,
         report_path=report_path,
         copy_mode=copy_mode,
+        mode=mode,
     )
 
     apply_report_path = None
     if not apply_mode and interactive_mode and plans:
-        console.print("Complete filesystem plan before approval:")
-        for index, plan in enumerate(plans, start=1):
-            metadata = plan.metadata
-            identity = metadata.get("show") or metadata.get("title") or "Unknown title"
-            year = metadata.get("year")
-            if year:
-                identity = f"{identity} ({year})"
-            if plan.media_type == "tv":
-                identity += f" — Season {metadata.get('season')}, Episode {metadata.get('episode')}"
-            selection = metadata.get("selection") or {}
-            confidence = selection.get("confidence") if isinstance(selection, dict) else None
-            confidence_text = f" | confidence {confidence:.3f}" if isinstance(confidence, (int, float)) else ""
-            warnings = []
-            if isinstance(selection, dict) and selection.get("risky_search_query"):
-                warnings.append("broadened/risky search")
-            if isinstance(selection, dict) and selection.get("fallback_attempts"):
-                warnings.append(f"{selection['fallback_attempts']} fallback search(es)")
-            warning_text = f" | warning: {', '.join(warnings)}" if warnings else ""
-            action = "COPY" if copy_mode else "MOVE"
-            lifecycle = "source preserved" if copy_mode else "source removed after successful move"
-            console.print(f"[{index}/{len(plans)}] {identity}{confidence_text}{warning_text}")
-            console.print(f"  SOURCE: {format_path_fn(plan.source)}")
-            console.print(f"  {action} → DESTINATION: {format_path_fn(plan.destination)}")
-            console.print(f"  Conflict: {on_conflict} | {lifecycle}")
+        _print_complete_plan(console, plans, on_conflict=on_conflict, copy_mode=copy_mode, format_path_fn=format_path_fn, heading="Complete filesystem plan before approval:")
         if confirm_fn("Apply this complete plan now? [y/N]", False, None, show_default=False):
             if on_conflict == "overwrite" and not confirm_overwrite_apply_fn(plans, copy_mode):
-                console.print("Cancelled. No changes were made.")
+                console.print("Cancelled. No filesystem changes were made.")
+                return
             elif not copy_mode:
                 console.print("Warning: move will remove the original files from the incoming folder.")
                 if not confirm_move_fn(None):
-                    console.print("Cancelled. No changes were made.")
+                    console.print("Cancelled. No filesystem changes were made.")
+                    return
                 else:
                     apply_report_path = reports_dir / f"{now_timestamp_fn()}.json"
                     result = apply_with_streamed_report_fn(
@@ -217,39 +237,22 @@ def run_video_workflow(
                 result = apply_with_streamed_report_fn(
                     plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path
                 )
+            print_run_summary_fn(
+                stats=stats,
+                plans=plans,
+                errors=errors,
+                result=result,
+                cache_path=None if no_cache else cache_path,
+                report_path=report_path,
+                apply_report_path=apply_report_path,
+                copy_mode=copy_mode,
+                mode="apply",
+            )
+        else:
+            console.print("Dry-run complete. Nothing was published.")
 
-    if not apply_mode:
-        apply_config = build_command_config_cls(
-            incoming=incoming,
-            library=library,
-            media_type=media_type,
-            mode="apply",
-            copy_mode=copy_mode,
-            extensions=parse_extensions_fn(extensions),
-            min_confidence=min_confidence,
-            limit=limit,
-            interactive=interactive_mode,
-            print_tree=print_tree,
-            show_enrichment=False,
-            yes=yes,
-            no_cache=no_cache,
-            cache_file=cache,
-            clear_cache=clear_cache,
-            report=None,
-            on_conflict=on_conflict,
-            prune_empty_dirs=prune_empty_dirs,
-            quiet=quiet,
-            prune_ignore=prune_ignore,
-            allow_risky_enter_accept=allow_risky_enter_accept,
-            strict_safe=strict_safe,
-            plain_output=plain_output,
-            platform=platform,
-            category_root=getattr(options, "category_root", False),
-        )
-        console.print("Apply command:")
-        console.print(build_command_fn(apply_config))
-        if apply_report_path is not None:
-            console.print(f"Apply report written: {format_path_fn(apply_report_path)}")
+    if apply_report_path is not None:
+        console.print(f"Apply report: {format_path_fn(apply_report_path)}")
 
     if result.errors or errors:
         log_event_fn(
@@ -294,4 +297,4 @@ def run_video_workflow(
         elapsed_seconds=stats.elapsed,
         applied=apply_mode,
     )
-    raise typer_module.Exit(code=0)
+    return

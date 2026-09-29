@@ -305,7 +305,7 @@ def test_prompt_manual_movie_retries_invalid_optional_year(monkeypatch, tmp_path
 
     assert candidate.year is None
     assert hint == "space"
-    assert messages == ["Please enter a whole number or leave blank."]
+    assert messages == ["Enter a four-digit year or leave it blank."]
 
 
 def test_resolve_destination_ignores_oserror_from_exists(monkeypatch, tmp_path: Path) -> None:
@@ -474,3 +474,14 @@ def test_organise_dry_run_respects_move_flag(monkeypatch, tmp_path: Path) -> Non
         pass
 
     assert captured["copy_mode"] is False
+
+
+def test_prompt_manual_movie_treats_four_digit_title_input_as_year(monkeypatch, tmp_path: Path) -> None:
+    item = InferredItem(path=tmp_path / "Movie.mkv", media_type="movie", title="Movie", year=None, episode_title=None)
+    prompts = iter(["2023", "2023", "director"])
+    monkeypatch.setattr(cli, "_prompt_text", lambda *_args, **_kwargs: next(prompts))
+    monkeypatch.setattr(cli, "_confirm", lambda *_args, **_kwargs: True)
+    candidate, hint = cli._prompt_manual_movie(item, None)
+    assert candidate.title == "Movie"
+    assert candidate.year == 2023
+    assert hint == "director"

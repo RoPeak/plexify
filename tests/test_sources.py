@@ -131,3 +131,17 @@ def test_wikidata_year_uses_earliest_when_no_preferred() -> None:
     film = wikidata.parse_entity("Q2", payload)
     assert film.year == 2012
     assert film.is_film is False
+
+
+def test_wikidata_entity_uses_english_wikipedia_title_when_label_missing() -> None:
+    payload = {
+        "entities": {
+            "Q1": {
+                "sitelinks": {"enwiki": {"title": "Example Film"}},
+                "claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q11424"}}}}]},
+            }
+        }
+    }
+    film = wikidata.parse_entity("Q1", payload)
+    assert film.title == "Example Film"
+    assert film.title != film.qid

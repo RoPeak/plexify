@@ -1,3 +1,4 @@
+import pytest
 import re
 
 from plexify.services import selection_policy
@@ -183,3 +184,20 @@ def test_rank_music_candidates_dedupes_identical_title_and_track_count() -> None
     ]
     ranked = rank_music_candidates(candidates, track_count=12, requested_title="III", requested_year=2014)
     assert [candidate.mbid for candidate in ranked] == ["1", "3"]
+
+
+@pytest.mark.parametrize("top_year", [2001, 2003])
+def test_movie_auto_accept_blocks_filename_provider_year_mismatch(top_year: int) -> None:
+    assert not auto_acceptable(
+        top_confidence=0.999,
+        second_confidence=0.5,
+        top_year=top_year,
+        min_confidence=0.9,
+        title="Example Film",
+        search_query="example film",
+        target_year=2002,
+    )
+
+
+def test_movie_title_matching_ignores_punctuation_differences() -> None:
+    assert confidence_score("Avengers: Infinity War", "Avengers Infinity War", None, None) >= 0.95

@@ -202,7 +202,13 @@ def parse_entity(qid: str, payload: dict[str, Any]) -> WikidataFilm:
     entities = payload.get("entities", {})
     entity = entities.get(qid, {})
     labels = entity.get("labels", {})
-    label = labels.get("en", {}).get("value") or qid
+    label = labels.get("en", {}).get("value")
+    if not label:
+        label = (entity.get("sitelinks", {}).get("enwiki", {}) or {}).get("title")
+    if not label:
+        aliases = entity.get("aliases", {}).get("en", []) or []
+        label = next((item.get("value") for item in aliases if item.get("value")), None)
+    label = label or qid
     return WikidataFilm(qid=qid, title=str(label), year=_extract_year(entity), is_film=_is_film(entity))
 
 

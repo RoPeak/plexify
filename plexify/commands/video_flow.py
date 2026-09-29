@@ -105,21 +105,40 @@ def print_run_summary(
     report_path: Path | None,
     apply_report_path: Path | None = None,
     copy_mode: bool = True,
+    mode: str = "dry-run",
 ) -> None:
-    failures = len(errors) + len(result.errors)
+    planning_failures = len(errors)
+    apply_failures = len(result.errors) if mode == "apply" else 0
     console.print("Summary:")
+    console.print(f"Discovered: {getattr(stats, 'discovered', len(plans) + getattr(stats, 'skipped', 0))}")
     console.print(f"Planned: {len(plans)}")
-    console.print(f"Published: {len(result.moved)}")
-    console.print(f"Source lifecycle: {'preserved (COPY)' if copy_mode else 'removed after successful MOVE'}")
-    console.print("Apply verification: destination existence and file size checked; Jellyfin playback is not checked")
-    console.print(f"Skipped: {stats.skipped + len(result.skipped)}")
-    if result.skipped or result.errors:
-        console.print(f"Publication conflicts: {len(result.skipped) + len(result.errors)}")
-    for line in skip_reason_lines(stats):
-        console.print(line)
-    console.print(f"Cache hits: {stats.cache_hits}")
+    console.print(f"User skipped: {stats.manual_skip}")
+    unmatched = stats.no_candidates + stats.offline_no_cache
+    console.print(f"Unmatched: {unmatched}")
+    console.print(f"Filtered: {stats.filtered_media_type}")
+    console.print(f"Planning errors: {planning_failures}")
+    console.print(f"Auto matched: {stats.auto_matched}")
+    console.print(f"User confirmed: {stats.user_confirmed}")
     console.print(f"Manual entries: {stats.manual}")
-    console.print(f"Failures: {failures}")
+    console.print(f"Cache hits: {stats.cache_hits}")
+    console.print(f"Mode: {mode.upper()}")
+    if mode == "dry-run":
+        console.print(f"Would publish: {len(plans)}")
+        console.print("Published: 0")
+        console.print(f"Not executed because dry-run: {len(plans)}")
+    else:
+        console.print(f"Published: {len(result.moved)}")
+        console.print(f"Verified: {len(result.moved)}")
+        console.print(f"Source lifecycle: {'preserved after COPY' if copy_mode else 'removed after successful MOVE'}")
+        console.print(f"Not published: {max(0, len(plans) - len(result.moved))}")
+    existing_conflicts = stats.conflict_skip + (len(result.skipped) if mode == "apply" else 0)
+    console.print(f"Existing-destination conflicts skipped: {existing_conflicts}")
+    console.print(f"Renamed due to conflict: {stats.renamed_conflicts}")
+    failures = planning_failures + apply_failures
+    console.print(f"Failed: {failures}")
+    if mode == "apply" and result.moved:
+        console.print("Completed successfully.")
+    console.print("Verification checks destination existence and file size; Jellyfin playback is not checked.")
     console.print(f"Elapsed: {stats.elapsed:.2f}s")
     if cache_path is not None:
         console.print(f"Cache path: {format_path_fn(cache_path)}")
@@ -196,6 +215,7 @@ def plan_items(
     plans: list[Any] = []
     errors: list[str] = []
     stats = plan_stats_cls()
+    stats.discovered = len(files)
     started = time.monotonic()
     planned: dict[str, int] = {}
     collisions = 0
@@ -204,6 +224,7 @@ def plan_items(
     media_type_overrides: dict[str, str] = {}
     tv_search_cache: dict[str, list[tvmaze.TVMazeShow]] = {}
     movie_entity_cache: dict[str, wikidata.WikidataFilm] = {}
+    displayed_tv_folders: set[str] = set()
 
     with cache_store.batch():
         with progress_cls(
@@ -253,7 +274,11 @@ def plan_items(
                             )
                             index += 1
                             continue
-                        if not quiet_output:
+                        tv_folder_key = tv_show_folder_cache_key(item.path, incoming) if item.media_type == "tv" else None
+                        repeated_tv_folder = bool(tv_folder_key and tv_folder_key in displayed_tv_folders)
+                        if tv_folder_key:
+                            displayed_tv_folders.add(tv_folder_key)
+                        if not quiet_output and not repeated_tv_folder:
                             safe_print_fn("", progress)
                             console_for_fn(progress).rule()
                             safe_print_fn(file_panel_fn(index + 1, total, item, incoming), progress)
@@ -293,7 +318,7 @@ def plan_items(
                             session_wd=session_wd,
                             episode_cache=episode_cache,
                             progress=progress,
-                            show_cache=show_cache,
+                            show_cache=show_cache and not repeated_tv_folder,
                             stats=stats,
                             incoming_root=incoming,
                             planned=planned,
@@ -324,6 +349,7 @@ def plan_items(
                             plans.append(plan)
                             if collision:
                                 collisions += 1
+                                stats.renamed_conflicts += 1
                         index += 1
                     except back_requested_exc:
                         if not history:
@@ -382,7 +408,12 @@ def plan_items(
                             description=f"Planning: {rich_escape_fn(back_path.name)}",
                         )
                         safe_print_fn("Rewound to previous file.", progress)
-                    except (OSError, ValueError, RuntimeError, requests.RequestException) as exc:
+                    except requests.RequestException as exc:
+                        logger.warning("provider_request_failed", extra={"path": path, "error": str(exc)})
+                        stats.errors += 1
+                        errors.append(f"{path}: provider request failed: {exc}")
+                        index += 1
+                    except (OSError, ValueError, RuntimeError) as exc:
                         logger.exception("planning_failed", extra={"path": path})
                         stats.errors += 1
                         errors.append(f"{path}: {exc}")
@@ -1035,10 +1066,11 @@ def movie_candidates(
     while idx < len(raw_results) and len(results) < limit:
         cand = raw_results[idx]
         idx += 1
+        entity_cache_key = f"wikidata-film:{cand.qid}"
         if movie_entity_cache is not None and cand.qid in movie_entity_cache:
             film = movie_entity_cache[cand.qid]
         else:
-            cache_key = f"wikidata-film:{cand.qid}"
+            cache_key = entity_cache_key
             cached_entity = cache.get_entity(cache_key)
             if isinstance(cached_entity, dict):
                 title = cached_entity.get("title")
@@ -1063,6 +1095,17 @@ def movie_candidates(
                 movie_entity_cache[cand.qid] = film
         if not film.is_film:
             continue
+        # Entity data can omit its English label even when search returned one.
+        # Keep the user-facing title human-readable and never expose a bare QID.
+        if film.title == cand.qid or re.fullmatch(r"Q\d+", film.title):
+            label = cand.label if cand.label and not re.fullmatch(r"Q\d+", cand.label) else None
+            if not label:
+                continue
+            film = wikidata.WikidataFilm(qid=film.qid, title=label, year=film.year, is_film=film.is_film)
+            cache.set_entity(entity_cache_key, {"title": film.title, "year": film.year, "is_film": film.is_film})
+            entity_cache_updated = True
+            if movie_entity_cache is not None:
+                movie_entity_cache[cand.qid] = film
         results.append(movie_candidate_from_film_fn(item, film, description=cand.description))
     if entity_cache_updated:
         cache.save_with_status()

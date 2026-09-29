@@ -155,6 +155,8 @@ def auto_acceptable(
     top_title: str | None = None,
     min_gap: float = 0.08,
 ) -> bool:
+    if target_year is not None and top_year is not None and top_year != target_year:
+        return False
     if top_confidence < min_confidence:
         return False
     if broadened_search_query(title, search_query):

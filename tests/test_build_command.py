@@ -52,7 +52,7 @@ def test_build_command_from_config() -> None:
 
 def test_build_command_escapes_apostrophes_for_windows_shells() -> None:
     config = cli.BuildCommandConfig(
-        incoming=Path("C:/Ronan's Incoming"),
+        incoming=Path("C:/Example User's Incoming"),
         library=Path("D:/Plex"),
         media_type="tv",
         mode="apply",
@@ -76,19 +76,19 @@ def test_build_command_escapes_apostrophes_for_windows_shells() -> None:
     )
 
     command = cli._build_command(config)
-    incoming_quoted = quote_cli_arg(str(Path("C:/Ronan's Incoming")), platform="windows")
+    incoming_quoted = quote_cli_arg(str(Path("C:/Example User's Incoming")), platform="windows")
 
     assert f"--incoming {incoming_quoted}" in command
 
 
 def test_quote_cli_arg_windows_mode() -> None:
-    quoted = quote_cli_arg("C:/Ronan's Incoming", platform="windows")
-    assert quoted == "'C:/Ronan''s Incoming'"
+    quoted = quote_cli_arg("C:/Example User's Incoming", platform="windows")
+    assert quoted == "'C:/Example User''s Incoming'"
 
 
 def test_quote_cli_arg_linux_mode() -> None:
-    quoted = quote_cli_arg("/mnt/media/Ronan's Incoming", platform="linux")
-    assert quoted == "'/mnt/media/Ronan'\"'\"'s Incoming'"
+    quoted = quote_cli_arg("/mnt/media/Example User's Incoming", platform="linux")
+    assert quoted == "'/mnt/media/Example User'\"'\"'s Incoming'"
 
 
 def test_build_command_includes_allow_risky_enter_accept_flag() -> None:

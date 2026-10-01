@@ -1577,6 +1577,40 @@ def _finalize_movie_selection(
         year_text = helpers._prompt_text("Movie year (optional, helps disambiguate)", "", progress, show_default=False)
         year = int(year_text) if year_text else None
     destination = helpers.plan_movie(library, metadata.get("title") or selected.title, year, item.path.suffix)
+    # A canonical movie destination is a semantic collision, not a generic
+    # filename collision.  Never turn it into a misleading "(2)" default.
+    if destination.exists() and on_conflict == "rename":
+        if not interactive:
+            helpers._safe_print(
+                f"Blocked same-work movie collision: {destination.name}", progress
+            )
+            helpers._record_stat(stats, "skipped", reason="same_work_noninteractive")
+            return None, False
+        helpers._safe_print(f"{destination.stem} is already in the library.", progress)
+        helpers._safe_print(f"Existing: {destination.name} ({destination.stat().st_size} bytes)", progress)
+        helpers._safe_print(f"Incoming: {item.path.name} ({item.path.stat().st_size} bytes)", progress)
+        choice = helpers._prompt_text(
+            "[S]kip, [A]lternate version, or [R]eplace", "S", progress
+        ).strip().casefold()
+        if choice in {"", "s", "skip"}:
+            helpers._record_stat(stats, "skipped", reason="same_work_skip")
+            return None, False
+        if choice in {"a", "alternate"}:
+            label = helpers._prompt_text("Alternate version label", "Alternate", progress).strip()
+            if not label:
+                helpers._record_stat(stats, "skipped", reason="same_work_alternate_cancelled")
+                return None, False
+            destination = destination.with_name(f"{destination.stem} - {label}{destination.suffix}")
+            on_conflict = "rename"
+        elif choice in {"r", "replace"}:
+            phrase = helpers._prompt_text("Type REPLACE to replace the existing movie", "", progress).strip()
+            if phrase != "REPLACE":
+                helpers._record_stat(stats, "skipped", reason="same_work_replace_cancelled")
+                return None, False
+            on_conflict = "overwrite"
+        else:
+            helpers._record_stat(stats, "skipped", reason="same_work_invalid_choice")
+            return None, False
     destination, collision = helpers._resolve_destination(destination, on_conflict, planned, progress)
     if destination is None:
         helpers._record_stat(stats, "skipped", reason="conflict_skip")
@@ -2144,7 +2178,6 @@ def process_movie_item(
         helpers=helpers,
         interactive=interactive,
     )
-
 
 
 

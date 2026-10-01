@@ -3352,7 +3352,7 @@ def video_ingest() -> None:
         raise SystemExit(1) from None
 
 
-def _video_ingest_wizard() -> None:
+def _video_ingest_wizard(forced_type: str | None = None) -> None:
     try:
         config = load_config()
     except ConfigurationError as exc:
@@ -3364,7 +3364,7 @@ def _video_ingest_wizard() -> None:
     console.print(f"Movies library:  {config.movies.library or '<not configured>'}")
     console.print(f"TV incoming:     {config.tv.incoming or '<not configured>'}")
     console.print(f"TV library:      {config.tv.library or '<not configured>'}")
-    choice = _prompt_choice_loop(
+    choice = forced_type or _prompt_choice_loop(
         "Choose [1] Movies, [2] TV Shows, [3] Exit",
         VIDEO_INGEST_CHOICES,
         None,
@@ -3450,6 +3450,18 @@ def _video_ingest_wizard() -> None:
         category_root=True,
     )
     run_organise(options)
+
+
+@app.command("movies")
+def movies() -> None:
+    """Start the guided Movies workflow without the root category menu."""
+    _video_ingest_wizard("movie")
+
+
+@app.command("tv")
+def tv() -> None:
+    """Start the guided TV workflow without the root category menu."""
+    _video_ingest_wizard("tv")
 
 
 def _prompt_non_overlapping_paths(
@@ -3550,5 +3562,4 @@ def _wizard_music(
 
 if __name__ == "__main__":
     app()
-
 

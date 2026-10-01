@@ -15,6 +15,7 @@ htmlcov/
 .tox/
 .nox/
 .pytest_tmp/
+.pytest-local-tmp/
 .plexify/
 .plexify/cache.json
 .plexify/reports/

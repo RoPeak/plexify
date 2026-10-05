@@ -131,6 +131,50 @@ def test_tv_complete_plan_groups_episodes_with_exact_mappings(tmp_path: Path) ->
     assert output.count("episode-") == 2
 
 
+def test_apply_copy_preserves_v2_duplicate_provenance_when_nothing_is_published(tmp_path: Path) -> None:
+    incoming = tmp_path / "incoming"; library = tmp_path / "library"
+    incoming.mkdir(); library.mkdir()
+    duplicate = MovePlan(
+        incoming / "Banshee (2013) - s02e01 - Little Fish.mkv",
+        library / "TV Shows" / "Banshee (2013)" / "Season 02" / "Banshee (2013) - s02e01 - Little Fish.mkv",
+        "apply", "tv", {"semantic_action": "verified-existing-duplicate"},
+    )
+    stats = SimpleNamespace(
+        skipped=1, errors=0, semantic_duplicate_plans=[duplicate], manual_skip=0,
+        no_candidates=0, offline_no_cache=0, filtered_media_type=0, auto_matched=0,
+        user_confirmed=0, manual=0, cache_hits=0, conflict_skip=0, renamed_conflicts=0,
+        elapsed=0.0,
+    )
+    options = SimpleNamespace(
+        incoming=incoming, library=library, mode="apply", copy_mode=True, extensions=".mkv",
+        min_confidence=0.9, cache=None, report=tmp_path / "report.json", yes=False, limit=None,
+        print_tree=False, interactive_mode=False, media_type="tv", no_cache=True,
+        clear_cache=False, offline=True, quiet=False, on_conflict="rename", prune_empty_dirs=False,
+        prune_ignore="", allow_risky_enter_accept=False, strict_safe=False, plain_output=True,
+        platform="auto", run_id="test", category_root=False, build_tree_fn=lambda _paths: None,
+        skip_reason_lines_fn=lambda _stats: [], rich_escape_fn=str,
+    )
+    captured: dict[str, object] = {}
+
+    run_video_workflow(
+        options=options, console=_Console(), plan_items_fn=lambda **_kwargs: ([], [], stats),
+        select_preview_plans_fn=lambda values: values, preview_spans_multiple_groups_fn=lambda _values: False,
+        confirm_move_fn=lambda *_args: True, confirm_fn=lambda *_args, **_kwargs: True,
+        confirm_overwrite_apply_fn=lambda *_args: True,
+        apply_with_streamed_report_fn=lambda plans, **kwargs: captured.update(plans=plans, **kwargs) or SimpleNamespace(moved=[], skipped=[], errors=[]),
+        execute_plans_fn=lambda *_args, **_kwargs: pytest.fail("duplicate provenance must use a streamed apply report"),
+        prune_empty_dirs_fn=lambda *_args, **_kwargs: None, parse_prune_ignore_fn=lambda _value: set(),
+        write_report_fn=lambda *_args, **_kwargs: pytest.fail("must not overwrite duplicate provenance report"),
+        print_run_summary_fn=lambda **_kwargs: None, build_command_config_cls=SimpleNamespace,
+        build_command_fn=str, parse_extensions_fn=lambda value: [value], format_path_fn=str,
+        now_timestamp_fn=lambda: "run", log_event_fn=lambda *_args, **_kwargs: None, logger=None,
+        typer_module=SimpleNamespace(Exit=Exception),
+    )
+
+    assert captured["plans"] == []
+    assert captured["verified_existing"] == [duplicate]
+
+
 @pytest.mark.parametrize(("mode", "moved", "skipped", "expected"), [
     ("dry-run", [], ["planned"], ["Would publish: 1", "Published: 0", "Not executed because dry-run: 1", "Existing-destination conflicts skipped: 0"]),
     ("apply", ["published"], [], ["Published: 1", "Verified: 1", "Completed successfully."]),

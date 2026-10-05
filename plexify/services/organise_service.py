@@ -207,7 +207,7 @@ def run_video_workflow(
 
     if not apply_mode:
         write_report_fn(report_path, plans, mode, copy_mode)
-    elif not plans:
+    elif not plans and not verified_existing:
         write_report_fn(report_path, [], mode, copy_mode)
     print_run_summary_fn(
         stats=stats,

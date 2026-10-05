@@ -242,6 +242,16 @@ python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Med
 python -m plexify.cli organise --incoming "D:\Media\_Incoming" --library "D:\Media" --on-conflict overwrite
 ```
 
+Canonical movie and TV destinations are semantic media conflicts, not ordinary
+filename collisions. When an identified item already exists at its canonical
+destination, `video-ingest` compares sizes and, when equal, verifies SHA-256.
+Byte-identical items are visibly skipped and never receive an automatic `(2)`
+suffix. Different items require an explicit Skip, Alternate version, or typed
+Replace decision; `--on-conflict` continues to control only remaining
+filesystem-path collisions. Successful APPLY/COPY reports retain exact-duplicate
+provenance so `ingest-cleanup` can independently hash and verify the preserved
+Incoming source later.
+
 Completions:
 
 ```powershell

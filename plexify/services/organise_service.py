@@ -151,6 +151,7 @@ def run_video_workflow(
         offline=offline,
         allow_risky_enter_accept=allow_risky_enter_accept,
     )
+    verified_existing = list(getattr(stats, "semantic_duplicate_plans", []))
 
     if print_tree and plans:
         tree = options.build_tree_fn([plan.destination for plan in plans])
@@ -187,8 +188,14 @@ def run_video_workflow(
         if not confirm_overwrite_apply_fn(plans, copy_mode):
             console.print("Cancelled. No filesystem changes were made.")
             return
-    if apply_mode and plans:
-        result = apply_with_streamed_report_fn(plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=report_path)
+    if apply_mode and (plans or (copy_mode and verified_existing)):
+        result = apply_with_streamed_report_fn(
+            plans,
+            copy_mode=copy_mode,
+            on_conflict=on_conflict,
+            report_path=report_path,
+            verified_existing=verified_existing,
+        )
     else:
         result = execute_plans_fn(plans, apply=apply_mode, copy_mode=copy_mode, on_conflict=on_conflict)
 
@@ -214,7 +221,7 @@ def run_video_workflow(
     )
 
     apply_report_path = None
-    if not apply_mode and interactive_mode and plans:
+    if not apply_mode and interactive_mode and (plans or (copy_mode and verified_existing)):
         _print_complete_plan(console, plans, on_conflict=on_conflict, copy_mode=copy_mode, format_path_fn=format_path_fn, heading="Complete filesystem plan before approval:")
         if confirm_fn("Apply this complete plan now? [y/N]", False, None, show_default=False):
             if on_conflict == "overwrite" and not confirm_overwrite_apply_fn(plans, copy_mode):
@@ -228,14 +235,16 @@ def run_video_workflow(
                 else:
                     apply_report_path = reports_dir / f"{now_timestamp_fn()}.json"
                     result = apply_with_streamed_report_fn(
-                        plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path
+                        plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path,
+                        verified_existing=list(getattr(stats, "semantic_duplicate_plans", [])),
                     )
                     if prune_empty_dirs:
                         prune_empty_dirs_fn(result.moved, incoming, dry_run=False, ignored_files=ignored_prune_files)
             else:
                 apply_report_path = reports_dir / f"{now_timestamp_fn()}.json"
                 result = apply_with_streamed_report_fn(
-                    plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path
+                    plans, copy_mode=copy_mode, on_conflict=on_conflict, report_path=apply_report_path,
+                    verified_existing=list(getattr(stats, "semantic_duplicate_plans", [])),
                 )
             print_run_summary_fn(
                 stats=stats,
@@ -271,7 +280,7 @@ def run_video_workflow(
         for error in result.errors + errors:
             console.print(f"- {options.rich_escape_fn(error)}")
         raise typer_module.Exit(code=1)
-    if not plans:
+    if not plans and not verified_existing:
         log_event_fn(
             logger,
             "run_finished",

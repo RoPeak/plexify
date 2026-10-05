@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +23,121 @@ class _CandidateLoopState:
     next_offset: int
     has_more: bool
     search_refined: bool = False
+
+
+@dataclass(frozen=True)
+class _SemanticConflict:
+    destination: Path | None
+    on_conflict: str
+    identical_existing: Path | None = None
+
+
+def _regular_file_size(path: Path) -> int | None:
+    """Return a stable regular-file size without following symlinks."""
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            return None
+        after = path.lstat()
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        ):
+            return None
+        return before.st_size
+    except OSError:
+        return None
+
+
+def _sha256(path: Path) -> str:
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("not a regular file")
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns
+        ):
+            raise ValueError("file changed before hashing")
+        handle = os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        raise
+    with handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    after = path.lstat()
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+    ):
+        raise ValueError("file changed while hashing")
+    return digest.hexdigest()
+
+
+def _resolve_semantic_conflict(
+    *,
+    item: Any,
+    destination: Path,
+    on_conflict: str,
+    interactive: bool,
+    progress: Progress | None,
+    stats: Any,
+    media_label: str,
+    helpers: Any,
+) -> _SemanticConflict:
+    """Resolve canonical same-work conflicts before generic path collision policy."""
+    if not destination.exists() and not destination.is_symlink():
+        return _SemanticConflict(destination, on_conflict)
+
+    existing_size = _regular_file_size(destination)
+    incoming_size = _regular_file_size(item.path)
+    if existing_size is None or incoming_size is None:
+        helpers._safe_print(f"Blocked unsafe existing {media_label} destination: {destination.name}", progress)
+        helpers._record_stat(stats, "skipped", reason="semantic_noninteractive_skip")
+        return _SemanticConflict(None, on_conflict)
+
+    helpers._safe_print(f"{media_label.title()} already in library: {destination.stem}", progress)
+    helpers._safe_print(f"Existing: {destination.name} ({existing_size} bytes)", progress)
+    helpers._safe_print(f"Incoming: {item.path.name} ({incoming_size} bytes)", progress)
+    if existing_size == incoming_size:
+        try:
+            identical = _sha256(item.path) == _sha256(destination)
+        except (OSError, ValueError) as exc:
+            helpers._safe_print(f"Unable to verify existing media safely: {exc}", progress)
+            helpers._record_stat(stats, "skipped", reason="semantic_noninteractive_skip")
+            return _SemanticConflict(None, on_conflict)
+        if identical:
+            helpers._safe_print("Content: identical (SHA-256 verified). Action: skip existing duplicate.", progress)
+            helpers._record_stat(stats, "skipped", reason="semantic_identical_skip")
+            return _SemanticConflict(None, on_conflict, identical_existing=destination)
+
+    helpers._safe_print("Content differs from the canonical library item.", progress)
+    if not interactive:
+        helpers._safe_print("Blocked semantic conflict in non-interactive mode; source left unchanged.", progress)
+        helpers._record_stat(stats, "skipped", reason="semantic_noninteractive_skip")
+        return _SemanticConflict(None, on_conflict)
+    choice = helpers._prompt_text("[S]kip, [A]lternate version, or [R]eplace", "S", progress).strip().casefold()
+    if choice in {"", "s", "skip"}:
+        helpers._record_stat(stats, "skipped", reason="semantic_user_skip")
+        return _SemanticConflict(None, on_conflict)
+    if choice in {"a", "alternate"}:
+        label = helpers._prompt_text("Alternate version label", "Alternate", progress).strip()
+        if not label:
+            helpers._record_stat(stats, "skipped", reason="semantic_user_skip")
+            return _SemanticConflict(None, on_conflict)
+        helpers._record_stat(stats, "alternate_versions")
+        return _SemanticConflict(destination.with_name(f"{destination.stem} - {label}{destination.suffix}"), "rename")
+    if choice in {"r", "replace"}:
+        phrase = helpers._prompt_text(f"Type REPLACE to replace the existing {media_label}", "", progress).strip()
+        if phrase != "REPLACE":
+            helpers._record_stat(stats, "skipped", reason="semantic_user_skip")
+            return _SemanticConflict(None, on_conflict)
+        helpers._record_stat(stats, "replacements")
+        return _SemanticConflict(destination, "overwrite")
+    helpers._record_stat(stats, "skipped", reason="semantic_user_skip")
+    return _SemanticConflict(None, on_conflict)
 
 
 def _merge_query_history(*query_groups: list[str] | None) -> list[str]:
@@ -1424,7 +1542,37 @@ def _finalize_tv_selection(
         metadata.get("episode_title") or episode_title,
         item.path.suffix,
     )
-    destination, collision = helpers._resolve_destination(destination, on_conflict, planned, progress)
+    semantic = _resolve_semantic_conflict(
+        item=item,
+        destination=destination,
+        on_conflict=on_conflict,
+        interactive=interactive,
+        progress=progress,
+        stats=stats,
+        media_label="episode",
+        helpers=helpers,
+    )
+    if semantic.identical_existing is not None:
+        if stats is not None:
+            stats.semantic_duplicate_plans.append(
+                helpers.MovePlan(
+                    source=item.path,
+                    destination=semantic.identical_existing,
+                    mode=mode,
+                    media_type="tv",
+                    metadata={
+                        "show": metadata.get("name") or selected.title,
+                        "year": metadata.get("year") or selected.year,
+                        "season": int(season),
+                        "episode": int(episode),
+                        "semantic_action": "verified-existing-duplicate",
+                    },
+                )
+            )
+        return None, False
+    if semantic.destination is None:
+        return None, False
+    destination, collision = helpers._resolve_destination(semantic.destination, semantic.on_conflict, planned, progress)
     if destination is None:
         helpers._record_stat(stats, "skipped", reason="conflict_skip")
         return None, False
@@ -1577,41 +1725,31 @@ def _finalize_movie_selection(
         year_text = helpers._prompt_text("Movie year (optional, helps disambiguate)", "", progress, show_default=False)
         year = int(year_text) if year_text else None
     destination = helpers.plan_movie(library, metadata.get("title") or selected.title, year, item.path.suffix)
-    # A canonical movie destination is a semantic collision, not a generic
-    # filename collision.  Never turn it into a misleading "(2)" default.
-    if destination.exists() and on_conflict == "rename":
-        if not interactive:
-            helpers._safe_print(
-                f"Blocked same-work movie collision: {destination.name}", progress
+    semantic = _resolve_semantic_conflict(
+        item=item,
+        destination=destination,
+        on_conflict=on_conflict,
+        interactive=interactive,
+        progress=progress,
+        stats=stats,
+        media_label="movie",
+        helpers=helpers,
+    )
+    if semantic.identical_existing is not None:
+        if stats is not None:
+            stats.semantic_duplicate_plans.append(
+                helpers.MovePlan(
+                    source=item.path,
+                    destination=semantic.identical_existing,
+                    mode=mode,
+                    media_type="movie",
+                    metadata={"title": metadata.get("title") or selected.title, "year": year, "semantic_action": "verified-existing-duplicate"},
+                )
             )
-            helpers._record_stat(stats, "skipped", reason="same_work_noninteractive")
-            return None, False
-        helpers._safe_print(f"{destination.stem} is already in the library.", progress)
-        helpers._safe_print(f"Existing: {destination.name} ({destination.stat().st_size} bytes)", progress)
-        helpers._safe_print(f"Incoming: {item.path.name} ({item.path.stat().st_size} bytes)", progress)
-        choice = helpers._prompt_text(
-            "[S]kip, [A]lternate version, or [R]eplace", "S", progress
-        ).strip().casefold()
-        if choice in {"", "s", "skip"}:
-            helpers._record_stat(stats, "skipped", reason="same_work_skip")
-            return None, False
-        if choice in {"a", "alternate"}:
-            label = helpers._prompt_text("Alternate version label", "Alternate", progress).strip()
-            if not label:
-                helpers._record_stat(stats, "skipped", reason="same_work_alternate_cancelled")
-                return None, False
-            destination = destination.with_name(f"{destination.stem} - {label}{destination.suffix}")
-            on_conflict = "rename"
-        elif choice in {"r", "replace"}:
-            phrase = helpers._prompt_text("Type REPLACE to replace the existing movie", "", progress).strip()
-            if phrase != "REPLACE":
-                helpers._record_stat(stats, "skipped", reason="same_work_replace_cancelled")
-                return None, False
-            on_conflict = "overwrite"
-        else:
-            helpers._record_stat(stats, "skipped", reason="same_work_invalid_choice")
-            return None, False
-    destination, collision = helpers._resolve_destination(destination, on_conflict, planned, progress)
+        return None, False
+    if semantic.destination is None:
+        return None, False
+    destination, collision = helpers._resolve_destination(semantic.destination, semantic.on_conflict, planned, progress)
     if destination is None:
         helpers._record_stat(stats, "skipped", reason="conflict_skip")
         return None, False
@@ -2178,6 +2316,3 @@ def process_movie_item(
         helpers=helpers,
         interactive=interactive,
     )
-
-
-

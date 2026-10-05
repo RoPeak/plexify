@@ -5,7 +5,7 @@ import sys
 import time
 import uuid
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -226,6 +226,14 @@ class PlanStats:
     manual_skip: int = 0
     offline_no_cache: int = 0
     conflict_skip: int = 0
+    semantic_user_skip: int = 0
+    semantic_identical_skip: int = 0
+    semantic_noninteractive_skip: int = 0
+    alternate_versions: int = 0
+    replacements: int = 0
+    # These are successful semantic duplicate decisions, retained separately
+    # from publication plans so COPY reports can provide cleanup provenance.
+    semantic_duplicate_plans: list[MovePlan] = field(default_factory=list)
     errors: int = 0
     cache_hits: int = 0
     elapsed: float = 0.0
@@ -1199,6 +1207,8 @@ def _record_stat(stats: PlanStats | None, outcome: str, *, reason: str | None = 
         stats.skipped += 1
         if reason and hasattr(stats, reason):
             setattr(stats, reason, int(getattr(stats, reason, 0)) + 1)
+    elif hasattr(stats, outcome):
+        setattr(stats, outcome, int(getattr(stats, outcome, 0)) + 1)
 
 
 def _record_cache_hit(stats: PlanStats | None) -> None:
@@ -1220,6 +1230,12 @@ def _snapshot_stats(stats: PlanStats) -> PlanStats:
         manual_skip=stats.manual_skip,
         offline_no_cache=stats.offline_no_cache,
         conflict_skip=stats.conflict_skip,
+        semantic_user_skip=stats.semantic_user_skip,
+        semantic_identical_skip=stats.semantic_identical_skip,
+        semantic_noninteractive_skip=stats.semantic_noninteractive_skip,
+        alternate_versions=stats.alternate_versions,
+        replacements=stats.replacements,
+        semantic_duplicate_plans=list(stats.semantic_duplicate_plans),
         errors=stats.errors,
         cache_hits=stats.cache_hits,
         elapsed=stats.elapsed,
@@ -1836,6 +1852,7 @@ def _apply_with_streamed_report(
     copy_mode: bool,
     on_conflict: str,
     report_path: Path,
+    verified_existing: list[MovePlan] | None = None,
 ) -> ExecutionResult:
     stream = open_report_stream(report_path, mode="apply", copy_mode=copy_mode)
     try:
@@ -1845,6 +1862,9 @@ def _apply_with_streamed_report(
             on_conflict=on_conflict,
             on_applied=stream.append,
         )
+        if copy_mode:
+            for duplicate in verified_existing or []:
+                stream.append_verified_existing(duplicate)
         stream.finalize()
         return result
     finally:

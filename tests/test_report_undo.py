@@ -149,3 +149,17 @@ def test_undo_from_jsonl_report(tmp_path: Path) -> None:
 
     assert not errors
     assert src.exists()
+
+
+def test_v2_existing_duplicate_is_readable_but_undo_does_not_remove_it(tmp_path: Path) -> None:
+    report = tmp_path / "stream.json"
+    src = tmp_path / "incoming.mkv"; dest = tmp_path / "library.mkv"
+    src.write_text("data", encoding="utf-8"); dest.write_text("data", encoding="utf-8")
+    stream = open_report_stream(report, mode="apply", copy_mode=True)
+    stream.append_verified_existing(MovePlan(src, dest, "apply", "tv", {"semantic_action": "verified-existing-duplicate"}))
+    stream.finalize(); stream.close()
+
+    payload = read_report(report)
+    assert payload["operations"][0]["action"] == "verified-existing-duplicate"
+    assert undo_report(report) == []
+    assert dest.exists()

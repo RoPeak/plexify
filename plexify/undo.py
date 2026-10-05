@@ -21,6 +21,8 @@ def undo_report(path: Path, library_root: Path | None = None) -> list[str]:
     errors: list[str] = []
     root = library_root.resolve(strict=False) if library_root is not None else None
     for op in payload.get("operations", []):
+        if op.get("action", "published") != "published":
+            continue
         src = Path(op.get("source"))
         dest = Path(op.get("destination"))
         if root is not None:

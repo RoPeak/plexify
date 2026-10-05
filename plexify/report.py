@@ -31,7 +31,7 @@ class ReportStream:
     def _write_header(self) -> None:
         if self._header_written:
             return
-        self._write_line({"type": "header", "mode": self.mode, "copy": self.copy_mode, "version": 1})
+        self._write_line({"type": "header", "mode": self.mode, "copy": self.copy_mode, "version": 2})
         self._header_written = True
 
     def append(self, plan: MovePlan) -> None:
@@ -44,6 +44,27 @@ class ReportStream:
                 "destination": str(plan.destination.resolve(strict=False)),
                 "media_type": plan.media_type,
                 "metadata": plan.metadata,
+                "action": "published",
+            }
+        )
+        self._operations += 1
+
+    def append_verified_existing(self, plan: MovePlan) -> None:
+        """Record an approved SHA-256-identical existing library target.
+
+        This is provenance only: no destination was created and cleanup must
+        still independently compare current source and destination hashes.
+        """
+        if self._closed:
+            return
+        self._write_line(
+            {
+                "type": "operation",
+                "source": str(plan.source.resolve(strict=False)),
+                "destination": str(plan.destination.resolve(strict=False)),
+                "media_type": plan.media_type,
+                "metadata": plan.metadata,
+                "action": "verified-existing-duplicate",
             }
         )
         self._operations += 1
@@ -104,6 +125,7 @@ def _parse_jsonl_report(text: str) -> ReportPayload:
     copy_mode = False
     operations: list[dict[str, Any]] = []
     header_seen = False
+    version = 1
     for idx, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped:
@@ -125,8 +147,12 @@ def _parse_jsonl_report(text: str) -> ReportPayload:
                 raise ReportFormatError("Report header has invalid mode.")
             if not isinstance(row_copy, bool):
                 raise ReportFormatError("Report header has invalid copy flag.")
+            row_version = row.get("version", 1)
+            if row_version not in {1, 2}:
+                raise ReportFormatError("Report header has unsupported version.")
             mode = row_mode
             copy_mode = row_copy
+            version = row_version
             continue
         if row_type == "operation":
             operations.append(
@@ -135,6 +161,7 @@ def _parse_jsonl_report(text: str) -> ReportPayload:
                     "destination": row.get("destination"),
                     "media_type": row.get("media_type"),
                     "metadata": row.get("metadata"),
+                    "action": row.get("action") if version >= 2 else "published",
                 }
             )
             continue

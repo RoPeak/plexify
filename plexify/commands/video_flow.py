@@ -112,7 +112,17 @@ def print_run_summary(
     console.print("Summary:")
     console.print(f"Discovered: {getattr(stats, 'discovered', len(plans) + getattr(stats, 'skipped', 0))}")
     console.print(f"Planned: {len(plans)}")
-    console.print(f"User skipped: {stats.manual_skip}")
+    console.print(f"User skipped: {stats.manual_skip + getattr(stats, 'semantic_user_skip', 0)}")
+    if getattr(stats, "semantic_user_skip", 0):
+        console.print(f"Existing media skipped by user: {stats.semantic_user_skip}")
+    if getattr(stats, "semantic_identical_skip", 0):
+        console.print(f"Identical existing media skipped: {stats.semantic_identical_skip}")
+    if getattr(stats, "semantic_noninteractive_skip", 0):
+        console.print(f"Semantic conflicts blocked: {stats.semantic_noninteractive_skip}")
+    if getattr(stats, "alternate_versions", 0):
+        console.print(f"Alternate versions: {stats.alternate_versions}")
+    if getattr(stats, "replacements", 0):
+        console.print(f"Replacements: {stats.replacements}")
     unmatched = stats.no_candidates + stats.offline_no_cache
     console.print(f"Unmatched: {unmatched}")
     console.print(f"Filtered: {stats.filtered_media_type}")
@@ -157,6 +167,9 @@ def skip_reason_lines(stats: Any) -> list[str]:
         ("manual_skip", "user skipped"),
         ("offline_no_cache", "offline/no cache"),
         ("conflict_skip", "conflict policy skipped"),
+        ("semantic_user_skip", "existing media skipped by user"),
+        ("semantic_identical_skip", "identical existing media skipped"),
+        ("semantic_noninteractive_skip", "semantic conflict blocked"),
     ]
     parts: list[str] = []
     for attr, label in labels:
@@ -396,6 +409,12 @@ def plan_items(
                         stats.manual_skip = getattr(entry.stats_snapshot, "manual_skip", 0)
                         stats.offline_no_cache = getattr(entry.stats_snapshot, "offline_no_cache", 0)
                         stats.conflict_skip = getattr(entry.stats_snapshot, "conflict_skip", 0)
+                        stats.semantic_user_skip = getattr(entry.stats_snapshot, "semantic_user_skip", 0)
+                        stats.semantic_identical_skip = getattr(entry.stats_snapshot, "semantic_identical_skip", 0)
+                        stats.semantic_noninteractive_skip = getattr(entry.stats_snapshot, "semantic_noninteractive_skip", 0)
+                        stats.alternate_versions = getattr(entry.stats_snapshot, "alternate_versions", 0)
+                        stats.replacements = getattr(entry.stats_snapshot, "replacements", 0)
+                        stats.semantic_duplicate_plans = list(getattr(entry.stats_snapshot, "semantic_duplicate_plans", []))
                         stats.errors = entry.stats_snapshot.errors
                         stats.cache_hits = entry.stats_snapshot.cache_hits
                         stats.elapsed = entry.stats_snapshot.elapsed

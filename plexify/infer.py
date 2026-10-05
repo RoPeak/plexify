@@ -115,8 +115,13 @@ def _parent_show_name(path: Path) -> Optional[str]:
     for parent in path.parents:
         if not SEASON_RE.search(parent.name):
             continue
-        stripped = _strip_season_tokens(parent.name)
-        if stripped and stripped != parent.name:
+        stripped = re.sub(rf"(?i){SEASON_TOKEN_RE}[\s._-]*\d{{1,2}}", "", parent.name)
+        stripped = stripped.strip()
+        if re.fullmatch(r"[\[(].*?[\])]", stripped):
+            stripped = ""
+        elif stripped:
+            stripped = _strip_bracket_suffix(stripped)
+        if stripped:
             return stripped
         show_parent = parent.parent
         if show_parent != parent and show_parent.name and not _is_generic_tv_folder_name(show_parent.name):
@@ -380,7 +385,7 @@ def infer_movie_title_from_stem(stem: str, guess_title: Optional[str]) -> Option
 def _extract_episode_title(stem: str, episode: Optional[int]) -> Optional[str]:
     if episode is None:
         return None
-    tokens = [token for token in re.split(r"[.\s_\-]+", stem) if token]
+    tokens = [token for token in re.split(r"[.\s_\-()\[\]]+", stem) if token]
     if not tokens:
         return None
     episode_values = {

@@ -307,6 +307,17 @@ def test_infer_tv_typoed_season_folder_token() -> None:
     assert item.episode == 1
 
 
+@pytest.mark.parametrize("season_folder", ["Season 1 (BluRay)", "Season 2 (AMZN WEB-DL)"])
+def test_infer_tv_uses_show_folder_when_season_folder_has_release_tags(season_folder: str) -> None:
+    path = Path(f"Succession (2018)/{season_folder}/Succession (2018) - S01E01 - Celebration (1080p BluRay x265).mkv")
+    item = infer_item(path)
+    assert item.media_type == "tv"
+    assert item.title == "Succession (2018)"
+    assert item.season == 1
+    assert item.episode == 1
+    assert item.episode_title == "Celebration"
+
+
 @pytest.mark.parametrize(
     ("path", "expected_media_type", "expected_title", "expected_season", "expected_episode"),
     [

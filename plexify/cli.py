@@ -2426,14 +2426,14 @@ def run_organise(options: OrganiseOptions) -> None:
 
 @app.command()
 def organise(
-    incoming: Path | None = typer.Option(None, exists=False, file_okay=False, dir_okay=True, help="Folder to scan (overrides config)"),
-    library: Path | None = typer.Option(None, exists=False, file_okay=False, dir_okay=True, help="Existing library root (overrides config)"),
-    mode: str | None = typer.Option(None, help="dry-run or apply; defaults to config"),
-    config_file: Path | None = typer.Option(None, "--config", help="Configuration TOML path"),
+    incoming: Optional[Path] = typer.Option(None, exists=False, file_okay=False, dir_okay=True, help="Folder to scan (overrides config)"),
+    library: Optional[Path] = typer.Option(None, exists=False, file_okay=False, dir_okay=True, help="Existing library root (overrides config)"),
+    mode: Optional[str] = typer.Option(None, help="dry-run or apply; defaults to config"),
+    config_file: Optional[Path] = typer.Option(None, "--config", help="Configuration TOML path"),
     move: bool = typer.Option(False, "--move", help="Move files (overrides default copy)"),
     copy: bool = typer.Option(False, "--copy", help="Copy files (default behaviour for apply)"),
     extensions: str = typer.Option(DEFAULT_EXTENSIONS, help="Comma-separated extensions"),
-    min_confidence: float | None = typer.Option(
+    min_confidence: Optional[float] = typer.Option(
         None,
         help="Minimum confidence for unambiguous auto acceptance (defaults to config)",
     ),
@@ -2449,11 +2449,11 @@ def organise(
     interactive: bool = typer.Option(False, "--interactive", help="Force interactive mode"),
     no_interactive: bool = typer.Option(False, "--no-interactive", help="Disable interactive prompts"),
     media_type: str = typer.Option("auto", "--media-type", help="Filter by media type: auto/movie/tv"),
-    no_cache: bool | None = typer.Option(None, "--no-cache/--use-cache", help="Disable or enable cache reads/writes (defaults to config)"),
+    no_cache: Optional[bool] = typer.Option(None, "--no-cache/--use-cache", help="Disable or enable cache reads/writes (defaults to config)"),
     clear_cache: bool = typer.Option(False, "--clear-cache", help="Clear cache before running"),
     offline: bool = typer.Option(False, "--offline", help="Disable network lookups for this run"),
     quiet: bool = typer.Option(False, "--quiet", "--batch", help="Reduce per-file output; show errors and summary"),
-    on_conflict: str | None = typer.Option(None, "--on-conflict", help="On destination conflict: rename/skip/overwrite (defaults to config)"),
+    on_conflict: Optional[str] = typer.Option(None, "--on-conflict", help="On destination conflict: rename/skip/overwrite (defaults to config)"),
     log_level: str = typer.Option("WARNING", "--log-level", help="Log level: DEBUG/INFO/WARNING/ERROR"),
     log_format: str = typer.Option("text", "--log-format", help="Log format: text/json"),
     log_file: Path = typer.Option(None, "--log-file", help="Optional log file path"),
@@ -2463,7 +2463,7 @@ def organise(
         "--prune-ignore",
         help="Comma-separated ignorable filenames for prune-empty-dirs",
     ),
-    allow_risky_enter_accept: bool | None = typer.Option(
+    allow_risky_enter_accept: Optional[bool] = typer.Option(
         None,
         "--allow-risky-enter-accept/--disallow-risky-enter-accept",
         help="Allow Enter to accept top match in risky candidate prompts (defaults to config)",
@@ -2473,7 +2473,7 @@ def organise(
         "--strict-safe",
         help="Use conservative matching defaults (disable cache reuse, disable auto-accept, higher confidence floor)",
     ),
-    plain_output: bool | None = typer.Option(
+    plain_output: Optional[bool] = typer.Option(
         None,
         "--plain-output/--rich-output",
         help="Use transcript-friendly plain text output or Rich panels and tables (defaults to config)",
@@ -2483,7 +2483,7 @@ def organise(
         "--platform",
         help=f"Platform mode: auto/windows/linux (env: {PLEXIFY_PLATFORM_ENV})",
     ),
-    require_same_filesystem: bool | None = typer.Option(None, "--require-same-filesystem/--allow-cross-filesystem"),
+    require_same_filesystem: Optional[bool] = typer.Option(None, "--require-same-filesystem/--allow-cross-filesystem"),
     library_is_category_root: bool = typer.Option(False, "--library-is-category-root", hidden=True),
 ) -> None:
     """Organise video files using Plexify's recognition and planning pipeline.
@@ -3176,7 +3176,7 @@ def _infer_library_root_from_report(report: Path) -> Path | None:
 
 
 @app.command("config")
-def show_config(file: Path | None = typer.Option(None, "--file", help="Inspect another TOML configuration")) -> None:
+def show_config(file: Optional[Path] = typer.Option(None, "--file", help="Inspect another TOML configuration")) -> None:
     """Show effective Video Ingest settings without changing the filesystem."""
     try:
         config = load_config(file)
@@ -3562,4 +3562,3 @@ def _wizard_music(
 
 if __name__ == "__main__":
     app()
-

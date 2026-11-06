@@ -1862,9 +1862,8 @@ def _apply_with_streamed_report(
             on_conflict=on_conflict,
             on_applied=stream.append,
         )
-        if copy_mode:
-            for duplicate in verified_existing or []:
-                stream.append_verified_existing(duplicate)
+        for duplicate in verified_existing or []:
+            stream.append_verified_existing(duplicate)
         stream.finalize()
         return result
     finally:
@@ -3424,6 +3423,14 @@ def _video_ingest_wizard(forced_type: str | None = None) -> None:
         if not _confirm("Continue with MOVE? [y/N]", False, None, show_default=False):
             console.print("Cancelled. No filesystem changes were made.")
             return
+    prune_empty_dirs = False
+    if publication == "move":
+        prune_empty_dirs = _confirm(
+            "Prune only source directories newly emptied by successful moves? [y/N]",
+            False,
+            None,
+            show_default=False,
+        )
     conflict = _prompt_choice_loop(
         "Destination conflict policy (rename/skip/overwrite)", VIDEO_CONFLICT_CHOICES, None,
         allow_empty=True, error="Enter rename, skip, or overwrite.", default=config.on_conflict,
@@ -3459,7 +3466,7 @@ def _video_ingest_wizard(forced_type: str | None = None) -> None:
         log_level="WARNING",
         log_format="text",
         log_file=None,
-        prune_empty_dirs=False,
+        prune_empty_dirs=prune_empty_dirs,
         prune_ignore=DEFAULT_PRUNE_IGNORE,
         quiet=False,
         allow_risky_enter_accept=config.allow_risky_enter_accept,

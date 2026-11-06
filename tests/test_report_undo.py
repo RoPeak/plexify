@@ -5,6 +5,33 @@ from plexify.undo import undo_report
 from plexify.util import MovePlan
 
 
+def test_v3_mixed_move_report_preserves_duplicate_cleanup_evidence(tmp_path: Path) -> None:
+    import json
+
+    report = tmp_path / "mixed.jsonl"
+    published = MovePlan(tmp_path / "moved.mkv", tmp_path / "library/moved.mkv", "apply", "movie", {})
+    duplicate = MovePlan(
+        tmp_path / "duplicate.mkv",
+        tmp_path / "library/duplicate.mkv",
+        "apply",
+        "movie",
+        {"source_sha256": "a" * 64, "destination_sha256": "a" * 64},
+    )
+    stream = open_report_stream(report, mode="apply", copy_mode=False)
+    stream.append(published)
+    stream.append_verified_existing(duplicate)
+    stream.finalize()
+    stream.close()
+
+    lines = [json.loads(line) for line in report.read_text().splitlines()]
+    assert lines[0]["version"] == 3
+    assert lines[1]["source_lifecycle"] == "removed"
+    assert lines[2]["source_lifecycle"] == "preserved"
+    assert lines[2]["verification"] == "sha256"
+    assert lines[2]["source_sha256"] == "a" * 64
+    assert lines[-1]["status"] == "completed"
+
+
 def test_undo_move_restores_file(tmp_path: Path):
     src = tmp_path / "source.mkv"
     dest = tmp_path / "dest.mkv"

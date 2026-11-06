@@ -30,6 +30,8 @@ class _SemanticConflict:
     destination: Path | None
     on_conflict: str
     identical_existing: Path | None = None
+    source_sha256: str | None = None
+    destination_sha256: str | None = None
 
 
 def _regular_file_size(path: Path) -> int | None:
@@ -103,7 +105,9 @@ def _resolve_semantic_conflict(
     helpers._safe_print(f"Incoming: {item.path.name} ({incoming_size} bytes)", progress)
     if existing_size == incoming_size:
         try:
-            identical = _sha256(item.path) == _sha256(destination)
+            source_sha256 = _sha256(item.path)
+            destination_sha256 = _sha256(destination)
+            identical = source_sha256 == destination_sha256
         except (OSError, ValueError) as exc:
             helpers._safe_print(f"Unable to verify existing media safely: {exc}", progress)
             helpers._record_stat(stats, "skipped", reason="semantic_noninteractive_skip")
@@ -111,7 +115,13 @@ def _resolve_semantic_conflict(
         if identical:
             helpers._safe_print("Content: identical (SHA-256 verified). Action: skip existing duplicate.", progress)
             helpers._record_stat(stats, "skipped", reason="semantic_identical_skip")
-            return _SemanticConflict(None, on_conflict, identical_existing=destination)
+            return _SemanticConflict(
+                None,
+                on_conflict,
+                identical_existing=destination,
+                source_sha256=source_sha256,
+                destination_sha256=destination_sha256,
+            )
 
     helpers._safe_print("Content differs from the canonical library item.", progress)
     if not interactive:
@@ -1566,6 +1576,8 @@ def _finalize_tv_selection(
                         "season": int(season),
                         "episode": int(episode),
                         "semantic_action": "verified-existing-duplicate",
+                        "source_sha256": semantic.source_sha256,
+                        "destination_sha256": semantic.destination_sha256,
                     },
                 )
             )
@@ -1743,7 +1755,13 @@ def _finalize_movie_selection(
                     destination=semantic.identical_existing,
                     mode=mode,
                     media_type="movie",
-                    metadata={"title": metadata.get("title") or selected.title, "year": year, "semantic_action": "verified-existing-duplicate"},
+                    metadata={
+                        "title": metadata.get("title") or selected.title,
+                        "year": year,
+                        "semantic_action": "verified-existing-duplicate",
+                        "source_sha256": semantic.source_sha256,
+                        "destination_sha256": semantic.destination_sha256,
+                    },
                 )
             )
         return None, False

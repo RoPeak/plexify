@@ -34,7 +34,10 @@ def _print_complete_plan(console: Any, plans: list[Any], *, on_conflict: str, co
         if selection.get("year_mismatch"):
             warnings.append(f"year mismatch: filename {selection.get('filename_year')}, provider {selection.get('provider_year')}")
         confidence = selection.get("confidence")
-        suffix = f"confidence {confidence:.3f}" if isinstance(confidence, (int, float)) else ""
+        if selection.get("source") == "Manual" or selection.get("manual"):
+            suffix = "identity operator-confirmed"
+        else:
+            suffix = f"confidence {confidence:.3f}" if isinstance(confidence, (int, float)) else ""
         if warnings:
             suffix = (suffix + "; " if suffix else "") + "warning: " + ", ".join(warnings)
         return suffix
@@ -188,7 +191,7 @@ def run_video_workflow(
         if not confirm_overwrite_apply_fn(plans, copy_mode):
             console.print("Cancelled. No filesystem changes were made.")
             return
-    if apply_mode and (plans or (copy_mode and verified_existing)):
+    if apply_mode and (plans or verified_existing):
         result = apply_with_streamed_report_fn(
             plans,
             copy_mode=copy_mode,
@@ -221,7 +224,7 @@ def run_video_workflow(
     )
 
     apply_report_path = None
-    if not apply_mode and interactive_mode and (plans or (copy_mode and verified_existing)):
+    if not apply_mode and interactive_mode and (plans or verified_existing):
         _print_complete_plan(console, plans, on_conflict=on_conflict, copy_mode=copy_mode, format_path_fn=format_path_fn, heading="Complete filesystem plan before approval:")
         if confirm_fn("Apply this complete plan now? [y/N]", False, None, show_default=False):
             if on_conflict == "overwrite" and not confirm_overwrite_apply_fn(plans, copy_mode):

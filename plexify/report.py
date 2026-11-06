@@ -31,7 +31,7 @@ class ReportStream:
     def _write_header(self) -> None:
         if self._header_written:
             return
-        self._write_line({"type": "header", "mode": self.mode, "copy": self.copy_mode, "version": 2})
+        self._write_line({"type": "header", "mode": self.mode, "copy": self.copy_mode, "version": 3})
         self._header_written = True
 
     def append(self, plan: MovePlan) -> None:
@@ -45,6 +45,8 @@ class ReportStream:
                 "media_type": plan.media_type,
                 "metadata": plan.metadata,
                 "action": "published",
+                "source_lifecycle": "preserved" if self.copy_mode else "removed",
+                "verification": "destination-created",
             }
         )
         self._operations += 1
@@ -65,6 +67,10 @@ class ReportStream:
                 "media_type": plan.media_type,
                 "metadata": plan.metadata,
                 "action": "verified-existing-duplicate",
+                "source_lifecycle": "preserved",
+                "verification": "sha256",
+                "source_sha256": plan.metadata.get("source_sha256"),
+                "destination_sha256": plan.metadata.get("destination_sha256"),
             }
         )
         self._operations += 1
@@ -72,7 +78,7 @@ class ReportStream:
     def finalize(self) -> None:
         if self._closed:
             return
-        self._write_line({"type": "final", "operations": self._operations})
+        self._write_line({"type": "final", "operations": self._operations, "status": "completed"})
 
     def close(self) -> None:
         if self._closed:
@@ -148,7 +154,7 @@ def _parse_jsonl_report(text: str) -> ReportPayload:
             if not isinstance(row_copy, bool):
                 raise ReportFormatError("Report header has invalid copy flag.")
             row_version = row.get("version", 1)
-            if row_version not in {1, 2}:
+            if row_version not in {1, 2, 3}:
                 raise ReportFormatError("Report header has unsupported version.")
             mode = row_mode
             copy_mode = row_copy
@@ -162,6 +168,10 @@ def _parse_jsonl_report(text: str) -> ReportPayload:
                     "media_type": row.get("media_type"),
                     "metadata": row.get("metadata"),
                     "action": row.get("action") if version >= 2 else "published",
+                    "source_lifecycle": row.get("source_lifecycle") if version >= 3 else None,
+                    "verification": row.get("verification") if version >= 3 else None,
+                    "source_sha256": row.get("source_sha256") if version >= 3 else None,
+                    "destination_sha256": row.get("destination_sha256") if version >= 3 else None,
                 }
             )
             continue

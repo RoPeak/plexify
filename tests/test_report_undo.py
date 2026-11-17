@@ -5,7 +5,7 @@ from plexify.undo import undo_report
 from plexify.util import MovePlan
 
 
-def test_v3_mixed_move_report_preserves_duplicate_cleanup_evidence(tmp_path: Path) -> None:
+def test_v4_mixed_move_report_preserves_duplicate_cleanup_evidence(tmp_path: Path) -> None:
     import json
 
     report = tmp_path / "mixed.jsonl"
@@ -24,12 +24,30 @@ def test_v3_mixed_move_report_preserves_duplicate_cleanup_evidence(tmp_path: Pat
     stream.close()
 
     lines = [json.loads(line) for line in report.read_text().splitlines()]
-    assert lines[0]["version"] == 3
+    assert lines[0]["version"] == 4
+    assert lines[0]["report_schema"] == "video-ingest-publication-v4"
+    assert lines[0]["producer"] == "video-ingest"
+    assert len(lines[0]["producer_instance_id"]) == 64
     assert lines[1]["source_lifecycle"] == "removed"
     assert lines[2]["source_lifecycle"] == "preserved"
     assert lines[2]["verification"] == "sha256"
     assert lines[2]["source_sha256"] == "a" * 64
     assert lines[-1]["status"] == "completed"
+
+
+def test_stream_report_is_published_atomically_only_when_finalized(tmp_path: Path) -> None:
+    report = tmp_path / "atomic.json"
+    stream = open_report_stream(report, mode="apply", copy_mode=True)
+    stream.append(MovePlan(tmp_path / "source", tmp_path / "destination", "apply", "movie", {}))
+
+    assert not report.exists()
+    assert len(list(tmp_path.glob(".atomic.json.*.partial"))) == 1
+
+    stream.finalize()
+    stream.close()
+
+    assert report.exists()
+    assert list(tmp_path.glob(".atomic.json.*.partial")) == []
 
 
 def test_undo_move_restores_file(tmp_path: Path):

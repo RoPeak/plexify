@@ -20,6 +20,7 @@ from rich.prompt import Prompt
 from rich.table import Table
 from rich.tree import Tree
 
+from . import __version__
 from .cache import Cache, NullCache
 from .configuration import ConfigurationError, VideoConfig, format_effective_config, load_config, state_paths
 from .preflight import PreflightError, validate_paths
@@ -1856,15 +1857,22 @@ def _apply_with_streamed_report(
 ) -> ExecutionResult:
     stream = open_report_stream(report_path, mode="apply", copy_mode=copy_mode)
     try:
-        result = _apply_with_progress(
-            plans,
-            copy_mode=copy_mode,
-            on_conflict=on_conflict,
-            on_applied=stream.append,
-        )
+        try:
+            result = _apply_with_progress(
+                plans,
+                copy_mode=copy_mode,
+                on_conflict=on_conflict,
+                on_applied=stream.append,
+            )
+        except KeyboardInterrupt:
+            stream.finalize(status="cancelled")
+            raise
+        except Exception:
+            stream.finalize(status="failed")
+            raise
         for duplicate in verified_existing or []:
             stream.append_verified_existing(duplicate)
-        stream.finalize()
+        stream.finalize(status="failed" if result.errors else "completed")
         return result
     finally:
         stream.close()
@@ -3177,8 +3185,24 @@ def cache_delete(
     raise typer.Exit(code=0)
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"video-ingest {__version__}")
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
-def main(ctx: typer.Context) -> None:
+def main(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the installed version and exit.",
+    ),
+) -> None:
+    del version
     if ctx.invoked_subcommand is None:
         wizard(log_level="WARNING", log_format="text", log_file=None)
 

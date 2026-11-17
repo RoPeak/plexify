@@ -4,7 +4,6 @@ from typer.testing import CliRunner
 
 from plexify.cli import app
 
-
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 HELP_ENV = {"TERM": "dumb", "NO_COLOR": "1", "COLUMNS": "120"}
 
@@ -30,6 +29,12 @@ def test_cli_help():
     assert "organise" in result.output
     assert "music" in result.output
     assert "cache" in result.output
+
+
+def test_version_is_available_without_starting_wizard() -> None:
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "video-ingest 0.2.0"
 
 
 def test_organise_help():

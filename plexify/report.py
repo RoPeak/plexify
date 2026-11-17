@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .models import ReportPayload
+from .provenance import machine_instance_id
 from .util import MovePlan, ensure_dir, json_dump
 
 
@@ -18,7 +23,8 @@ class ReportStream:
         self.mode = mode
         self.copy_mode = copy_mode
         ensure_dir(path.parent)
-        self._handle = path.open("w", encoding="utf-8", newline="\n")
+        self._temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.partial")
+        self._handle = self._temporary.open("x", encoding="utf-8", newline="\n")
         self._operations = 0
         self._header_written = False
         self._closed = False
@@ -31,7 +37,19 @@ class ReportStream:
     def _write_header(self) -> None:
         if self._header_written:
             return
-        self._write_line({"type": "header", "mode": self.mode, "copy": self.copy_mode, "version": 3})
+        self._write_line(
+            {
+                "type": "header",
+                "report_schema": "video-ingest-publication-v4",
+                "mode": self.mode,
+                "copy": self.copy_mode,
+                "version": 4,
+                "producer": "video-ingest",
+                "producer_version": __version__,
+                "producer_instance_id": machine_instance_id(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         self._header_written = True
 
     def append(self, plan: MovePlan) -> None:
@@ -75,10 +93,22 @@ class ReportStream:
         )
         self._operations += 1
 
-    def finalize(self) -> None:
+    def finalize(self, *, status: str = "completed") -> None:
         if self._closed:
             return
-        self._write_line({"type": "final", "operations": self._operations, "status": "completed"})
+        if status not in {"completed", "failed", "cancelled"}:
+            raise ValueError(f"unsupported report status: {status}")
+        self._write_line({"type": "final", "operations": self._operations, "status": status})
+        os.fsync(self._handle.fileno())
+        self._handle.close()
+        os.replace(self._temporary, self.path)
+        if hasattr(os, "O_DIRECTORY"):
+            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        self._closed = True
 
     def close(self) -> None:
         if self._closed:
@@ -154,7 +184,7 @@ def _parse_jsonl_report(text: str) -> ReportPayload:
             if not isinstance(row_copy, bool):
                 raise ReportFormatError("Report header has invalid copy flag.")
             row_version = row.get("version", 1)
-            if row_version not in {1, 2, 3}:
+            if row_version not in {1, 2, 3, 4}:
                 raise ReportFormatError("Report header has unsupported version.")
             mode = row_mode
             copy_mode = row_copy

@@ -431,20 +431,27 @@ def apply_with_streamed_report(
                     "message": "Organise report opened. Starting file operations.",
                 }
             )
-        result = execute_plans(
-            plans,
-            apply=True,
-            copy_mode=copy_mode,
-            on_conflict=on_conflict,
-            on_applied=stream.append,
-            on_plan_event=(
-                lambda payload: progress_callback({**payload, "report_path": report_path})
-                if progress_callback is not None
-                else None
-            ),
-            cancel_callback=cancel_callback,
-            copy_workers=copy_workers,
-        )
+        try:
+            result = execute_plans(
+                plans,
+                apply=True,
+                copy_mode=copy_mode,
+                on_conflict=on_conflict,
+                on_applied=stream.append,
+                on_plan_event=(
+                    lambda payload: progress_callback({**payload, "report_path": report_path})
+                    if progress_callback is not None
+                    else None
+                ),
+                cancel_callback=cancel_callback,
+                copy_workers=copy_workers,
+            )
+        except KeyboardInterrupt:
+            stream.finalize(status="cancelled")
+            raise
+        except Exception:
+            stream.finalize(status="failed")
+            raise
         completed_count = len(result.moved) + len(result.skipped) + len(result.errors)
         if progress_callback is not None:
             progress_callback(
@@ -456,7 +463,7 @@ def apply_with_streamed_report(
                     "message": "Finalizing organise report.",
                 }
             )
-        stream.finalize()
+        stream.finalize(status="failed" if result.errors else "completed")
         if progress_callback is not None:
             progress_callback(
                 {

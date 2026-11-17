@@ -33,6 +33,7 @@ After editable install, `video-ingest` is the preferred operator command. `plexi
 
 ```bash
 video-ingest --help
+video-ingest --version
 plexify --help
 ```
 
@@ -76,7 +77,7 @@ library = "/path/to/media/TV Shows"
 
 Explicit CLI options override config. Config overrides built-in defaults. The guided flow validates both roots before discovery, shows the complete source-to-destination plan and asks for a separate plan-level approval immediately before apply. COPY/PRESERVE is the default. MOVE removes incoming files only after successful publication and requires stronger confirmation; overwrite also requires its typed confirmation. No automatic cleanup is performed.
 
-Copies stage to a hidden `.plexify-<id>.tmp` sibling, verify completion by size, then publish atomically. New video state is outside media libraries: cache in `$XDG_CACHE_HOME/video-ingest/<library-id>/cache.json` (default `~/.cache`) and reports in `$XDG_STATE_HOME/video-ingest/<library-id>/reports` (default `~/.local/state`). Explicit cache/report paths still work. Existing legacy `.plexify` files are not deleted or migrated automatically. A legacy cache can still be inspected explicitly with `--cache PATH`; new runs use the separate XDG cache. `video-ingest undo --library PATH` searches the library-scoped XDG reports first, then legacy reports; `--report` selects an exact report.
+Copies stage to a hidden `.plexify-<id>.tmp` sibling, verify completion by size, then publish atomically. New video state is outside media libraries: cache in `$XDG_CACHE_HOME/video-ingest/<library-id>/cache.json` (default `~/.cache`) and reports in `$XDG_STATE_HOME/video-ingest/<library-id>/reports` (default `~/.local/state`). Successful APPLY reports use `video-ingest-publication-v4`, include producer/version and a non-secret machine-instance identifier, and remain hidden as `.partial` files until a completed, failed, or cancelled final record has been flushed and atomically published. Explicit cache/report paths still work. Existing legacy `.plexify` files are not deleted or migrated automatically. A legacy cache can still be inspected explicitly with `--cache PATH`; new runs use the separate XDG cache. `video-ingest undo --library PATH` searches the library-scoped XDG reports first, then legacy reports; `--report` selects an exact report.
 
 ## Quick start
 

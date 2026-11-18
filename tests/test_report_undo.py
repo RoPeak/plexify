@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from plexify.report import open_report_stream, read_report, write_report
 from plexify.undo import undo_report
 from plexify.util import MovePlan
@@ -48,6 +50,32 @@ def test_stream_report_is_published_atomically_only_when_finalized(tmp_path: Pat
 
     assert report.exists()
     assert list(tmp_path.glob(".atomic.json.*.partial")) == []
+
+
+def test_stream_report_refuses_existing_final_path(tmp_path: Path) -> None:
+    report = tmp_path / "existing.json"
+    report.write_text("original")
+
+    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+        open_report_stream(report, "apply", True)
+
+    assert report.read_text() == "original"
+
+
+def test_stream_report_collision_at_finalize_preserves_both_records(
+    tmp_path: Path,
+) -> None:
+    report = tmp_path / "raced.json"
+    stream = open_report_stream(report, "apply", True)
+    report.write_text("other process")
+
+    with pytest.raises(FileExistsError):
+        stream.finalize()
+
+    assert report.read_text() == "other process"
+    partials = list(tmp_path.glob(".raced.json.*.partial"))
+    assert len(partials) == 1
+    assert '"status": "completed"' in partials[0].read_text()
 
 
 def test_undo_move_restores_file(tmp_path: Path):

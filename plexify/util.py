@@ -251,7 +251,7 @@ def json_dump(path: Path, data: dict[str, Any]) -> None:
 
 
 def now_timestamp() -> str:
-    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
 
 
 def _natural_component_key(value: str) -> tuple[tuple[int, int | str], ...]:

@@ -23,6 +23,8 @@ class ReportStream:
         self.mode = mode
         self.copy_mode = copy_mode
         ensure_dir(path.parent)
+        if path.exists() or path.is_symlink():
+            raise FileExistsError(f"Refusing to overwrite existing report: {path}")
         self._temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.partial")
         self._handle = self._temporary.open("x", encoding="utf-8", newline="\n")
         self._operations = 0
@@ -101,14 +103,19 @@ class ReportStream:
         self._write_line({"type": "final", "operations": self._operations, "status": status})
         os.fsync(self._handle.fileno())
         self._handle.close()
-        os.replace(self._temporary, self.path)
+        self._closed = True
+        # A hard-link publication is atomic and fails if another process has
+        # claimed the final name. Both paths are in the same directory, so it
+        # cannot cross filesystems. Preserve the completed hidden report if a
+        # collision occurs so successful operations do not lose provenance.
+        os.link(self._temporary, self.path)
+        self._temporary.unlink()
         if hasattr(os, "O_DIRECTORY"):
             directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(directory)
             finally:
                 os.close(directory)
-        self._closed = True
 
     def close(self) -> None:
         if self._closed:
